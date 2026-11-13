@@ -4885,11 +4885,14 @@ class MainActivity : AppCompatActivity() {
         // comparable strings: no per-item allocation, no resource lookups.
         fun refilter() {
             filteredList.clear()
-            for (app in allApps) {
-                if (currentQuery.isNotEmpty() &&
-                    !app.labelLower.contains(currentQuery) &&
-                    !app.packageLower.contains(currentQuery)) continue
-                filteredList.add(app)
+            for (selected in listOf(true, false)) {
+                for (app in allApps) {
+                    if (tempSelected.contains(app.packageName) != selected) continue
+                    if (currentQuery.isNotEmpty() &&
+                        !app.labelLower.contains(currentQuery) &&
+                        !app.packageLower.contains(currentQuery)) continue
+                    filteredList.add(app)
+                }
             }
         }
         refilter()
@@ -5025,6 +5028,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 tempSelected.add(entry.packageName)
             }
+            refilter()
             adapter.notifyDataSetChanged()
         }
 

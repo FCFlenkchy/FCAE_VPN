@@ -1044,8 +1044,10 @@ impl Upstream {
                     return Err(error);
                 }
             };
+            let started = Instant::now();
             match tokio::time::timeout(self.timeout, session.open_tcp(target)).await {
                 Ok(Ok(stream)) => {
+                    self.traffic.record_rtt(started.elapsed());
                     self.report_tunnel_protocol(true);
                     return Ok(Box::new(stream));
                 }

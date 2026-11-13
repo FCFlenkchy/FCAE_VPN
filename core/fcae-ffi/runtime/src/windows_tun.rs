@@ -77,10 +77,23 @@ fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
         return Err(CoreError::InvalidConfig("invalid TUN adapter name".into()));
     }
     let deadline = Instant::now() + Duration::from_secs(10);
-    let luid = loop {
+    // Every engine pins the Wintun adapter to the shared requested GUID, so
+    // the GUID is the stable identity even if display-name duplicates exist.
+    // Fall back to the engine-provided adapter name only when the requested
+    // GUID was not honoured at creation (best-effort by Wintun).
+    let (luid, via_guid) = loop {
+        let mut luid = NET_LUID_LH::default();
+        let code = unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) };
+        if code == 0 {
+            break (luid, true);
+        }
         match crate::windows_dll::wintun_adapter_luid(name) {
-            Ok(luid) => break luid,
-            Err(error) if Instant::now() >= deadline => return Err(error),
+            Ok(luid) => break (luid, false),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(CoreError::Internal(format!(
+                    "no TUN adapter with the FCAE GUID (Win32 {code}); adapter named {name} also not found: {error}"
+                )))
+            }
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }
     };
@@ -90,10 +103,13 @@ fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
         checked(ConvertInterfaceLuidToGuid(&luid, &mut guid), "query TUN GUID")?;
         checked(ConvertInterfaceLuidToIndex(&luid, &mut index), "query TUN index")?;
     }
-    if guid.data1 != ADAPTER_GUID.data1 || guid.data2 != ADAPTER_GUID.data2
-        || guid.data3 != ADAPTER_GUID.data3 || guid.data4 != ADAPTER_GUID.data4 {
-        log::info!("[tun] Wintun returned a different interface GUID for {name}; using its actual identity");
+    if !via_guid {
+        if guid.data1 != ADAPTER_GUID.data1 || guid.data2 != ADAPTER_GUID.data2
+            || guid.data3 != ADAPTER_GUID.data3 || guid.data4 != ADAPTER_GUID.data4 {
+            log::info!("[tun] Wintun returned a different interface GUID for {name}; using its actual identity");
+        }
     }
+    log::info!("[tun] resolved TUN adapter '{}' (interface index {index},{})", name, if via_guid { " GUID match" } else { " by name" });
     Ok((luid, index, guid))
 }
 
@@ -239,6 +255,40 @@ impl TunGuard {
         guard.add_address(luid, address4)?;
         if ipv6_available {
             if let Some(address6) = address6 { guard.add_address(luid, address6)?; }
+        }
+        // On-link route for the tunnel's own subnet, the way wg-quick pins it,
+        // created together with the interface so the tunnel gateway address is
+        // reachable through the device instead of falling back to the default.
+        {
+            let mut local_subnets = vec![address4];
+            if ipv6_available {
+                if let Some(address6) = address6 { local_subnets.push(address6); }
+            }
+            for (ip, bits) in local_subnets {
+                if bits == 0 { continue; }
+                let network = match ip {
+                    IpAddr::V4(v4) => {
+                        let raw = u32::from_be_bytes(v4.octets());
+                        let mask = if bits >= 32 { u32::MAX } else { !0u32 << (32 - bits) };
+                        IpAddr::V4(Ipv4Addr::from((raw & mask).to_be_bytes()))
+                    }
+                    IpAddr::V6(v6) => {
+                        let raw = u128::from_be_bytes(v6.octets());
+                        let mask = if bits >= 128 { u128::MAX } else { !0u128 << (128 - bits) };
+                        IpAddr::V6(Ipv6Addr::from((raw & mask).to_be_bytes()))
+                    }
+                };
+                let mut row = MIB_IPFORWARD_ROW2::default();
+                unsafe { InitializeIpForwardEntry(&mut row); }
+                row.InterfaceLuid = luid;
+                row.InterfaceIndex = index;
+                row.DestinationPrefix.Prefix = sockaddr(network);
+                row.DestinationPrefix.PrefixLength = bits;
+                row.NextHop = sockaddr(if ip.is_ipv4() { Ipv4Addr::UNSPECIFIED.into() } else { Ipv6Addr::UNSPECIFIED.into() });
+                row.Metric = 0;
+                row.Protocol = MIB_IPPROTO_NETMGMT;
+                guard.add_route(row, true)?;
+            }
         }
 
         log::info!("[tun] configuring tunnel routes");

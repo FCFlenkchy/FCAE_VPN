@@ -189,6 +189,7 @@ impl HevSocks5TunnelBridge {
     fn signal_stop(&self) -> bool {
         let _enqueue = self.enqueue.lock();
         if !self.running.swap(false, Ordering::SeqCst) { return false; }
+        log::info!("[tun:hev] down");
         loaded().is_some_and(|rt| rt.calls.send(Call::Quit).is_ok())
     }
     fn reap_locked(slot: &mut Option<Active>) -> bool {
@@ -312,6 +313,12 @@ impl TunBridge for HevSocks5TunnelBridge {
             Some(socks5p::Adapter::start("hev", base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p: {e}")))?)
         } else { None };
         let socks = psiphon.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
+        // HEV can only create its adapter (it always passes the shared requested
+        // GUID); Wintun keeps one persistent device identity for that GUID, so
+        // the shared adapter is reused when it exists and created otherwise.
+        // The host-side guard resolves the adapter by GUID first.
+        #[cfg(windows)]
+        log::info!("[tun:hev] using shared Wintun adapter '{}' (GUID {})", cfg.tun.name, fcae_runtime::config::WINTUN_ADAPTER_GUID);
         let (_, yaml) = generate_config(cfg, socks)?;
         log::info!("[hev] launching engine thread");
         let engine = self.spawn_engine(rt, &yaml)?;
@@ -332,7 +339,7 @@ impl TunBridge for HevSocks5TunnelBridge {
             self.shutdown(RESTART_GRACE);
             return Err(e);
         }
-        log::info!("[hev] Windows TUN startup complete");
+        log::info!("[tun:hev] up (socks {}, mtu {})", socks, cfg.tun.mtu);
         Ok(())
     }
     /// Lock-free so a Disconnect never waits behind a start that is still

@@ -476,7 +476,7 @@ impl ZeptunBridge {
         };
         let mut active = self.active.lock();
         if active.is_some() {
-            log::warn!("[tun] start called while a device is already up; ignoring");
+            log::warn!("[tun:zeptun] start called while a device is already up; ignoring");
             return Ok(());
         }
         if self.closing.load(Ordering::SeqCst) {
@@ -671,7 +671,7 @@ impl ZeptunBridge {
         self.running.store(true, Ordering::SeqCst);
         *active = Some(handle);
         log::info!(
-            "[tun] up ({}, socks {}, mtu {})",
+            "[tun:zeptun] up ({}, socks {}, mtu {})",
             version(),
             socks,
             config.mtu
@@ -701,7 +701,7 @@ impl TunBridge for ZeptunBridge {
         drop(handle);
         self.running.store(false, Ordering::SeqCst);
         if was_up {
-            log::info!("[tun] down (zeptun)");
+            log::info!("[tun:zeptun] down");
         }
         self.external_fd.store(-1, Ordering::SeqCst);
     }

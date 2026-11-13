@@ -56,6 +56,8 @@ struct TunEngines {
     hev: Arc<fcae_bridge_hev_socks5_tunnel::HevSocks5TunnelBridge>,
 }
 
+static LOGGED_TUN_ENGINE: Mutex<Option<config::TunEngine>> = Mutex::new(None);
+
 impl TunEngines {
     fn set_android_fd(&self, fd: i32) {
         #[cfg(feature = "tun")]
@@ -195,35 +197,51 @@ impl TunEngines {
         #[cfg(windows)]
         crash_log::watch_exceptions();
         log::info!("[tun] preparing {:?}", cfg.tun.engine);
-        // HEV may still be leaving its previous run after a bounded stop.
-        // Do not let another engine reuse its device or routes until cleanup
-        // has completed, even when the next engine is not HEV.
-        #[cfg(feature = "hev")]
-        self.hev.wait_for_cleanup()?;
-        if cancel.is_some_and(fcae_runtime::backend::CancelToken::is_cancelled) {
-            return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
-        }
-        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-        crash_log::record(match cfg.tun.engine {
-            config::TunEngine::Tun2socks => "tun2socks: starting\n",
-            config::TunEngine::Zeptun => "zeptun: starting\n",
-            config::TunEngine::Hev => "hev: starting\n",
-        });
-        let result = match cfg.tun.engine {
-            config::TunEngine::Tun2socks => self.t2s_start(cfg, endpoints),
-            config::TunEngine::Zeptun => self.zeptun_start(cfg, endpoints, cancel),
-            config::TunEngine::Hev => self.hev_start(cfg, endpoints),
+        let name = match cfg.tun.engine {
+            config::TunEngine::Tun2socks => "tun2socks",
+            config::TunEngine::Zeptun => "zeptun",
+            config::TunEngine::Hev => "hev",
         };
-        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-        crash_log::record(match (cfg.tun.engine, result.is_ok()) {
-            (config::TunEngine::Tun2socks, true) => "tun2socks: started\n",
-            (config::TunEngine::Tun2socks, false) => "tun2socks: start failed\n",
-            (config::TunEngine::Zeptun, true) => "zeptun: started\n",
-            (config::TunEngine::Zeptun, false) => "zeptun: start failed\n",
-            (config::TunEngine::Hev, true) => "hev: started\n",
-            (config::TunEngine::Hev, false) => "hev: start failed\n",
-        });
-        if let Err(error) = &result { log::error!("[tun] {:?} start failed: {error}", cfg.tun.engine); }
+        log::info!("[tun:{name}] starting: interface={}, mtu={}, socks={:?}",
+            cfg.tun.name, cfg.tun.mtu, endpoints.socks);
+        let result = (|| {
+            // HEV may still be leaving its previous run after a bounded stop.
+            // Do not let another engine reuse its device or routes until cleanup
+            // has completed, even when the next engine is not HEV.
+            #[cfg(feature = "hev")]
+            self.hev.wait_for_cleanup()?;
+            if cancel.is_some_and(fcae_runtime::backend::CancelToken::is_cancelled) {
+                return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
+            }
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+            crash_log::record(match cfg.tun.engine {
+                config::TunEngine::Tun2socks => "tun2socks: starting\n",
+                config::TunEngine::Zeptun => "zeptun: starting\n",
+                config::TunEngine::Hev => "hev: starting\n",
+            });
+            let result = match cfg.tun.engine {
+                config::TunEngine::Tun2socks => self.t2s_start(cfg, endpoints),
+                config::TunEngine::Zeptun => self.zeptun_start(cfg, endpoints, cancel),
+                config::TunEngine::Hev => self.hev_start(cfg, endpoints),
+            };
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+            crash_log::record(match (cfg.tun.engine, result.is_ok()) {
+                (config::TunEngine::Tun2socks, true) => "tun2socks: started\n",
+                (config::TunEngine::Tun2socks, false) => "tun2socks: start failed\n",
+                (config::TunEngine::Zeptun, true) => "zeptun: started\n",
+                (config::TunEngine::Zeptun, false) => "zeptun: start failed\n",
+                (config::TunEngine::Hev, true) => "hev: started\n",
+                (config::TunEngine::Hev, false) => "hev: start failed\n",
+            });
+            result
+        })();
+        match &result {
+            Ok(()) => {
+                *LOGGED_TUN_ENGINE.lock() = Some(cfg.tun.engine);
+                log::info!("[tun:{name}] started");
+            }
+            Err(error) => log::error!("[tun:{name}] start failed: {error}"),
+        }
         result
     }
 
@@ -239,6 +257,15 @@ impl TunBridge for TunEngines {
     }
 
     fn stop(&self, timeout: std::time::Duration) {
+        let stopping = { LOGGED_TUN_ENGINE.lock().take() };
+        if let Some(engine) = stopping {
+            let name = match engine {
+                config::TunEngine::Tun2socks => "tun2socks",
+                config::TunEngine::Zeptun => "zeptun",
+                config::TunEngine::Hev => "hev",
+            };
+            log::info!("[tun:{name}] stopping");
+        }
         #[cfg(feature = "tun")]
         self.t2s.stop(timeout);
         #[cfg(feature = "zeptun")]

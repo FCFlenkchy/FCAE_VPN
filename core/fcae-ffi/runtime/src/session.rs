@@ -697,12 +697,21 @@ async fn run_session(
             debug_assert!(!tun_bridge.is_running(), "proxy mode must never leave a TUN device up");
         }
 
+        // Publish the already-measured Firefox CONNECT before Connected so
+        // the first UI snapshot does not need to wait for the counter pump.
+        let chained = !config.chain.is_empty();
+        if config.exit_backend() == FcaeBackend::Firefox {
+            let mut counters = handles[0].counters();
+            if chained {
+                counters.rtt_ms = handles.last().map_or(0, |exit| exit.counters().rtt_ms);
+            }
+            sink.set_counters(counters);
+        }
         sink.set_state(
             FcaeState::Connected,
             format!("Connected ({} {})", route_name(&config), if config.mode == FcaeMode::Tun { "TUN" } else { "Proxy" }),
         );
 
-        let chained = !config.chain.is_empty();
         let carrier_wait_handle = handles[0].clone();
         let carrier_ended = async move { carrier_wait_handle.wait().await };
         let pump_handle = handles[0].clone();

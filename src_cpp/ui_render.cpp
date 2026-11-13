@@ -64,13 +64,24 @@ static std::vector<int> parse_chain_transports(const std::string& value) {
 AppState g_app;
 static uint64_t s_save_status_revision = 0;
 static uint64_t s_save_status_painted_revision = 0;
+static bool s_save_status_error = false;
 
+static void set_save_status_v(bool error, const char* format, va_list args) {
+    vsnprintf(g_app.save_status, sizeof(g_app.save_status), format, args);
+    s_save_status_error = error;
+    ++s_save_status_revision;
+}
 static void set_save_status(const char* format, ...) {
     va_list args;
     va_start(args, format);
-    vsnprintf(g_app.save_status, sizeof(g_app.save_status), format, args);
+    set_save_status_v(false, format, args);
     va_end(args);
-    ++s_save_status_revision;
+}
+static void set_save_status_error(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    set_save_status_v(true, format, args);
+    va_end(args);
 }
 static bool s_loaded_chain_transports = false;
 static bool s_loaded_socks_port = false;
@@ -616,6 +627,7 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.routes_file);
     h = fnv_cstr(h, g_app.routes_inline);
     h = fnv_cstr(h, g_app.save_status);
+    h = fnv_value(h, s_save_status_error);
     h = fnv_cstr(h, g_app.copy_status);
     h = fnv_value(h, g_app.start_busy.load());
 
@@ -723,6 +735,7 @@ static void expire_save_status(double now) {
     }
     if (deadline && now >= deadline) {
         g_app.save_status[0] = 0;
+        s_save_status_error = false;
         deadline = 0.0;
     }
 }
@@ -773,7 +786,7 @@ bool ui_should_render(bool interacting) {
         (g_app.save_status[0] && s_save_status_painted_revision != s_save_status_revision)) return true;
 
     // The user is interacting: paint every frame the caller offers (hover,
-    // drag, typing, scroll). The platform caps this at ~30 FPS.
+    // drag, typing, scroll). The platform limits the frame rate.
     if (interacting) return true;
 
     // Spinner/connect animation is running: it moves on its own.
@@ -787,6 +800,8 @@ bool ui_should_render(bool interacting) {
 
 unsigned ui_sleep_ms() {
     const bool focused = s_ui_window_focused.load();
+    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Starting)
+        return 16;
     if (s_busy_anim || (s_sponsor.available && s_sponsor.animated))
         return focused ? kUiFrameIntervalMs : 2 * kUiFrameIntervalMs;
     if (!focused) return kUiUnfocusedIntervalMs;
@@ -798,7 +813,6 @@ void ui_note_frame_drawn() {
     if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready)
         s_painted_sig = ui_content_signature();
     s_painted_once = true;
-    g_app.redraw_requested.store(false);
     // A callback during the frame may have missed the rendered snapshot while
     // already being included in the painted signature above.
     if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready) {
@@ -1247,6 +1261,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
 }
 
 static bool s_config_needs_retry = false;
+static bool s_config_load_failed = false;
 
 static bool save_config(bool quiet = false) {
     const std::string path = get_config_path();
@@ -1254,7 +1269,7 @@ static bool save_config(bool quiet = false) {
     FILE* f = open_cfg(temporary, "wb");
     if (!f) {
         s_config_needs_retry = true;
-        set_save_status("Save failed");
+        set_save_status_error("Save failed");
         g_app.add_log(1, ("[ui] save failed: " + path).c_str());
         return false;
     }
@@ -1373,7 +1388,7 @@ static bool save_config(bool quiet = false) {
 #endif
     if (!replaced) {
         s_config_needs_retry = true;
-        set_save_status("Save failed");
+        set_save_status_error("Save failed");
         g_app.add_log(1, ("[ui] save failed: " + path).c_str());
         return false;
     }
@@ -1411,8 +1426,9 @@ static void autosave_config(double now) {
 }
 
 static bool load_config_from(const std::string& path) {
+    s_config_load_failed = false;
     FILE* f = open_cfg(path, "rb");
-    if (!f) return false;
+    if (!f) { s_config_load_failed = file_exists(path); return false; }
 
     static char line[8192];
     s_loaded_chain_transports = false;
@@ -1456,7 +1472,7 @@ static bool load_config_from(const std::string& path) {
     }
     fclose(f);
 
-    if (applied == 0) return false;
+    if (applied == 0) { s_config_load_failed = true; return false; }
     if (!s_loaded_firefox_socks_enabled) g_app.firefox_socks_enabled = g_app.socks_enabled;
     if (!s_loaded_unified_firefox_http && !s_loaded_firefox_http_enabled)
         g_app.firefox_http_enabled = g_app.http_enabled;
@@ -1489,7 +1505,6 @@ static bool load_config_from(const std::string& path) {
             return transport < 0 || transport > 10;
         }),
         g_app.chain_transports.end());
-    set_save_status("Config loaded!");
     g_app.add_log(4, ("[ui] config loaded (" + std::to_string(applied) + " keys): " + path).c_str());
     return true;
 }
@@ -1702,11 +1717,17 @@ void ui_init() {
         }
 #endif
         if (!load_config()) {
-            // First run: write defaults next to the executable (or app files on
-            // Android). AppState defaults mode = 1, so a fresh install starts in
-            // TUN (full-system) mode on every desktop platform; a saved config
-            // keeps whatever the user last chose.
-            if (save_config()) {
+            if (s_config_load_failed) {
+                // The file is there but none of it could be applied; don't
+                // pretend this was a fresh install.
+                set_save_status_error("Couldn't load config (invalid or unreadable)");
+                g_app.add_log(1, ("[ui] couldn't load config (invalid or unreadable): "
+                                  + resolve_config_path_for_load()).c_str());
+            } else if (save_config()) {
+                // First run: write defaults next to the executable (or app files on
+                // Android). AppState defaults mode = 1, so a fresh install starts in
+                // TUN (full-system) mode on every desktop platform; a saved config
+                // keeps whatever the user last chose.
                 set_save_status("Created FCAE_VPN.cfg");
                 g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
             }
@@ -1752,7 +1773,7 @@ static void render_startup_shell(bool failed) {
     ImGui::Spacing();
     ImGui::TextColored(failed ? ImVec4(0.9f, 0.25f, 0.25f, 1.0f)
                               : ImVec4(0.55f, 0.58f, 0.65f, 1.0f),
-                       failed ? "INITIALIZATION FAILED" : "DISCONNECTED");
+                       failed ? "INITIALIZATION FAILED" : "INITIALIZING...");
     ImGui::BeginDisabled();
     ImGui::Button(" CONNECT ", ImVec2(140, 34));
     ImGui::EndDisabled();
@@ -1760,6 +1781,9 @@ static void render_startup_shell(bool failed) {
 }
 
 void ui_frame() {
+    // Consume the request before drawing so a request arriving during this
+    // frame (including initialization completing) remains pending.
+    g_app.redraw_requested.exchange(false);
     // The update panel sets this again below when a check is running; resetting
     // it first keeps the flag honest on frames that return early.
     s_update_in_progress = false;
@@ -1769,10 +1793,6 @@ void ui_frame() {
         render_startup_shell(init == RuntimeInitState::Failed);
         s_busy_anim = false;
         s_painted_once = true;
-        // Preserve a completion redraw if initialization finished while this
-        // bootstrap frame was being built.
-        g_app.redraw_requested.store(
-            s_runtime_init.load(std::memory_order_acquire) != init);
         return;
     }
 
@@ -1791,6 +1811,8 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
+    // The initializer owns the runtime and AppState until it has finished.
+    if (s_runtime_init_thread.joinable()) s_runtime_init_thread.join();
     fcae_ui_diagnostic(5, 0);
     fcae_sponsor_set_ui_active(false);
     s_sponsor_rgba.clear();
@@ -1799,9 +1821,6 @@ void ui_shutdown() {
     s_sponsor_background_rgba.shrink_to_fit();
     s_sponsor_loaded_foreground_generation = 0;
     s_sponsor_loaded_background_generation = 0;
-    // Initialization may still own AppState and the runtime. Join it before
-    // teardown so neither configuration state nor FFI lifetime can race exit.
-    if (s_runtime_init_thread.joinable()) s_runtime_init_thread.join();
     if (s_config_tracking && (s_config_needs_retry || config_signature() != s_config_persisted)) save_config(true);
 
     // fcae_shutdown() stops any running session and then waits (bounded) for
@@ -3242,353 +3261,11 @@ void render_ui() {
             s_about_popup_open = true;
 
         ImGui::Spacing();
-
-        const bool tun_paused = s_tun_paused;
-
-        ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
-        ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
-        ImGui::PushStyleColor(ImGuiCol_Button, btn);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btn_h);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(btn.x - 0.05f, btn.y - 0.05f, btn.z - 0.05f, 1.0f));
-
-        float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 130.0f;
-        bool show_disconnect = connected || busy || tun_paused;
-        if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 32))) {
-            if (connected || busy || errored || tun_paused) {
-                g_app.start_busy.store(false);
-                // Cut the data plane on this click before thread scheduling can
-                // delay it. Full route/DNS/backend cleanup remains asynchronous.
-                if (fcae_stop_begin() != FCAE_OK) {
-                    g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
-                }
-                std::thread([] {
-                    if (fcae_stop() != FCAE_OK) {
-                        g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
-                    }
-                    g_app.ffi_state.store(FCAE_STATE_DISCONNECTED);
-                    ui_request_redraw();
-                }).detach();
-            } else if (!g_app.start_busy.load()) {
-                fcae_ui_diagnostic(1, (uint32_t(g_app.mode) << 16) | uint32_t(g_app.tun_engine));
-                const auto has_hop = [](int transport) {
-                    return std::find(g_app.chain_transports.begin(), g_app.chain_transports.end(), transport) != g_app.chain_transports.end();
-                };
-                const bool uses_tor = (g_app.backend == 0 && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)) || has_hop(4);
-                const bool uses_psi = g_app.backend == 1 || has_hop(5) || g_app.tor_mode == 3;
-                const bool uses_firefox = g_app.backend == 2 || has_hop(10);
-                const bool psi_carrier = !g_app.chain_transports.empty() &&
-                    (g_app.backend == 1 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end() - 1, 5) != g_app.chain_transports.end() - 1);
-                const bool firefox_carrier = !g_app.chain_transports.empty() &&
-                    (g_app.backend == 2 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end() - 1, 10) != g_app.chain_transports.end() - 1);
-                bool uses_aether = g_app.backend == 0 && g_app.protocol != 4;
-                for (int t : g_app.chain_transports) if (t != 4 && t != 5 && t != 10) uses_aether = true;
-                const char* disabled = uses_tor && !g_app.tor_socks_enabled ? "Tor SOCKS5" :
-                    psi_carrier && !g_app.psiphon_socks_enabled ? "Psiphon SOCKS5" :
-                    firefox_carrier && !g_app.firefox_socks_enabled ? "Firefox SOCKS5" :
-                    uses_psi && !g_app.psiphon_socks_enabled && !g_app.psiphon_http_enabled ? "Psiphon SOCKS5 or HTTP" :
-                    uses_psi && g_app.mode == 1 && (g_app.chain_transports.empty() ? g_app.backend == 1 : g_app.chain_transports.back() == 5) && !g_app.psiphon_socks_enabled ? "Psiphon SOCKS5" :
-                    uses_firefox && !g_app.firefox_socks_enabled && g_app.mode == 1 && g_app.final_listener_is_firefox() ? "Firefox SOCKS5" :
-                    uses_aether && !g_app.socks_enabled ? "Aether SOCKS5" : nullptr;
-                if (disabled) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg), "Cannot start: enable %s for this session.", disabled);
-                    g_app.add_log(FCAE_LOG_ERROR, msg);
-                    set_save_status("%s", msg);
-                    ImGui::PopStyleColor(3);
-                    ImGui::PopStyleVar(2);
-                    ImGui::PopStyleVar(2);
-                    ImGui::End();
-                    return;
-                }
-                // TUN mode requires admin privileges on Windows
-                if (g_app.mode == 1 && !fcae_is_privileged()) {
-#ifdef _WIN32
-                    // Save config then relaunch self as administrator.
-                    // The elevated instance will start fresh — user clicks CONNECT manually.
-                    save_config();
-                    wchar_t exe_path[MAX_PATH];
-                    GetModuleFileNameW(NULL, exe_path, MAX_PATH);
-
-                    SHELLEXECUTEINFOW sei = {};
-                    sei.cbSize = sizeof(sei);
-                    sei.lpVerb = L"runas";
-                    sei.lpFile = exe_path;
-                    wchar_t handoff_args[64];
-                    std::swprintf(handoff_args, 64, L"--fcae-wait-parent %lu", static_cast<unsigned long>(GetCurrentProcessId()));
-                    sei.lpParameters = handoff_args;
-                    sei.nShow = SW_NORMAL;
-                    sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
-                    fcae_ui_diagnostic(2, 0);
-                    if (ShellExecuteExW(&sei)) {
-                        // Successfully launched elevated copy — give it a moment
-                        // to take over the launcher slot and surface any UAC
-                        // prompt before we exit. Without this sleep, the
-                        // elevated process can race the parent teardown and
-                        // produce an orphaned elevated instance plus the
-                        // confusing "the app just quit" support report.
-                        // Log the relaunch too: the Logs tab then names the
-                        // elevated PID the session was handed to, and a later
-                        // bind failure has a breadcrumb.
-                        DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
-                        fcae_ui_diagnostic(3, child_pid);
-                        char msg[160];
-                        snprintf(msg, sizeof(msg),
-                            "[ui] TUN mode needs elevation -- relaunching elevated (PID %lu). "
-                            "The non-elevated copy will exit in ~700ms.",
-                            static_cast<unsigned long>(child_pid));
-                        if (sei.hProcess) CloseHandle(sei.hProcess);
-                        g_app.add_log(FCAE_LOG_INFO, msg);
-                        set_save_status(
-                            "Restarting elevated -- current copy will close");
-                        std::thread([] {
-                            // Hand-off window: enough for UAC to dismiss and
-                            // for the elevated copy to enter its message loop
-                            // before this instance's WM_DESTROY arrives.
-                            Sleep(700);
-                            g_app.running.store(false);
-                            PostQuitMessage(0);
-                        }).detach();
-                        ImGui::PopStyleColor(3);  // button colors
-                        ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
-                        ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
-                        ImGui::End();
-                        return;
-                    } else {
-                        // Say what happened rather than leaving TUN silently
-                        // "not working": the usual cause is a declined UAC
-                        // prompt, where GetLastError() is ERROR_CANCELLED.
-                        DWORD err = GetLastError();
-                        fcae_ui_diagnostic(4, err);
-                        const char* why =
-                            err == ERROR_CANCELLED ? "UAC consent was cancelled"
-                            : err == ERROR_ACCESS_DENIED ? "access was denied"
-                            : err == ERROR_FILE_NOT_FOUND ? "the executable path is missing"
-                            : "ShellExecuteExW failed";
-                        char msg[160];
-                        snprintf(msg, sizeof(msg),
-                            "[ui] TUN mode requires Administrator privileges (%s, Win32 error %lu). "
-                            "Click CONNECT again, accept the UAC prompt, or restart FCAE VPN "
-                            "elevated once and the elevated copy will handle every future start.",
-                            why, static_cast<unsigned long>(err));
-                        g_app.add_log(FCAE_LOG_ERROR, msg);
-                        // The transient status is backed by the log entry above.
-                        set_save_status(
-                            "TUN needs Admin (error %lu) -- click CONNECT to retry UAC",
-                            static_cast<unsigned long>(err));
-                        ImGui::PopStyleColor(3);  // button colors
-                        ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
-                        ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
-                        ImGui::End();
-                        return;
-                    }
-#else
-                    g_app.add_log(FCAE_LOG_ERROR,
-                        "[ui] TUN mode requires root privileges on this platform. "
-                        "Restart the app with sudo (or as Administrator via pkexec/polkit) and try again.");
-                    set_save_status(
-                        "TUN needs root -- restart with sudo");
-                    ImGui::PopStyleColor(3);  // button colors
-                    ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
-                    ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
-                    ImGui::End();
-                    return;
-#endif
-                }
-                g_app.start_busy.store(true);
-                // Snapshot config + own string storage for the worker thread.
-                struct Owned {
-                    std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
-                    std::string ech_dns, ech_domain, gool_inner, tls_ciphers, api_address, api_host, api_sni, exit_loc;
-                    std::string tls_groups, tls13_ciphers, tls_key_shares, tls_sigalgs, tls_cert_compression;
-                    std::string tls_alps, tls_trust_anchors, tls_server_padding;
-                    std::string psi_json, psi_embedded, psi_dir, upstream;
-                    std::string root, firefox_account, firefox_location, firefox_server;
-                    FcaeConfig c{};
-                };
-                // Use unique_ptr with a custom deleter that handles the
-                // case where fcae_start throws or the thread is killed.
-                auto o = std::unique_ptr<Owned, void(*)(Owned*)>(
-                    new Owned(),
-                    [](Owned* p) {
-                        g_app.start_busy.store(false);
-                        delete p;
-                    }
-                );
-                o->noize = g_app.noize_profile;
-                o->peer  = g_app.force_peer;
-                o->path  = resolve_data_path(g_app.config_path);
-                o->sni   = g_app.sni;
-                o->team  = g_app.team_name;
-                o->token = g_app.access_token;
-                o->email = g_app.access_email;
-                o->routes = resolve_data_path(g_app.routes_file);
-                o->psi_dir = resolve_data_path(g_app.psiphon_data_dir);
-                o->upstream = g_app.upstream_proxy;
-                o->root = data_dir();
-                o->firefox_account = g_app.firefox_account_id;
-                o->firefox_location = g_app.firefox_location;
-                o->firefox_server = g_app.firefox_server;
-                o->routes_inline = g_app.routes_inline;
-                o->ech_dns = g_app.ech_dns;
-                o->ech_domain = g_app.ech_domain;
-                o->gool_inner = g_app.gool_inner;
-                o->tls_ciphers = g_app.tls_ciphers;
-                o->api_address = g_app.api_address;
-                o->api_host = g_app.api_host;
-                o->api_sni = g_app.api_sni;
-                o->exit_loc = g_app.exit_loc;
-                o->tls_groups = g_app.tls_groups;
-                o->tls13_ciphers = g_app.tls13_ciphers;
-                o->tls_key_shares = g_app.tls_key_shares;
-                o->tls_sigalgs = g_app.tls_sigalgs;
-                o->tls_cert_compression = g_app.tls_cert_compression;
-                o->tls_alps = g_app.tls_alps;
-                o->tls_trust_anchors = g_app.tls_trust_anchors;
-                o->tls_server_padding = g_app.tls_server_padding;
-                o->c = g_app.to_config();
-                // to_config() built the JSON (with the server-entry fields
-                // merged in) into a g_app buffer; snapshot it, and read the
-                // embedded server entry list, so fcae_start only ever sees
-                // pointers owned by this worker.
-                o->psi_json = g_app.psiphon_config_json_built;
-                {
-                    // Auto-load psiphon_servers.txt
-                    // from the data folder when it exists and has
-                    // content: the drop-in bundled-entries slot. Put entries
-                    // you are ENTITLED to distribute there (your own servers
-                    // or Psiphon-Labs provisioning) — never entries extracted
-                    // from other clients; redistributing the Psiphon
-                    // network's server addresses unprovisioned is what gets
-                    // repositories taken down.
-                    std::string bundled = join_path(data_dir(), "psiphon_servers.txt");
-                    if (FILE* f = open_cfg(bundled, "rb")) {
-                        char chunk[16384];
-                        size_t n;
-                        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0)
-                            o->psi_embedded.append(chunk, n);
-                        fclose(f);
-                        if (!o->psi_embedded.empty()) {
-                            g_app.add_log(3, ("[ui] psiphon embedded server list: " +
-                                              std::to_string(o->psi_embedded.size()) +
-                                              " bytes from " + bundled).c_str());
-                        }
-                    }
-                    if (o->psi_embedded.empty()) {
-                        g_app.add_log(3,
-                            "[ui] psiphon has no embedded server entries; the core will "
-                            "fall back to its built-in legacy public remote server list");
-                    }
-                }
-                o->c.obfuscation.noize_profile = o->noize.c_str();
-                o->c.force_peer                = o->peer.empty() ? nullptr : o->peer.c_str();
-                o->c.config_path               = o->path.c_str();
-                o->c.data_dir                  = o->root.c_str();
-                o->c.firefox.account_id         = o->firefox_account.empty() ? nullptr : o->firefox_account.c_str();
-                o->c.firefox.location           = o->firefox_location.empty() ? nullptr : o->firefox_location.c_str();
-                o->c.firefox.server             = o->firefox_server.empty() ? nullptr : o->firefox_server.c_str();
-                o->c.dns.sni                   = o->sni.empty() ? nullptr : o->sni.c_str();
-                o->c.zero_trust.team_name      = o->team.empty() ? nullptr : o->team.c_str();
-                o->c.zero_trust.access_token   = o->token.empty() ? nullptr : o->token.c_str();
-                o->c.zero_trust.access_email   = o->email.empty() ? nullptr : o->email.c_str();
-                o->c.routing.rules_file        = o->routes.empty() ? nullptr : o->routes.c_str();
-                o->c.routing.rules_inline      = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
-                o->c.aether.ech_dns            = o->ech_dns.empty() ? nullptr : o->ech_dns.c_str();
-                o->c.aether.ech_domain         = o->ech_domain.empty() ? nullptr : o->ech_domain.c_str();
-                o->c.aether.gool_inner         = o->gool_inner.empty() ? nullptr : o->gool_inner.c_str();
-                o->c.aether.tls_ciphers        = o->tls_ciphers.empty() ? nullptr : o->tls_ciphers.c_str();
-                o->c.aether.api_address        = o->api_address.empty() ? nullptr : o->api_address.c_str();
-                o->c.aether.api_host           = o->api_host.empty() ? nullptr : o->api_host.c_str();
-                o->c.aether.api_sni            = o->api_sni.empty() ? nullptr : o->api_sni.c_str();
-                o->c.aether.exit_loc           = o->exit_loc.empty() ? nullptr : o->exit_loc.c_str();
-                o->c.dns.tls_groups            = o->tls_groups.empty() ? nullptr : o->tls_groups.c_str();
-                o->c.aether.tls13_ciphers      = o->tls13_ciphers.empty() ? nullptr : o->tls13_ciphers.c_str();
-                o->c.aether.tls_key_shares     = o->tls_key_shares.empty() ? nullptr : o->tls_key_shares.c_str();
-                o->c.aether.tls_sigalgs        = o->tls_sigalgs.empty() ? nullptr : o->tls_sigalgs.c_str();
-                o->c.aether.tls_cert_compression = o->tls_cert_compression.empty() ? nullptr : o->tls_cert_compression.c_str();
-                o->c.aether.tls_alps           = o->tls_alps.empty() ? nullptr : o->tls_alps.c_str();
-                o->c.aether.tls_trust_anchors  = o->tls_trust_anchors.empty() ? nullptr : o->tls_trust_anchors.c_str();
-                o->c.aether.tls_server_padding = o->tls_server_padding.empty() ? nullptr : o->tls_server_padding.c_str();
-                o->c.psiphon.config_json          = o->psi_json.c_str();
-                o->c.psiphon.data_root_dir        = o->psi_dir.empty() ? nullptr : o->psi_dir.c_str();
-                o->c.upstream_proxy               = o->upstream.empty() ? nullptr : o->upstream.c_str();
-                o->c.psiphon.embedded_server_list =
-                    o->psi_embedded.empty() ? nullptr : o->psi_embedded.c_str();
-                auto* raw = o.release(); // transfer ownership to the thread
-                std::thread([raw] {
-                    // Wrap in a unique_ptr again so the custom deleter
-                    // fires on scope exit (even if fcae_start throws).
-                    std::unique_ptr<Owned, void(*)(Owned*)> guard(
-                        raw, [](Owned* p) {
-                            g_app.start_busy.store(false);
-                            delete p;
-                        }
-                    );
-                    // Every failure mode now has a specific, user-facing
-                    // reason instead of a bare false.
-                    if (fcae_start(&guard->c) != FCAE_OK) {
-                        g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
-                        ui_request_redraw();
-                    }
-                }).detach();
-            }
-        }
-        ImGui::PopStyleColor(3);
-
-        if (g_app.mode == 1 && (connected || tun_paused)) {
-            ImGui::SameLine(0, 6);
-            if (tun_paused) {
-                ImVec4 start_col(0.18f, 0.35f, 0.85f, 1.0f);
-                ImVec4 start_h(0.26f, 0.45f, 0.95f, 1.0f);
-                ImGui::PushStyleColor(ImGuiCol_Button, start_col);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
-                if (ImGui::Button(" START ", ImVec2(70, 32))) {
-                    std::thread([] {
-                        if (fcae_resume_tun() != FCAE_OK) {
-                            g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
-                        }
-                        ui_request_redraw();
-                    }).detach();
-                }
-                ImGui::PopStyleColor(3);
-            } else {
-                ImVec4 stop_col(0.85f, 0.55f, 0.15f, 1.0f);
-                ImVec4 stop_h(0.95f, 0.65f, 0.25f, 1.0f);
-                ImGui::PushStyleColor(ImGuiCol_Button, stop_col);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
-                if (ImGui::Button(" STOP ", ImVec2(70, 32))) {
-                    std::thread([] {
-                        if (fcae_pause_tun() != FCAE_OK) {
-                            g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
-                        }
-                        ui_request_redraw();
-                    }).detach();
-                }
-                ImGui::PopStyleColor(3);
-            }
-        }
-
-        ImGui::SameLine(0, 10);
-        ImGui::PushStyleColor(ImGuiCol_Text, sc);
-        if (errored && telem.last_error[0] && s_error_detail_visible) {
-            ImGui::Text("ERROR: %s", telem.last_error);
-        } else {
-            ImGui::Text("%s", state_label(cur));
-        }
-        ImGui::PopStyleColor();
-
-        if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
-
-        if (g_app.save_status[0]) {
-            ImGui::SameLine(0, 8);
-            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.save_status);
-            s_save_status_painted_revision = s_save_status_revision;
-        }
-
         {
+            // Right-aligned under the Info button.
+            const float update_right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+            ImGui::SetCursorPosX(update_right - 136.0f);
             float btn_width = 136.0f;
-            ImGui::SameLine(0, 12);
             ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
             FcaeUpdateInfo info = {};
             info.struct_size = sizeof(info);
@@ -3798,6 +3475,355 @@ void render_ui() {
                 ImGui::EndPopup();
             }
 
+        }
+
+
+        const bool tun_paused = s_tun_paused;
+
+        ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
+        ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, btn);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btn_h);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(btn.x - 0.05f, btn.y - 0.05f, btn.z - 0.05f, 1.0f));
+
+        float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 130.0f;
+        bool show_disconnect = connected || busy || tun_paused;
+        if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 32))) {
+            if (connected || busy || errored || tun_paused) {
+                g_app.start_busy.store(false);
+                // Cut the data plane on this click before thread scheduling can
+                // delay it. Full route/DNS/backend cleanup remains asynchronous.
+                if (fcae_stop_begin() != FCAE_OK) {
+                    g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+                }
+                std::thread([] {
+                    if (fcae_stop() != FCAE_OK) {
+                        g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+                    }
+                    g_app.ffi_state.store(FCAE_STATE_DISCONNECTED);
+                    ui_request_redraw();
+                }).detach();
+            } else if (!g_app.start_busy.load()) {
+                fcae_ui_diagnostic(1, (uint32_t(g_app.mode) << 16) | uint32_t(g_app.tun_engine));
+                const auto has_hop = [](int transport) {
+                    return std::find(g_app.chain_transports.begin(), g_app.chain_transports.end(), transport) != g_app.chain_transports.end();
+                };
+                const bool uses_tor = (g_app.backend == 0 && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)) || has_hop(4);
+                const bool uses_psi = g_app.backend == 1 || has_hop(5) || g_app.tor_mode == 3;
+                const bool uses_firefox = g_app.backend == 2 || has_hop(10);
+                const bool psi_carrier = !g_app.chain_transports.empty() &&
+                    (g_app.backend == 1 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end() - 1, 5) != g_app.chain_transports.end() - 1);
+                const bool firefox_carrier = !g_app.chain_transports.empty() &&
+                    (g_app.backend == 2 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end() - 1, 10) != g_app.chain_transports.end() - 1);
+                bool uses_aether = g_app.backend == 0 && g_app.protocol != 4;
+                for (int t : g_app.chain_transports) if (t != 4 && t != 5 && t != 10) uses_aether = true;
+                const char* disabled = uses_tor && !g_app.tor_socks_enabled ? "Tor SOCKS5" :
+                    psi_carrier && !g_app.psiphon_socks_enabled ? "Psiphon SOCKS5" :
+                    firefox_carrier && !g_app.firefox_socks_enabled ? "Firefox SOCKS5" :
+                    uses_psi && !g_app.psiphon_socks_enabled && !g_app.psiphon_http_enabled ? "Psiphon SOCKS5 or HTTP" :
+                    uses_psi && g_app.mode == 1 && (g_app.chain_transports.empty() ? g_app.backend == 1 : g_app.chain_transports.back() == 5) && !g_app.psiphon_socks_enabled ? "Psiphon SOCKS5" :
+                    uses_firefox && !g_app.firefox_socks_enabled && g_app.mode == 1 && g_app.final_listener_is_firefox() ? "Firefox SOCKS5" :
+                    uses_aether && !g_app.socks_enabled ? "Aether SOCKS5" : nullptr;
+                if (disabled) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg), "Cannot start: enable %s for this session.", disabled);
+                    g_app.add_log(FCAE_LOG_ERROR, msg);
+                    set_save_status_error("%s", msg);
+                    ImGui::PopStyleColor(3);
+                    ImGui::PopStyleVar(2);
+                    ImGui::PopStyleVar(2);
+                    ImGui::End();
+                    return;
+                }
+                // TUN mode requires admin privileges on Windows
+                if (g_app.mode == 1 && !fcae_is_privileged()) {
+#ifdef _WIN32
+                    // Save config then relaunch self as administrator.
+                    // The elevated instance will start fresh — user clicks CONNECT manually.
+                    save_config();
+                    wchar_t exe_path[MAX_PATH];
+                    GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+
+                    SHELLEXECUTEINFOW sei = {};
+                    sei.cbSize = sizeof(sei);
+                    sei.lpVerb = L"runas";
+                    sei.lpFile = exe_path;
+                    wchar_t handoff_args[64];
+                    std::swprintf(handoff_args, 64, L"--fcae-wait-parent %lu", static_cast<unsigned long>(GetCurrentProcessId()));
+                    sei.lpParameters = handoff_args;
+                    sei.nShow = SW_NORMAL;
+                    sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
+                    fcae_ui_diagnostic(2, 0);
+                    if (ShellExecuteExW(&sei)) {
+                        // Successfully launched elevated copy — give it a moment
+                        // to take over the launcher slot and surface any UAC
+                        // prompt before we exit. Without this sleep, the
+                        // elevated process can race the parent teardown and
+                        // produce an orphaned elevated instance plus the
+                        // confusing "the app just quit" support report.
+                        // Log the relaunch too: the Logs tab then names the
+                        // elevated PID the session was handed to, and a later
+                        // bind failure has a breadcrumb.
+                        DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
+                        fcae_ui_diagnostic(3, child_pid);
+                        char msg[160];
+                        snprintf(msg, sizeof(msg),
+                            "[ui] TUN mode needs elevation -- relaunching elevated (PID %lu). "
+                            "The non-elevated copy will exit in ~700ms.",
+                            static_cast<unsigned long>(child_pid));
+                        if (sei.hProcess) CloseHandle(sei.hProcess);
+                        g_app.add_log(FCAE_LOG_INFO, msg);
+                        set_save_status(
+                            "Restarting elevated -- current copy will close");
+                        std::thread([] {
+                            // Hand-off window: enough for UAC to dismiss and
+                            // for the elevated copy to enter its message loop
+                            // before this instance's WM_DESTROY arrives.
+                            Sleep(700);
+                            g_app.running.store(false);
+                            PostQuitMessage(0);
+                        }).detach();
+                        ImGui::PopStyleColor(3);  // button colors
+                        ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
+                        ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
+                        ImGui::End();
+                        return;
+                    } else {
+                        // Say what happened rather than leaving TUN silently
+                        // "not working": the usual cause is a declined UAC
+                        // prompt, where GetLastError() is ERROR_CANCELLED.
+                        DWORD err = GetLastError();
+                        fcae_ui_diagnostic(4, err);
+                        const char* why =
+                            err == ERROR_CANCELLED ? "UAC consent was cancelled"
+                            : err == ERROR_ACCESS_DENIED ? "access was denied"
+                            : err == ERROR_FILE_NOT_FOUND ? "the executable path is missing"
+                            : "ShellExecuteExW failed";
+                        char msg[160];
+                        snprintf(msg, sizeof(msg),
+                            "[ui] TUN mode requires Administrator privileges (%s, Win32 error %lu). "
+                            "Click CONNECT again, accept the UAC prompt, or restart FCAE VPN "
+                            "elevated once and the elevated copy will handle every future start.",
+                            why, static_cast<unsigned long>(err));
+                        g_app.add_log(FCAE_LOG_ERROR, msg);
+                        // The transient status is backed by the log entry above.
+                        set_save_status_error(
+                            "TUN needs Admin (error %lu) -- click CONNECT to retry UAC",
+                            static_cast<unsigned long>(err));
+                        ImGui::PopStyleColor(3);  // button colors
+                        ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
+                        ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
+                        ImGui::End();
+                        return;
+                    }
+#else
+                    g_app.add_log(FCAE_LOG_ERROR,
+                        "[ui] TUN mode requires root privileges on this platform. "
+                        "Restart the app with sudo (or as Administrator via pkexec/polkit) and try again.");
+                    set_save_status_error(
+                        "TUN needs root -- restart with sudo");
+                    ImGui::PopStyleColor(3);  // button colors
+                    ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
+                    ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
+                    ImGui::End();
+                    return;
+#endif
+                }
+                g_app.start_busy.store(true);
+                // Snapshot config + own string storage for the worker thread.
+                struct Owned {
+                    std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
+                    std::string ech_dns, ech_domain, gool_inner, tls_ciphers, api_address, api_host, api_sni, exit_loc;
+                    std::string tls_groups, tls13_ciphers, tls_key_shares, tls_sigalgs, tls_cert_compression;
+                    std::string tls_alps, tls_trust_anchors, tls_server_padding;
+                    std::string psi_json, psi_embedded, psi_dir, upstream;
+                    std::string root, firefox_account, firefox_location, firefox_server;
+                    FcaeConfig c{};
+                };
+                // Use unique_ptr with a custom deleter that handles the
+                // case where fcae_start throws or the thread is killed.
+                auto o = std::unique_ptr<Owned, void(*)(Owned*)>(
+                    new Owned(),
+                    [](Owned* p) {
+                        g_app.start_busy.store(false);
+                        delete p;
+                    }
+                );
+                o->noize = g_app.noize_profile;
+                o->peer  = g_app.force_peer;
+                o->path  = resolve_data_path(g_app.config_path);
+                o->sni   = g_app.sni;
+                o->team  = g_app.team_name;
+                o->token = g_app.access_token;
+                o->email = g_app.access_email;
+                o->routes = resolve_data_path(g_app.routes_file);
+                o->psi_dir = resolve_data_path(g_app.psiphon_data_dir);
+                o->upstream = g_app.upstream_proxy;
+                o->root = data_dir();
+                o->firefox_account = g_app.firefox_account_id;
+                o->firefox_location = g_app.firefox_location;
+                o->firefox_server = g_app.firefox_server;
+                o->routes_inline = g_app.routes_inline;
+                o->ech_dns = g_app.ech_dns;
+                o->ech_domain = g_app.ech_domain;
+                o->gool_inner = g_app.gool_inner;
+                o->tls_ciphers = g_app.tls_ciphers;
+                o->api_address = g_app.api_address;
+                o->api_host = g_app.api_host;
+                o->api_sni = g_app.api_sni;
+                o->exit_loc = g_app.exit_loc;
+                o->tls_groups = g_app.tls_groups;
+                o->tls13_ciphers = g_app.tls13_ciphers;
+                o->tls_key_shares = g_app.tls_key_shares;
+                o->tls_sigalgs = g_app.tls_sigalgs;
+                o->tls_cert_compression = g_app.tls_cert_compression;
+                o->tls_alps = g_app.tls_alps;
+                o->tls_trust_anchors = g_app.tls_trust_anchors;
+                o->tls_server_padding = g_app.tls_server_padding;
+                o->c = g_app.to_config();
+                // to_config() built the JSON (with the server-entry fields
+                // merged in) into a g_app buffer; snapshot it, and read the
+                // embedded server entry list, so fcae_start only ever sees
+                // pointers owned by this worker.
+                o->psi_json = g_app.psiphon_config_json_built;
+                {
+                    // Auto-load psiphon_servers.txt
+                    // from the data folder when it exists and has
+                    // content: the drop-in bundled-entries slot. Put entries
+                    // you are ENTITLED to distribute there (your own servers
+                    // or Psiphon-Labs provisioning) — never entries extracted
+                    // from other clients; redistributing the Psiphon
+                    // network's server addresses unprovisioned is what gets
+                    // repositories taken down.
+                    std::string bundled = join_path(data_dir(), "psiphon_servers.txt");
+                    if (FILE* f = open_cfg(bundled, "rb")) {
+                        char chunk[16384];
+                        size_t n;
+                        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0)
+                            o->psi_embedded.append(chunk, n);
+                        fclose(f);
+                        if (!o->psi_embedded.empty()) {
+                            g_app.add_log(3, ("[ui] psiphon embedded server list: " +
+                                              std::to_string(o->psi_embedded.size()) +
+                                              " bytes from " + bundled).c_str());
+                        }
+                    }
+                    if (o->psi_embedded.empty()) {
+                        g_app.add_log(3,
+                            "[ui] psiphon has no embedded server entries; the core will "
+                            "fall back to its built-in legacy public remote server list");
+                    }
+                }
+                o->c.obfuscation.noize_profile = o->noize.c_str();
+                o->c.force_peer                = o->peer.empty() ? nullptr : o->peer.c_str();
+                o->c.config_path               = o->path.c_str();
+                o->c.data_dir                  = o->root.c_str();
+                o->c.firefox.account_id         = o->firefox_account.empty() ? nullptr : o->firefox_account.c_str();
+                o->c.firefox.location           = o->firefox_location.empty() ? nullptr : o->firefox_location.c_str();
+                o->c.firefox.server             = o->firefox_server.empty() ? nullptr : o->firefox_server.c_str();
+                o->c.dns.sni                   = o->sni.empty() ? nullptr : o->sni.c_str();
+                o->c.zero_trust.team_name      = o->team.empty() ? nullptr : o->team.c_str();
+                o->c.zero_trust.access_token   = o->token.empty() ? nullptr : o->token.c_str();
+                o->c.zero_trust.access_email   = o->email.empty() ? nullptr : o->email.c_str();
+                o->c.routing.rules_file        = o->routes.empty() ? nullptr : o->routes.c_str();
+                o->c.routing.rules_inline      = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
+                o->c.aether.ech_dns            = o->ech_dns.empty() ? nullptr : o->ech_dns.c_str();
+                o->c.aether.ech_domain         = o->ech_domain.empty() ? nullptr : o->ech_domain.c_str();
+                o->c.aether.gool_inner         = o->gool_inner.empty() ? nullptr : o->gool_inner.c_str();
+                o->c.aether.tls_ciphers        = o->tls_ciphers.empty() ? nullptr : o->tls_ciphers.c_str();
+                o->c.aether.api_address        = o->api_address.empty() ? nullptr : o->api_address.c_str();
+                o->c.aether.api_host           = o->api_host.empty() ? nullptr : o->api_host.c_str();
+                o->c.aether.api_sni            = o->api_sni.empty() ? nullptr : o->api_sni.c_str();
+                o->c.aether.exit_loc           = o->exit_loc.empty() ? nullptr : o->exit_loc.c_str();
+                o->c.dns.tls_groups            = o->tls_groups.empty() ? nullptr : o->tls_groups.c_str();
+                o->c.aether.tls13_ciphers      = o->tls13_ciphers.empty() ? nullptr : o->tls13_ciphers.c_str();
+                o->c.aether.tls_key_shares     = o->tls_key_shares.empty() ? nullptr : o->tls_key_shares.c_str();
+                o->c.aether.tls_sigalgs        = o->tls_sigalgs.empty() ? nullptr : o->tls_sigalgs.c_str();
+                o->c.aether.tls_cert_compression = o->tls_cert_compression.empty() ? nullptr : o->tls_cert_compression.c_str();
+                o->c.aether.tls_alps           = o->tls_alps.empty() ? nullptr : o->tls_alps.c_str();
+                o->c.aether.tls_trust_anchors  = o->tls_trust_anchors.empty() ? nullptr : o->tls_trust_anchors.c_str();
+                o->c.aether.tls_server_padding = o->tls_server_padding.empty() ? nullptr : o->tls_server_padding.c_str();
+                o->c.psiphon.config_json          = o->psi_json.c_str();
+                o->c.psiphon.data_root_dir        = o->psi_dir.empty() ? nullptr : o->psi_dir.c_str();
+                o->c.upstream_proxy               = o->upstream.empty() ? nullptr : o->upstream.c_str();
+                o->c.psiphon.embedded_server_list =
+                    o->psi_embedded.empty() ? nullptr : o->psi_embedded.c_str();
+                auto* raw = o.release(); // transfer ownership to the thread
+                std::thread([raw] {
+                    // Wrap in a unique_ptr again so the custom deleter
+                    // fires on scope exit (even if fcae_start throws).
+                    std::unique_ptr<Owned, void(*)(Owned*)> guard(
+                        raw, [](Owned* p) {
+                            g_app.start_busy.store(false);
+                            delete p;
+                        }
+                    );
+                    // Every failure mode now has a specific, user-facing
+                    // reason instead of a bare false.
+                    if (fcae_start(&guard->c) != FCAE_OK) {
+                        g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
+                        ui_request_redraw();
+                    }
+                }).detach();
+            }
+        }
+        ImGui::PopStyleColor(3);
+
+        if (g_app.mode == 1 && (connected || tun_paused)) {
+            ImGui::SameLine(0, 6);
+            if (tun_paused) {
+                ImVec4 start_col(0.18f, 0.35f, 0.85f, 1.0f);
+                ImVec4 start_h(0.26f, 0.45f, 0.95f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, start_col);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
+                if (ImGui::Button(" START ", ImVec2(70, 32))) {
+                    std::thread([] {
+                        if (fcae_resume_tun() != FCAE_OK) {
+                            g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+                        }
+                        ui_request_redraw();
+                    }).detach();
+                }
+                ImGui::PopStyleColor(3);
+            } else {
+                ImVec4 stop_col(0.85f, 0.55f, 0.15f, 1.0f);
+                ImVec4 stop_h(0.95f, 0.65f, 0.25f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, stop_col);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
+                if (ImGui::Button(" STOP ", ImVec2(70, 32))) {
+                    std::thread([] {
+                        if (fcae_pause_tun() != FCAE_OK) {
+                            g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+                        }
+                        ui_request_redraw();
+                    }).detach();
+                }
+                ImGui::PopStyleColor(3);
+            }
+        }
+
+        ImGui::SameLine(0, 10);
+        ImGui::PushStyleColor(ImGuiCol_Text, sc);
+        if (errored && telem.last_error[0] && s_error_detail_visible) {
+            ImGui::Text("ERROR: %s", telem.last_error);
+        } else {
+            ImGui::Text("%s", state_label(cur));
+        }
+        ImGui::PopStyleColor();
+
+        if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
+
+        if (g_app.save_status[0]) {
+            ImGui::SameLine(0, 8);
+            ImGui::TextColored(s_save_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
+                                                   : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
+                               "%s", g_app.save_status);
+            s_save_status_painted_revision = s_save_status_revision;
+        }
+
+        {
             if (s_about_popup_open) {
                 ImGui::OpenPopup("##about_popup");
                 s_about_popup_open = false;

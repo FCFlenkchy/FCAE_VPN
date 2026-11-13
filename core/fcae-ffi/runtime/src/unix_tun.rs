@@ -70,7 +70,7 @@ impl StateLock {
         if lock.0 == 0 {
             lock.1 = try_flock();
             if lock.1.is_none() {
-                log::warn!("TUN: host state is locked by another FCAE instance");
+                log::warn!("[tun] host state is locked by another FCAE instance");
             }
         }
         lock.0 += 1;
@@ -101,7 +101,7 @@ pub fn recover() {
             let _ = tun_dns::run(argv[0], &argv[1..]);
         }
         let _ = std::fs::remove_file(state_path(ROUTES_FILE));
-        log::info!("TUN: removed routes left by an unclean shutdown");
+        log::info!("[tun] removed routes left by an unclean shutdown");
     }
     tun_dns::recover_locked();
     if let Err(error) = recover_dns_firewall() { log::warn!("{error}"); }
@@ -191,18 +191,18 @@ fn recover_dns_firewall() -> Result<()> {
     let table = match std::fs::read_to_string(&path) {
         Ok(table) => table,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(CoreError::Internal(format!("TUN DNS: cannot read firewall state: {e}"))),
+        Err(e) => return Err(CoreError::Internal(format!("[tun] DNS: cannot read firewall state: {e}"))),
     };
     let suffix = table.strip_prefix("fcae_dns_").unwrap_or("");
     if suffix.split('_').any(|part| part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit())) {
-        return Err(CoreError::Internal("TUN DNS: invalid firewall recovery state".into()));
+        return Err(CoreError::Internal("[tun] DNS: invalid firewall recovery state".into()));
     }
     // Distinguish a missing table from a missing/unavailable nft installation.
     tun_dns::run("nft", &["list", "tables"])?;
     if tun_dns::run("nft", &["list", "table", "inet", &table]).is_ok() {
         tun_dns::run("nft", &["delete", "table", "inet", &table])?;
     }
-    std::fs::remove_file(path).map_err(|e| CoreError::Internal(format!("TUN DNS: cannot remove firewall state: {e}")))?;
+    std::fs::remove_file(path).map_err(|e| CoreError::Internal(format!("[tun] DNS: cannot remove firewall state: {e}")))?;
     Ok(())
 }
 
@@ -217,10 +217,10 @@ impl DnsFirewall {
             return Err(CoreError::InvalidConfig("invalid Linux TUN interface name for DNS protection".into()));
         }
         if LOCK.lock().1.is_none() {
-            return Err(CoreError::Internal("TUN DNS: cannot acquire exclusive host state lock".into()));
+            return Err(CoreError::Internal("[tun] DNS: cannot acquire exclusive host state lock".into()));
         }
         if DNS_FIREWALL_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            return Err(CoreError::Internal("TUN DNS: another tunnel owns DNS protection".into()));
+            return Err(CoreError::Internal("[tun] DNS: another tunnel owns DNS protection".into()));
         }
         let mut guard = Self { monitor: None };
         recover_dns_firewall()?;
@@ -236,8 +236,8 @@ impl DnsFirewall {
 }}
 "#);
         let script_path = state_path("dns-firewall.nft");
-        write_atomic(&script_path, script.as_bytes()).map_err(|e| CoreError::Internal(format!("TUN DNS: cannot write firewall rules: {e}")))?;
-        write_atomic(&state_path(DNS_FIREWALL_FILE), table.as_bytes()).map_err(|e| CoreError::Internal(format!("TUN DNS: cannot persist firewall state: {e}")))?;
+        write_atomic(&script_path, script.as_bytes()).map_err(|e| CoreError::Internal(format!("[tun] DNS: cannot write firewall rules: {e}")))?;
+        write_atomic(&state_path(DNS_FIREWALL_FILE), table.as_bytes()).map_err(|e| CoreError::Internal(format!("[tun] DNS: cannot persist firewall state: {e}")))?;
         // The monitor installs the table itself, then owns cleanup. If FCAE
         // exits while nft is still installing, it waits for that operation
         // before observing the closed pipe and removing the table.
@@ -262,10 +262,10 @@ exit 1
             .arg(&script_path).arg(&table).arg(state_path(DNS_FIREWALL_FILE))
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()).spawn()
-            .map_err(|e| CoreError::Internal(format!("TUN DNS: cannot start firewall monitor: {e}")))?;
+            .map_err(|e| CoreError::Internal(format!("[tun] DNS: cannot start firewall monitor: {e}")))?;
         guard.monitor = Some(monitor);
         let stdout = guard.monitor.as_mut().and_then(|child| child.stdout.take())
-            .ok_or_else(|| CoreError::Internal("TUN DNS: missing firewall monitor output".into()))?;
+            .ok_or_else(|| CoreError::Internal("[tun] DNS: missing firewall monitor output".into()))?;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             use std::io::BufRead;
@@ -274,12 +274,12 @@ exit 1
             let _ = tx.send(status);
         });
         let status = rx.recv_timeout(Duration::from_secs(10))
-            .map_err(|e| CoreError::Internal(format!("TUN DNS: firewall installation did not complete: {e}")))?
-            .map_err(|e| CoreError::Internal(format!("TUN DNS: firewall monitor failed: {e}")))?;
+            .map_err(|e| CoreError::Internal(format!("[tun] DNS: firewall installation did not complete: {e}")))?
+            .map_err(|e| CoreError::Internal(format!("[tun] DNS: firewall monitor failed: {e}")))?;
         if status.trim() != "0" {
-            return Err(CoreError::Internal(format!("TUN DNS: nftables rules failed to install (status {})", status.trim())));
+            return Err(CoreError::Internal(format!("[tun] DNS: nftables rules failed to install (status {})", status.trim())));
         }
-        log::info!("TUN DNS: Linux firewall protection enabled for ports 53 and 853");
+        log::info!("[tun] DNS: Linux firewall protection enabled for ports 53 and 853");
         Ok(guard)
     }
 }
@@ -293,12 +293,12 @@ impl Drop for DnsFirewall {
             loop {
                 match monitor.try_wait() {
                     Ok(Some(status)) => {
-                        if !status.success() { log::warn!("TUN DNS: firewall cleanup failed; recovery state retained"); }
+                        if !status.success() { log::warn!("[tun] DNS: firewall cleanup failed; recovery state retained"); }
                         break;
                     }
                     Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
                     _ => {
-                        log::warn!("TUN DNS: firewall monitor is still cleaning up");
+                        log::warn!("[tun] DNS: firewall monitor is still cleaning up");
                         std::thread::spawn(move || {
                             let _ = monitor.wait();
                             DNS_FIREWALL_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -323,14 +323,14 @@ fn recover_dns_firewall() -> Result<()> {
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(CoreError::Internal(format!("TUN DNS: cannot read PF recovery state: {e}"))),
+        Err(e) => return Err(CoreError::Internal(format!("[tun] DNS: cannot read PF recovery state: {e}"))),
     };
     let parts: Vec<&str> = text.split_whitespace().collect();
     if parts.len() != 3 || !parts[0].starts_with("com.apple/000_fcae_")
         || parts[0]["com.apple/000_fcae_".len()..].split('_').any(|p| p.is_empty() || !p.bytes().all(|c| c.is_ascii_digit()))
         || parts[1].is_empty() || !parts[1].bytes().all(|c| c.is_ascii_digit())
         || parts[2].is_empty() || !parts[2].bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
-        return Err(CoreError::Internal("TUN DNS: invalid PF recovery state".into()));
+        return Err(CoreError::Internal("[tun] DNS: invalid PF recovery state".into()));
     }
     let boot = tun_dns::run("sysctl", &["-n", "kern.bootsessionuuid"])?;
     if boot.trim().eq_ignore_ascii_case(parts[2]) {
@@ -338,7 +338,7 @@ fn recover_dns_firewall() -> Result<()> {
         tun_dns::run("pfctl", &["-a", parts[0], "-F", "rules"])?;
         tun_dns::run("pfctl", &["-X", parts[1]])?;
     }
-    std::fs::remove_file(path).map_err(|e| CoreError::Internal(format!("TUN DNS: cannot remove PF recovery state: {e}")))?;
+    std::fs::remove_file(path).map_err(|e| CoreError::Internal(format!("[tun] DNS: cannot remove PF recovery state: {e}")))?;
     Ok(())
 }
 
@@ -354,10 +354,10 @@ impl DnsFirewall {
             return Err(CoreError::InvalidConfig("invalid macOS TUN interface name for DNS protection".into()));
         }
         if LOCK.lock().1.is_none() {
-            return Err(CoreError::Internal("TUN DNS: cannot acquire exclusive host state lock".into()));
+            return Err(CoreError::Internal("[tun] DNS: cannot acquire exclusive host state lock".into()));
         }
         if DNS_FIREWALL_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            return Err(CoreError::Internal("TUN DNS: another tunnel owns DNS protection".into()));
+            return Err(CoreError::Internal("[tun] DNS: another tunnel owns DNS protection".into()));
         }
         let mut guard = Self { monitor: None };
         recover_dns_firewall()?;
@@ -366,16 +366,16 @@ impl DnsFirewall {
         for line in main_rules.lines().map(str::trim_start) {
             if line.starts_with("anchor \"com.apple/*\"") { found_anchor = true; break; }
             if line.starts_with("anchor ") || (line.starts_with("pass ") && line.split_whitespace().any(|word| word == "quick")) {
-                return Err(CoreError::Internal("TUN DNS: an earlier PF rule could bypass DNS protection; refusing an unprotected tunnel".into()));
+                return Err(CoreError::Internal("[tun] DNS: an earlier PF rule could bypass DNS protection; refusing an unprotected tunnel".into()));
             }
         }
         if !found_anchor {
-            return Err(CoreError::Internal("TUN DNS: the active macOS PF ruleset has no com.apple wildcard anchor; refusing an unprotected tunnel".into()));
+            return Err(CoreError::Internal("[tun] DNS: the active macOS PF ruleset has no com.apple wildcard anchor; refusing an unprotected tunnel".into()));
         }
         let anchor = format!("com.apple/000_fcae_{}_{}", std::process::id(), DNS_FIREWALL_SEQUENCE.fetch_add(1, Ordering::Relaxed));
         let script_path = state_path("dns-firewall.pf.rules");
         let rules = format!("block drop out quick on ! {device} proto {{ tcp udp }} from any to any port {{ 53 853 }}\n");
-        write_atomic(&script_path, rules.as_bytes()).map_err(|e| CoreError::Internal(format!("TUN DNS: cannot write PF rules: {e}")))?;
+        write_atomic(&script_path, rules.as_bytes()).map_err(|e| CoreError::Internal(format!("[tun] DNS: cannot write PF rules: {e}")))?;
         let monitor_script = r#"
 trap '' PIPE
 umask 077
@@ -406,10 +406,10 @@ exit 1
             .arg(&script_path).arg(&anchor).arg(state_path(DNS_FIREWALL_FILE))
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()).spawn()
-            .map_err(|e| CoreError::Internal(format!("TUN DNS: cannot start PF monitor: {e}")))?;
+            .map_err(|e| CoreError::Internal(format!("[tun] DNS: cannot start PF monitor: {e}")))?;
         guard.monitor = Some(monitor);
         let stdout = guard.monitor.as_mut().and_then(|child| child.stdout.take())
-            .ok_or_else(|| CoreError::Internal("TUN DNS: missing PF monitor output".into()))?;
+            .ok_or_else(|| CoreError::Internal("[tun] DNS: missing PF monitor output".into()))?;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             use std::io::BufRead;
@@ -418,12 +418,12 @@ exit 1
             let _ = tx.send(status);
         });
         let status = rx.recv_timeout(Duration::from_secs(10))
-            .map_err(|e| CoreError::Internal(format!("TUN DNS: PF installation did not complete: {e}")))?
-            .map_err(|e| CoreError::Internal(format!("TUN DNS: PF monitor failed: {e}")))?;
+            .map_err(|e| CoreError::Internal(format!("[tun] DNS: PF installation did not complete: {e}")))?
+            .map_err(|e| CoreError::Internal(format!("[tun] DNS: PF monitor failed: {e}")))?;
         if status.trim() != "0" {
-            return Err(CoreError::Internal(format!("TUN DNS: PF DNS protection failed to install ({})", status.trim())));
+            return Err(CoreError::Internal(format!("[tun] DNS: PF DNS protection failed to install ({})", status.trim())));
         }
-        log::info!("TUN DNS: macOS PF protection enabled for ports 53 and 853");
+        log::info!("[tun] DNS: macOS PF protection enabled for ports 53 and 853");
         Ok(guard)
     }
 }
@@ -437,12 +437,12 @@ impl Drop for DnsFirewall {
             loop {
                 match monitor.try_wait() {
                     Ok(Some(status)) => {
-                        if !status.success() { log::warn!("TUN DNS: PF cleanup failed; recovery state retained"); }
+                        if !status.success() { log::warn!("[tun] DNS: PF cleanup failed; recovery state retained"); }
                         break;
                     }
                     Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
                     _ => {
-                        log::warn!("TUN DNS: PF monitor is still cleaning up");
+                        log::warn!("[tun] DNS: PF monitor is still cleaning up");
                         std::thread::spawn(move || {
                             let _ = monitor.wait();
                             DNS_FIREWALL_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -482,7 +482,7 @@ impl TunGuard {
             _lock: StateLock::acquire(),
         };
         guard.apply(cfg, peer_ip, assign_addresses)?;
-        log::info!("TUN: routes/DNS applied to `{device}`");
+        log::info!("[tun] routes/DNS applied to `{device}`");
         Ok(guard)
     }
 
@@ -498,12 +498,12 @@ impl TunGuard {
         }
         self.split_default(false, true)?;
         self.split_default(true, v6).map_err(|error| CoreError::Internal(
-            format!("TUN: cannot establish IPv6 tunnel or reject routes; refusing to leave IPv6 outside the VPN: {error}")
+            format!("[tun] cannot establish IPv6 tunnel or reject routes; refusing to leave IPv6 outside the VPN: {error}")
         ))?;
         let mut dns_cfg = cfg.clone();
         if !v6 { dns_cfg.tun.ipv6 = None; }
         if tun_dns::servers(&dns_cfg)?.is_empty() {
-            log::info!("TUN DNS: no usable resolvers configured; using default IPv4 resolvers");
+            log::info!("[tun] DNS: no usable resolvers configured; using default IPv4 resolvers");
             dns_cfg.dns.server = Some("1.1.1.1,1.0.0.1".into());
         }
         #[cfg(target_os = "macos")]
@@ -521,7 +521,7 @@ impl TunGuard {
         tun_dns::run("ip", &["-4", "addr", "replace", &cfg.tun.ipv4, "dev", &dev])?;
         let v6 = cfg.tun.ipv6.as_deref().is_some_and(|v6| {
             tun_dns::run("ip", &["-6", "addr", "replace", v6, "dev", &dev])
-                .inspect_err(|e| log::warn!("TUN: {e}"))
+                .inspect_err(|e| log::warn!("[tun] {e}"))
                 .is_ok()
         });
         tun_dns::run("ip", &["link", "set", "dev", &dev, "mtu", &cfg.tun.mtu.to_string(), "up"])?;
@@ -537,7 +537,7 @@ impl TunGuard {
         let v6 = cfg.tun.ipv6.as_deref().is_some_and(|v6| {
             let (addr, len) = v6.split_once('/').unwrap_or((v6, "64"));
             tun_dns::run("ifconfig", &[&dev, "inet6", addr, "prefixlen", len, "alias"])
-                .inspect_err(|e| log::warn!("TUN: {e}"))
+                .inspect_err(|e| log::warn!("[tun] {e}"))
                 .is_ok()
         });
         Ok(v6)
@@ -550,7 +550,7 @@ impl TunGuard {
             let mut text = self.persisted.join("\n");
             text.push('\n');
             if let Err(e) = write_atomic(&state_path(ROUTES_FILE), text.as_bytes()) {
-                log::warn!("TUN: cannot persist route undo state: {e}");
+                log::warn!("[tun] cannot persist route undo state: {e}");
             }
         }
         self.undo.push(del);
@@ -561,7 +561,7 @@ impl TunGuard {
     fn bypass(&mut self, peer: IpAddr) {
         let family = if peer.is_ipv4() { "-4" } else { "-6" };
         let Some((via, dev)) = gateway(peer.is_ipv6()) else {
-            log::warn!("TUN: no {family} default gateway; carrier {peer} is not bypassed");
+            log::warn!("[tun] no {family} default gateway; carrier {peer} is not bypassed");
             return;
         };
         let prefix = format!("{peer}/{}", if peer.is_ipv4() { 32 } else { 128 });
@@ -571,21 +571,21 @@ impl TunGuard {
         }
         let del = ["ip", family, "route", "del", &prefix].map(str::to_owned).to_vec();
         if let Err(e) = self.add(&args, del, true) {
-            log::warn!("TUN: carrier bypass for {peer}: {e}");
+            log::warn!("[tun] carrier bypass for {peer}: {e}");
         }
     }
 
     #[cfg(target_os = "macos")]
     fn bypass(&mut self, peer: IpAddr) {
         let Some(via) = gateway(peer.is_ipv6()) else {
-            log::warn!("TUN: no default gateway for carrier {peer}; it is not bypassed");
+            log::warn!("[tun] no default gateway for carrier {peer}; it is not bypassed");
             return;
         };
         let family = if peer.is_ipv4() { "-inet" } else { "-inet6" };
         let peer = peer.to_string();
         let del = ["route", "-n", "delete", family, "-host", &peer].map(str::to_owned).to_vec();
         if let Err(e) = self.add(&["route", "-n", "add", family, "-host", &peer, &via], del, true) {
-            log::warn!("TUN: carrier bypass for {peer}: {e}");
+            log::warn!("[tun] carrier bypass for {peer}: {e}");
         }
     }
 
@@ -640,13 +640,13 @@ impl Drop for TunGuard {
         for argv in self.undo.drain(..).rev() {
             let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
             if let Err(e) = tun_dns::run(argv[0], &argv[1..]) {
-                log::warn!("TUN: {e}");
+                log::warn!("[tun] {e}");
             }
         }
         if !self.persisted.is_empty() {
             let _ = std::fs::remove_file(state_path(ROUTES_FILE));
         }
         drop(self.dns_firewall.take());
-        log::info!("TUN: routes/DNS restored for `{}`", self.device);
+        log::info!("[tun] routes/DNS restored for `{}`", self.device);
     }
 }

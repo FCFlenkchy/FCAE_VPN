@@ -295,11 +295,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Block on the message queue while idle instead of repainting unconditionally.
     bool done = false;
     bool sponsor_window_visible = false;
-    auto last_frame_time = std::chrono::steady_clock::now();
-    auto last_input_time = last_frame_time;
+    constexpr auto min_frame_interval = std::chrono::milliseconds(16);
+    auto last_frame_time = std::chrono::steady_clock::now() - min_frame_interval;
+    auto last_input_time = std::chrono::steady_clock::now();
     POINT last_mouse_pos = {};
     bool have_mouse_pos = false;
-    constexpr auto min_frame_interval = std::chrono::milliseconds(33);
     constexpr auto interaction_tail   = std::chrono::milliseconds(700);
 
     while (!done && g_app.running.load()) {
@@ -311,7 +311,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         DWORD timeout;
         if (!paintable)         timeout = 1000;
-        else if (interacting)   timeout = (DWORD)min_frame_interval.count();
+        else if (interacting) {
+            const auto next_frame = last_frame_time + min_frame_interval;
+            const auto remaining = next_frame - loop_now;
+            timeout = remaining > std::chrono::steady_clock::duration::zero()
+                ? (DWORD)std::chrono::duration_cast<std::chrono::milliseconds>(remaining + std::chrono::milliseconds(1)).count()
+                : 0;
+        }
         else                    timeout = (DWORD)ui_sleep_ms();
 
         MsgWaitForMultipleObjects(0, nullptr, FALSE, timeout, QS_ALLINPUT);
@@ -323,7 +329,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             if (msg.message == WM_QUIT) { done = true; break; }
             switch (msg.message) {
                 case WM_MOUSEMOVE:
-                    // Ignore repeated positions so WM_MOUSEMOVE cannot pin rendering at 30 FPS.
+                    // Ignore repeated positions so WM_MOUSEMOVE cannot pin rendering at the interaction rate.
                     if (!have_mouse_pos || msg.pt.x != last_mouse_pos.x || msg.pt.y != last_mouse_pos.y) {
                         last_mouse_pos = msg.pt;
                         have_mouse_pos = true;
