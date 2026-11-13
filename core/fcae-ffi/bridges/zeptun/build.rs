@@ -21,14 +21,9 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(zeptun_linked)");
-    println!("cargo::rustc-check-cfg=cfg(wintun_staged)");
     fcae_build::rerun_if_env_changed("FCAE_ZEPTUN_LIBDIR");
 
     let target = fcae_build::target::Target::from_cargo_env();
-
-    // Windows still needs wintun.dll at runtime for the TUN device itself
-    // (that is a driver, not a process), so stage it next to the library.
-    fcae_build::wintun::stage_and_emit(target, "FCAE_WINTUN_DLL");
 
     // Features reach build scripts as CARGO_FEATURE_* env, never as cfg().
     if std::env::var_os("CARGO_FEATURE_STUB").is_some() {

@@ -77,10 +77,11 @@
 //! ## wintun
 //!
 //! Windows still needs `wintun.dll` — that is the TUN *driver*, not a process.
-//! `fcae-build::wintun` downloads and verifies it at build time (with a size
-//! sanity check, so a captive-portal HTML page can no longer be embedded as if
-//! it were a DLL), and `fcae_runtime::windows_dll::ensure_wintun` places it where the
-//! in-process loader will find it.
+//! `fcae-runtime` embeds the one copy (its build script downloads and
+//! verifies it via `fcae-build::wintun`, so a captive-portal HTML page can no
+//! longer be embedded as if it were a DLL), and
+//! `fcae_runtime::windows_dll::ensure_wintun` places it where the in-process
+//! loader will find it. This bridge embeds nothing itself.
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -93,11 +94,6 @@ use fcae_runtime::session::TunBridge;
 use parking_lot::Mutex;
 
 pub mod platform;
-
-/// `wintun.dll` staged at build time, embedded so the runtime can drop it
-/// next to the executable. The TUN *driver* is still a DLL — only the
-/// tun2socks *process* is gone. Expands to the staged slice + `wintun_bytes()`.
-fcae_runtime::wintun_bytes!("FCAE_WINTUN_DLL");
 
 // Go c-archive symbols.
 
@@ -437,7 +433,7 @@ impl TunBridge for Tun2SocksBridge {
 
         // Windows needs wintun.dll discoverable before the device is created.
         #[cfg(windows)]
-        fcae_runtime::windows_dll::ensure_wintun(wintun_bytes())?;
+        fcae_runtime::windows_dll::ensure_wintun(fcae_runtime::wintun::wintun_bytes())?;
 
         let (device, owned_fd) = self.device_spec(cfg)?;
         // Aether keeps the upstream full SOCKS5 schema, including its own

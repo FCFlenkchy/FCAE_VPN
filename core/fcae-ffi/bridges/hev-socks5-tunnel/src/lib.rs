@@ -18,15 +18,11 @@
 //!
 //! Build the engine and dependency archives outside Cargo, or set
 //! `FCAE_HEV_LIBDIR` to a directory containing them. The Windows CI build
-//! stages MinGW-targeted archives there; Wintun is still staged separately.
+//! stages MinGW-targeted archives there; Wintun is embedded once by `fcae-runtime`.
 //!
 //! Do not ship a stub build: it reports the engine as unavailable in the UI.
 
 mod engine;
-
-/// Platform glue: the Wintun DLL staging is Windows-only and cfg-gated
-/// inside the module. The admin/root probe lives in [`fcae_runtime::privilege`].
-pub mod platform;
 
 pub use engine::{HevSocks5TunnelBridge, unavailable_reason};
 

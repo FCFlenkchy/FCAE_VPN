@@ -1,32 +1,28 @@
-//! Windows Wintun staging glue shared by the engine bridges.
+//! The single embedded copy of `wintun.dll`, shared by every Windows TUN
+//! engine (zeptun, tun2socks and hev-socks5-tunnel).
+//!
+//! The DLL is staged once, by this crate's `build.rs` (via
+//! `fcae_build::wintun::stage_and_emit`, which downloads and verifies it at
+//! build time), and embedded here under `FCAE_WINTUN_DLL`. The bridges embed
+//! nothing; they call [`wintun_bytes()`].
 
-/// Expands to the staged-`wintun.dll` byte slice and its accessor, shared by
-/// the engine bridges that embed the driver at build time.
-///
-/// The consuming crate's `build.rs` must stage the DLL (see
-/// `fcae_build::wintun::stage_and_emit`) and emit `cargo:rustc-cfg=wintun_staged`
-/// plus `cargo:rustc-env` pointing at it; the crate must register
-/// `cargo::rustc-check-cfg=cfg(wintun_staged)` — all three build scripts do.
-/// On non-Windows or unstaged builds nothing is emitted, mirroring the
-/// hand-written version this replaces.
-///
-/// Usage:
-/// ```ignore
-/// fcae_runtime::wintun_bytes!("FCAE_WINTUN_DLL");         // private accessor
-/// fcae_runtime::wintun_bytes!(pub "FCAE_HEV_WINTUN_DLL"); // public accessor
-/// ```
-#[macro_export]
-macro_rules! wintun_bytes {
-    (@impl $vis:vis, $env:literal) => {
-        #[cfg(all(windows, wintun_staged))]
-        static WINTUN_DLL: &[u8] = include_bytes!(env!($env));
+/// Bytes of the staged wintun.dll. Present only on Windows builds where the
+/// DLL staged successfully (`wintun_staged` cfg emitted by this crate's
+/// `build.rs`).
+#[cfg(all(windows, wintun_staged))]
+static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
 
-        #[cfg(all(windows, wintun_staged))]
-        $vis fn wintun_bytes() -> Option<&'static [u8]> { Some(WINTUN_DLL) }
+/// True when a wintun.dll was embedded at build time.
+pub const WINTUN_AVAILABLE: bool = cfg!(all(windows, wintun_staged));
 
-        #[cfg(all(windows, not(wintun_staged)))]
-        $vis fn wintun_bytes() -> Option<&'static [u8]> { None }
-    };
-    ($env:literal) => { $crate::wintun_bytes!(@impl , $env); };
-    (pub $env:literal) => { $crate::wintun_bytes!(@impl pub, $env); };
+/// Bytes of the staged wintun.dll, or `None` when this build embedded none.
+#[cfg(all(windows, wintun_staged))]
+pub fn wintun_bytes() -> Option<&'static [u8]> {
+    Some(WINTUN_DLL)
+}
+
+/// Bytes of the staged wintun.dll, or `None` when this build embedded none.
+#[cfg(not(all(windows, wintun_staged)))]
+pub fn wintun_bytes() -> Option<&'static [u8]> {
+    None
 }

@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(hev_linked)");
-    println!("cargo::rustc-check-cfg=cfg(wintun_staged)");
     fcae_build::rerun_if_env_changed("FCAE_HEV_LIBDIR");
     fcae_build::rerun_if_env_changed("ANDROID_NDK_HOME");
 
@@ -20,10 +19,6 @@ fn main() {
     }
 
     let target = fcae_build::target::Target::from_cargo_env();
-
-    // Windows still needs wintun.dll at runtime for the TUN device itself
-    // (that is a driver, not a process), so stage it next to the library.
-    fcae_build::wintun::stage_and_emit(target, "FCAE_HEV_WINTUN_DLL");
 
     let submodule = fcae_build::repo_root().join("core/hev-socks5-tunnel");
     let header = submodule.join("src").join("hev-main.h");

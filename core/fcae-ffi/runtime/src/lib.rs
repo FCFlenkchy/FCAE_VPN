@@ -11,7 +11,7 @@
 //! * [`deps`] — the `deps/` folder embedded native libraries unpack into.
 //! * [`update`] — app-level update checking: release manifest fetch, decode, compare.
 //! * [`upstream`] — the user's upstream proxy and its loopback SOCKS5 relay.
-//! * [`wintun`] — the macro expanding to the staged-`wintun.dll` slice + accessor.
+//! * [`wintun`] — the single embedded copy of `wintun.dll` the Windows TUN bridges drop on disk.
 //! * [`exit_adapter`] — the shared Psiphon loopback socks5p adapter the TUN
 //!   bridges dial instead of the raw exit endpoint.
 //! * [`privilege`] — the single admin/root probe behind `fcae_is_privileged()`.

@@ -56,10 +56,6 @@ use fcae_runtime::socks5p;
 
 pub mod platform;
 
-// `wintun.dll` staged at build time, embedded so the loader can drop it next
-// to the executable. Expands to the staged slice + a `wintun_bytes()` accessor.
-fcae_runtime::wintun_bytes!("FCAE_WINTUN_DLL");
-
 // C ABI declarations.
 
 const ZEPTUN_OK: c_int = 0;
@@ -475,7 +471,7 @@ impl ZeptunBridge {
         #[cfg(windows)]
         {
             log::info!("[zeptun] loading Wintun");
-            fcae_runtime::windows_dll::ensure_wintun(wintun_bytes())?;
+            fcae_runtime::windows_dll::ensure_wintun(fcae_runtime::wintun::wintun_bytes())?;
             log::info!("[zeptun] Wintun loaded");
         }
 

@@ -188,7 +188,7 @@ fn loaded() -> Option<&'static Runtime> {
 pub fn unavailable_reason() -> Option<&'static str> {
     if !cfg!(hev_linked) {
         Some("hev-socks5-tunnel not linked (stub build)")
-    } else if cfg!(all(windows, not(wintun_staged))) {
+    } else if cfg!(windows) && !fcae_runtime::wintun::WINTUN_AVAILABLE {
         Some("Wintun not embedded")
     } else {
         None
@@ -448,7 +448,7 @@ impl TunBridge for HevSocks5TunnelBridge {
         #[cfg(windows)]
         {
             log::info!("[hev] loading Wintun");
-            fcae_runtime::windows_dll::ensure_wintun(crate::platform::wintun_bytes())?;
+            fcae_runtime::windows_dll::ensure_wintun(fcae_runtime::wintun::wintun_bytes())?;
             log::info!("[hev] Wintun loaded; preparing native engine");
             let rt = runtime()?;
             drain_calls(&rt.calls, &self.enqueue, RESTART_GRACE)?;
