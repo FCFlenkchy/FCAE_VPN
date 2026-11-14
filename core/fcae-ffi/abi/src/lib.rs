@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 23;
+pub const FCAE_ABI_VERSION: u32 = 24;
 /// Explicitly allow `http_port` to open an HTTP listener in TUN mode.
 pub const FCAE_CONFIG_TUN_HTTP: u64 = 0x8000_0000_0000_0000;
 
@@ -61,6 +61,10 @@ pub enum FcaeBackend {
     Psiphon = 1,
     /// Firefox Accounts / Mozilla VPN IP Protection over Fastly CONNECT.
     Firefox = 2,
+    /// Xray-core (`xray`), built in and driven through [`FcaeCore`].
+    Xray = 3,
+    /// sing-box (`sing-box`), built in and driven through [`FcaeCore`].
+    SingBox = 4,
 }
 
 /// What a backend supports, so the UI can describe it instead of hardcoding
@@ -431,6 +435,23 @@ pub struct FcaeFirefox {
     pub transport: *const c_char,
 }
 
+/// Options for the built-in proxy cores (`FcaeBackend::Xray`,
+/// `FcaeBackend::SingBox`). ABI v24.
+///
+/// The cores are built into the app's Go archive: the app hands over the profile,
+/// the bridge generates the core's config and drives the core it links. There is
+/// no executable to ship, locate or spawn. `profile` is NULL only when no core
+/// is in the route.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeCore {
+    /// Share link (`vless://`, `vmess://`, `trojan://`, `ss://`, `socks5://`,
+    /// `http://`) or a complete native config JSON object.
+    pub profile: *const c_char,
+    /// The core's own log verbosity (`FcaeEngineLog`). Defaults to `Info`.
+    pub log_level: FcaeEngineLog,
+}
+
 /// One dynamically supplied exit, including the transport used by an Aether hop.
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -533,6 +554,8 @@ pub struct FcaeConfig {
     pub firefox: FcaeFirefox,
     /// Ordered additional backend exits; count=0 preserves a single-hop session.
     pub chain: FcaeChain,
+    /// Xray-core / sing-box options. Appended in ABI v24; earlier offsets hold.
+    pub core: FcaeCore,
 }
 
 /// Aether engine options without a home in the older sub-structs. Every
@@ -805,6 +828,8 @@ impl_try_from_enum!(FcaeBackend, {
     Aether = 0,
     Psiphon = 1,
     Firefox = 2,
+    Xray = 3,
+    SingBox = 4,
 });
 
 impl_try_from_enum!(FcaeProtocol, {

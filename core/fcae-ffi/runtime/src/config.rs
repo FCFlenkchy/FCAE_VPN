@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use fcae_abi::*;
 
+use crate::sing_xray::CoreProfile;
 use crate::error::{CoreError, Result};
 use crate::upstream::UpstreamProxy;
 
@@ -152,6 +153,30 @@ pub struct FirefoxConfig {
 impl Default for FirefoxConfig {
     fn default() -> Self {
         Self { account_id: None, location: None, server: None, transport: "auto".into() }
+    }
+}
+
+/// Options for the built-in proxy cores (Xray-core, sing-box).
+///
+/// Both cores are compiled into the app and started in-process, so the session
+/// carries only what their bridges need to write a config: the outbound profile
+/// and the core's own log verbosity. There is no executable to point at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreConfig {
+    /// The outbound the core dials, already parsed and validated — a malformed
+    /// link is a config error, not a failed start. `None` only when no core is
+    /// in the route.
+    pub profile: Option<CoreProfile>,
+    /// The core's own log verbosity.
+    pub log_level: FcaeEngineLog,
+}
+
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            profile: None,
+            log_level: FcaeEngineLog::Info,
+        }
     }
 }
 
@@ -371,6 +396,8 @@ pub struct SessionConfig {
     /// Proxy every outbound connection of the session goes through.
     pub upstream_proxy: Option<UpstreamProxy>,
     pub firefox: FirefoxConfig,
+    /// Xray-core / sing-box options.
+    pub core: CoreConfig,
     /// Additional exits in carrier-to-final-exit order.
     pub chain: Vec<ChainHop>,
 }
@@ -407,6 +434,7 @@ impl Default for SessionConfig {
             aether: AetherOptions::default(),
             upstream_proxy: None,
             firefox: FirefoxConfig::default(),
+            core: CoreConfig::default(),
             chain: Vec::new(),
         }
     }
@@ -446,6 +474,11 @@ impl SessionConfig {
         // handshake, possibly through an upstream proxy) has its own budget.
         if self.backend == FcaeBackend::Psiphon {
             return PSIPHON_START_TIMEOUT;
+        }
+        // A core needs to parse its config and open its listener, and a REALITY
+        // handshake on a censored line is not instant.
+        if is_core_backend(self.backend) {
+            return CORE_START_TIMEOUT;
         }
         if self.backend == FcaeBackend::Aether && self.scan_mode == FcaeScanMode::Ironclad {
             return Duration::from_secs(240);
@@ -509,6 +542,14 @@ pub const DEFAULT_TOR_SOCKS_PORT: u16 = 1821;
 pub const DEFAULT_PSIPHON_SOCKS_PORT: u16 = 1823;
 /// Psiphon establishment budget, whatever the WARP scan mode.
 pub const PSIPHON_START_TIMEOUT: Duration = Duration::from_secs(150);
+/// Budget for a core to come up: config parse, listener bind and the first
+/// successful SOCKS5 handshake on its inbound.
+pub const CORE_START_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Whether `backend` is one of the built-in proxy cores (Xray-core, sing-box).
+pub const fn is_core_backend(backend: FcaeBackend) -> bool {
+    matches!(backend, FcaeBackend::Xray | FcaeBackend::SingBox)
+}
 pub const DEFAULT_PSIPHON_HTTP_PORT: u16 = 1824;
 
 /// Reject two listeners sharing a port, with a message naming both.
@@ -597,6 +638,44 @@ unsafe fn parse_aether(raw: &FcaeAether) -> Result<AetherOptions> {
         disable_sct: raw.disable_sct,
         disable_session_ticket: raw.disable_session_ticket,
         disable_extension_permutation: raw.disable_extension_permutation,
+    })
+}
+
+/// Parse and validate the external-core options.
+///
+/// Only the shape is checked here. The share-link grammar lives in the bridge
+/// that expands it — duplicating it would let the two copies drift apart, and
+/// the bridge reports the offending field with the same `InvalidConfig` status.
+unsafe fn parse_core(raw: &FcaeCore, required: bool) -> Result<CoreConfig> {
+    let log_level = FcaeEngineLog::try_from(raw.log_level as u32).map_err(|_| {
+        CoreError::InvalidConfig(format!("core.log_level={} is invalid", raw.log_level as u32))
+    })?;
+    let text = cstr_opt(raw.profile);
+    let profile = match text.as_deref() {
+        Some(text) => match CoreProfile::parse(text) {
+            Ok(profile) => Some(profile),
+            // A stale profile must not block a session that never dials a core,
+            // but on a core route it is the difference between a working tunnel
+            // and a child process that exits a second after start.
+            Err(error) if !required => {
+                log::warn!("[config] ignoring core.profile: {error}");
+                None
+            }
+            Err(error) => {
+                return Err(CoreError::InvalidConfig(format!("core.profile: {error}")));
+            }
+        },
+        None if required => {
+            return Err(CoreError::InvalidConfig(
+                "the Xray/sing-box backend needs core.profile (a share link or a native config JSON)"
+                    .into(),
+            ))
+        }
+        None => None,
+    };
+    Ok(CoreConfig {
+        profile,
+        log_level,
     })
 }
 
@@ -853,6 +932,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // A Tor carrier can have an Aether/Firefox exit with its own listeners.
     if cfg.chain.last().is_some_and(|hop| {
         hop.backend == FcaeBackend::Firefox
+            || is_core_backend(hop.backend)
             || (hop.backend == FcaeBackend::Aether && hop.protocol != FcaeProtocol::Tor)
     }) && cfg.http_port != 0 && cfg.http_port == cfg.socks_port {
         return Err(CoreError::InvalidConfig(format!(
@@ -865,7 +945,8 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     let mut previous_udp = match cfg.backend {
         FcaeBackend::Aether => aether_provides_udp(cfg.protocol),
         FcaeBackend::Psiphon => false,
-        FcaeBackend::Firefox => true,
+        // A generated SOCKS5 inbound always offers UDP ASSOCIATE.
+        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox => true,
     };
     for exit in cfg.chain.clone() {
         let mut hop = cfg.clone();
@@ -881,10 +962,17 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         }
         previous_udp = match exit.backend {
             FcaeBackend::Psiphon => false,
-            FcaeBackend::Firefox => true,
+            FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox => true,
             FcaeBackend::Aether => aether_provides_udp(exit.protocol),
         };
     }
+
+    // The built-in cores (Xray-core, sing-box) carry their own uplink, so their
+    // profile is part of the session config: parsed here, with the chain known,
+    // instead of after a supervisor task has already started.
+    let core_in_path = is_core_backend(cfg.backend)
+        || cfg.chain.iter().any(|hop| is_core_backend(hop.backend));
+    cfg.core = parse_core(&raw.core, core_in_path)?;
 
     // Tor
     let t = &raw.tor;
@@ -1512,6 +1600,59 @@ mod tests {
         for invalid in [3, u64::MAX] {
             raw.tun_engine = invalid;
             assert!(matches!(unsafe { parse(&raw) }, Err(CoreError::InvalidConfig(_))));
+        }
+    }
+
+    #[test]
+    fn core_profiles_are_parsed_with_the_session_config() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.backend = FcaeBackend::Xray;
+        let link = std::ffi::CString::new(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls",
+        )
+        .unwrap();
+        raw.core.profile = link.as_ptr();
+        let cfg = unsafe { parse(&raw) }.expect("a core route with a valid profile parses");
+        assert_eq!(
+            cfg.core.profile.as_ref().and_then(|profile| profile.endpoint()),
+            Some(("example.com", 443))
+        );
+
+        // A malformed link is a config error on a core route: starting anyway
+        // would fail a second later, after the UI already showed "connecting".
+        let bad = std::ffi::CString::new("vless://example.com:443").unwrap();
+        raw.core.profile = bad.as_ptr();
+        assert!(matches!(unsafe { parse(&raw) }, Err(CoreError::InvalidConfig(message)) if message.contains("core.profile")));
+
+        // …and no profile at all is equally fatal there.
+        raw.core.profile = std::ptr::null();
+        assert!(matches!(unsafe { parse(&raw) }, Err(CoreError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn a_stale_profile_never_blocks_a_session_that_does_not_use_a_core() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.backend = FcaeBackend::Aether;
+        let bad = std::ffi::CString::new("vless://nonsense").unwrap();
+        raw.core.profile = bad.as_ptr();
+        let cfg = unsafe { parse(&raw) }.expect("Aether ignores core.profile");
+        assert!(cfg.core.profile.is_none());
+
+        // A core in the chain needs it just as much as the carrier does.
+        raw.chain.count = 1;
+        raw.chain.exits[0] = FcaeBackend::SingBox;
+        assert!(matches!(unsafe { parse(&raw) }, Err(CoreError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn proxy_cores_get_their_own_start_budget() {
+        for backend in [FcaeBackend::Xray, FcaeBackend::SingBox] {
+            let cfg = SessionConfig { backend, ..Default::default() };
+            assert_eq!(cfg.start_timeout(), CORE_START_TIMEOUT);
         }
     }
 

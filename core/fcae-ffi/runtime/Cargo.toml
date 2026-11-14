@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 fcae-abi.workspace = true
+base64 = "0.22"
 futures = "0.3"
 anyhow.workspace = true
 async-trait.workspace = true

@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 23
+#define FCAE_ABI_VERSION 24
 /* Opt in to an HTTP listener in TUN mode when http_port is nonzero. */
 #define FCAE_CONFIG_TUN_HTTP (UINT64_C(1) << 63)
 
@@ -69,7 +69,9 @@ typedef enum {
 typedef enum {
     FCAE_BACKEND_AETHER  = 0,
     FCAE_BACKEND_PSIPHON = 1,
-    FCAE_BACKEND_FIREFOX = 2
+    FCAE_BACKEND_FIREFOX = 2,
+    FCAE_BACKEND_XRAY    = 3,  /* Xray-core, built in                   */
+    FCAE_BACKEND_SINGBOX = 4   /* sing-box, built in                    */
 } FcaeBackend;
 
 /* What a backend supports, so the UI can describe it rather than hardcoding
@@ -322,6 +324,17 @@ typedef struct {
     const char *transport;       /* auto | h2 | h1 | h3 (h3 reserved)     */
 } FcaeFirefox;
 
+/* Options for the built-in proxy cores (FCAE_BACKEND_XRAY,
+ * FCAE_BACKEND_SINGBOX). Both are compiled into the app's Go archive and
+ * started in-process: the app supplies only the outbound profile, the bridge
+ * generates the core's config and drives the core it links. There is no
+ * executable to ship or point at. `profile` is NULL only when no core is in
+ * the route. ABI v24. */
+typedef struct {
+    const char     *profile;      /* share link or native config JSON       */
+    FcaeEngineLog   log_level;    /* the core's own log verbosity           */
+} FcaeCore;
+
 /* One dynamic exit, including the transport used by an Aether hop. */
 typedef struct {
     FcaeBackend  backend;
@@ -381,6 +394,7 @@ typedef struct {
     const char     *upstream_proxy;  /* http|socks5|socks5h://[user:pass@]host:port[@user:pass]; NULL = direct; ABI v20 */
     FcaeFirefox    firefox;         /* Firefox IP Protection; ABI v22      */
     FcaeChain      chain;           /* ordered additional exits; ABI v23   */
+    FcaeCore       core;            /* Xray-core / sing-box options; ABI v24 */
 } FcaeConfig;
 
 /* Telemetry */

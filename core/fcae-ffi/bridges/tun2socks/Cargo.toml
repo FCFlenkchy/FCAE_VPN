@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Shared in-process Go bridge for tun2socks and Psiphon."
+description = "The app's single in-process Go archive: tun2socks, Psiphon, Xray-core and sing-box."
 links = "fcae_go_bridge"
 
 [lib]
@@ -17,8 +17,12 @@ default = []
 # unavailable. Used by CI jobs that only type-check Rust, and by
 # `cargo test -p fcae-runtime` runs on machines without a Go toolchain.
 stub = []
-# Include the desktop Psiphon bridge in the same Go archive.
+# Include the Psiphon shim in the same Go archive.
 psiphon = []
+# Include the Xray-core shim in the same Go archive (Go tag `fcae_xray`).
+xray = []
+# Include the sing-box shim in the same Go archive (Go tag `fcae_singbox`).
+singbox = []
 
 [dependencies]
 fcae-runtime.workspace = true

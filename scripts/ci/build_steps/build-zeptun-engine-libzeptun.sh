@@ -2,6 +2,7 @@
 set -euo pipefail
 cd core/zeptun
 ZIG_CACHE=""
+ZEPTUN_ROOT="$PWD"
 if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
   ZIG_CACHE="$(mktemp -d "${RUNNER_TEMP:?}/zeptun-cache.XXXXXX")"
   trap 'rm -rf "$ZIG_CACHE"' EXIT
@@ -11,8 +12,12 @@ case "${FCAE_MATRIX_NAME}" in
   windows-x64)
     # Use Zeptun's own libc allocator path, avoiding Zig's TLS-backed SMP
     # allocator in the Windows host. Keep the upstream sources unchanged.
-    (cd .. && zig build -Dtarget=x86_64-windows-gnu -Doptimize=small \
-      --cache-dir "$ZIG_CACHE" --prefix "$PWD/zeptun/zig-out")
+    # The recipe lives in the zeptun bridge (core/fcae-ffi/bridges/zeptun/zig),
+    # which is also what that bridge's build.rs runs when the archive is missing.
+    ZIG_DIR="$PWD/../fcae-ffi/bridges/zeptun/zig"
+    test -f "$ZIG_DIR/build.zig"
+    (cd "$ZIG_DIR" && zig build -Dtarget=x86_64-windows-gnu -Doptimize=small \
+      --cache-dir "$ZIG_CACHE" --prefix "$ZEPTUN_ROOT/zig-out")
     ;;
   macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=small ;;
   macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=small ;;

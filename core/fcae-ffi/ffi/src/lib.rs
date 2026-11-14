@@ -541,6 +541,10 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
             hops: std::ptr::null(),
             hop_count: 0,
         },
+        core: FcaeCore {
+            profile: std::ptr::null(),
+            log_level: FcaeEngineLog::Info,
+        },
     });
     FcaeStatus::Ok
 }
@@ -600,6 +604,10 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         fcae_bridge_psiphon::register();
         #[cfg(feature = "firefox")]
         fcae_firefox_bridge::register();
+        #[cfg(feature = "xray")]
+        fcae_bridge_xray::register();
+        #[cfg(feature = "singbox")]
+        fcae_bridge_singbox::register();
 
         #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
         let engines = Arc::new(TunEngines {
@@ -1479,6 +1487,8 @@ fn backend_id_str(id: FcaeBackend) -> &'static str {
         FcaeBackend::Aether => "aether",
         FcaeBackend::Psiphon => "psiphon",
         FcaeBackend::Firefox => "firefox",
+        FcaeBackend::Xray => "xray",
+        FcaeBackend::SingBox => "sing-box",
     }
 }
 
@@ -1487,6 +1497,8 @@ fn backend_display_name(id: FcaeBackend) -> &'static str {
         FcaeBackend::Aether => "Aether (WARP / MASQUE)",
         FcaeBackend::Psiphon => "Psiphon",
         FcaeBackend::Firefox => "Firefox IP Protection",
+        FcaeBackend::Xray => "Xray-core",
+        FcaeBackend::SingBox => "sing-box",
     }
 }
 

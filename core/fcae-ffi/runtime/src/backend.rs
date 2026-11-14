@@ -22,6 +22,8 @@ pub enum BackendId {
     Aether,
     Psiphon,
     Firefox,
+    Xray,
+    SingBox,
 }
 
 impl BackendId {
@@ -30,6 +32,8 @@ impl BackendId {
             BackendId::Aether => "aether",
             BackendId::Psiphon => "psiphon",
             BackendId::Firefox => "firefox",
+            BackendId::Xray => "xray",
+            BackendId::SingBox => "sing-box",
         }
     }
 }

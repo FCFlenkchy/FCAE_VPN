@@ -784,7 +784,6 @@ checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
 dependencies = [
  "glob",
  "libc",
- "libloading",
 ]
 
 [[package]]
@@ -1712,6 +1711,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcae-bridge-singbox"
+version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "fcae-abi",
+ "fcae-go-bridge",
+ "fcae-runtime",
+ "log",
+ "serde_json",
+]
+
+[[package]]
 name = "fcae-bridge-hev-socks5-tunnel"
 version = "2.0.0"
 dependencies = [
@@ -1761,6 +1772,8 @@ dependencies = [
  "fcae-bridge-aether",
  "fcae-bridge-hev-socks5-tunnel",
  "fcae-bridge-psiphon",
+ "fcae-bridge-singbox",
+ "fcae-bridge-xray",
  "fcae-bridge-zeptun",
  "fcae-build",
  "fcae-firefox-bridge",
@@ -1771,6 +1784,18 @@ dependencies = [
  "log",
  "once_cell",
  "parking_lot",
+ "serde_json",
+]
+
+[[package]]
+name = "fcae-bridge-xray"
+version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "fcae-abi",
+ "fcae-go-bridge",
+ "fcae-runtime",
+ "log",
  "serde_json",
 ]
 
@@ -1844,6 +1869,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "fcae-abi",
  "fcae-build",
  "futures",
@@ -2979,16 +3005,6 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
-
-[[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
 
 [[package]]
 name = "liblzma"

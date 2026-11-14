@@ -1098,6 +1098,8 @@ fn backend_label(backend: FcaeBackend) -> &'static str {
         FcaeBackend::Aether => "Aether",
         FcaeBackend::Psiphon => "Psiphon",
         FcaeBackend::Firefox => "Firefox",
+        FcaeBackend::Xray => "Xray",
+        FcaeBackend::SingBox => "sing-box",
     }
 }
 

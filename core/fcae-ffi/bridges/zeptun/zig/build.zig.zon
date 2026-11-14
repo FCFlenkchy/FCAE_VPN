@@ -1,0 +1,11 @@
+.{
+    .name = .fcae_zeptun_windows,
+    .version = "0.0.0",
+    .fingerprint = 0x7b26a9726c2e2755,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        // Four levels up: bridges/zeptun/zig -> bridges -> fcae-ffi -> core.
+        .zeptun = .{ .path = "../../../../zeptun" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon" },
+}

@@ -42,6 +42,13 @@ zeptun = ["dep:fcae-bridge-zeptun"]
 # default tun2socks engine only). Compile with
 # `fcae-bridge-hev-socks5-tunnel/stub` to type-check without the engine.
 hev = ["dep:fcae-bridge-hev-socks5-tunnel"]
+# Xray-core backend. Its Go code is compiled into the same archive as tun2socks
+# and Psiphon, which is why this also pulls the Go bridge in.
+xray = ["dep:fcae-bridge-xray", "fcae-go-bridge/xray"]
+# sing-box backend, in the same archive.
+singbox = ["dep:fcae-bridge-singbox", "fcae-go-bridge/singbox"]
+# Both extra cores.
+cores = ["xray", "singbox"]
 # Tor egress inside the Aether engine. OFF by default: it pulls in arti-client
 # and a statically built liblzma, which need a C cross-toolchain on the
 # Android and Windows-cross runners.
@@ -57,6 +64,8 @@ fcae-bridge-psiphon = { workspace = true, optional = true }
 fcae-firefox-bridge = { workspace = true, optional = true }
 fcae-bridge-zeptun = { workspace = true, optional = true }
 fcae-bridge-hev-socks5-tunnel = { workspace = true, optional = true }
+fcae-bridge-xray = { workspace = true, optional = true }
+fcae-bridge-singbox = { workspace = true, optional = true }
 libc.workspace = true
 log.workspace = true
 once_cell.workspace = true

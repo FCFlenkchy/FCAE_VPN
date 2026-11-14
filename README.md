@@ -17,6 +17,8 @@ A censorship circumvention client for Windows, Linux, macOS, and Android, with T
 - **Aether (WARP)** — Cloudflare WARP support, including Tor routing.
 - **Firefox IP Protection** — Rust-based support for Mozilla's Firefox IP Protection service.
 - **Psiphon** — Psiphon tunnel core.
+- **Xray-core** — VLESS, VMess, Trojan, Shadowsocks, SOCKS5 and HTTP outbounds (TLS, REALITY, WS, gRPC, HTTP/2, HTTPUpgrade). Built from source into the same Go archive as tun2socks and Psiphon, and started in-process; set `FcaeConfig.core.profile` to a share link or a native config.
+- **sing-box** — the same outbounds, served by sing-box's own config dialect, built with its complete upstream feature set (every protocol, transport, endpoint and service an official binary carries: WireGuard, QUIC/Hysteria2/TUIC, gVisor, OpenVPN, OpenConnect, Tailscale, ACME, Cloudflared, Clash API). Its own generator, in that same archive; the UI treats both identically. FCAE owns the TUN device, so a native config's `tun` inbound is served by it: the inbound becomes the session's SOCKS listener, under its own tag, so the config's route rules still match what they were written for.
 
 ## Inline Routing Rules (Aether only)
 
@@ -98,6 +100,9 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for all native desktop rendering.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C SOCKS5 tunnel engine, runs in-process.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon tunnel core library.
+- **[Xray-core](https://github.com/XTLS/Xray-core)** — Proxy core, compiled into the app's Go archive and run in-process.
+- **[sing-box](https://github.com/SagerNet/sing-box)** — Proxy core, compiled into the same Go archive and run in-process.
+- **[qpack](https://github.com/quic-go/qpack)** — QPACK header compression behind the quic-go forks in that archive. Psiphon's fork predates qpack 0.6's API while sing-box's and Xray-core's require it, so `core/fcae-ffi/gomods/qpack` carries one version with both, instead of pinning one the other half cannot build against.
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend for MASQUE protocol support.
 - **[Wintun](https://www.wintun.net/)** — A TUN driver for Windows by WireGuard. Provides a high-performance network interface at Layer 3 for tunneling traffic.
 - **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — A Go library that transparently routes TUN device traffic through a SOCKS5 proxy. Powers the system-wide VPN TUN mode across all supported platforms (Linux, Windows, macOS, and Android).

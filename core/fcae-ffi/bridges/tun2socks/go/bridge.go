@@ -1,6 +1,13 @@
 // Package main is the cgo shim that turns xjasonlyu/tun2socks into an
 // in-process library instead of a subprocess.
 //
+// It is one package on purpose. A Go program has exactly one runtime, so it
+// also has exactly one dependency graph: the other Go engines FCAE links —
+// Psiphon, Xray-core, sing-box — are shims in this same package, contributed by
+// their own bridge crates and controlled by build tags (`fcae_xray`,
+// `fcae_singbox`). Separate archives would duplicate the runtime and every
+// shared dependency.
+//
 // It is compiled with `go build -buildmode=c-archive`, producing
 // libfcae_go_bridge.a + .h, which the Rust crate links statically. The Go
 // runtime then lives inside libfcae_ffi.a, so there is no tun2socks

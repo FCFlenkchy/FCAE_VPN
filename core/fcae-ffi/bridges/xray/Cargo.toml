@@ -1,0 +1,24 @@
+[package]
+name = "fcae-bridge-xray"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Xray-core backend bridge: config generation and the in-process core's C entry points."
+
+[lib]
+name = "fcae_bridge_xray"
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+fcae-abi.workspace = true
+fcae-runtime.workspace = true
+# The Go archive this core is compiled into: it exports the shim and reports
+# whether the archive is real or stubbed.
+fcae-go-bridge = { workspace = true, features = ["xray"] }
+async-trait.workspace = true
+log.workspace = true
+serde_json.workspace = true
