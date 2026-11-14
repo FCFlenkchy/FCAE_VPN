@@ -563,11 +563,21 @@ impl TunBridge for Tun2SocksBridge {
     fn stop(&self, timeout: Duration) {
         self.abort();
 
-        if let Some(undo) = self.stashed_undo.lock().take() {
-            platform::restore(undo, timeout);
-        }
-
-        let rc = unsafe { t2s_stop() };
+        // Closing the gVisor stack and undoing the host's routes and DNS are
+        // independent, and on Android there is nothing to undo at all, so run
+        // both at once: in sequence a Disconnect costs the sum of the two, and
+        // the stack side is the one that used to take a whole UDP timeout.
+        let undo = self.stashed_undo.lock().take();
+        let rc = std::thread::scope(|scope| {
+            // Go joins whatever it has to on its own thread; a panic there
+            // would already have taken the process down, so the join only
+            // releases the scope.
+            let stopping = scope.spawn(|| unsafe { t2s_stop() });
+            if let Some(undo) = undo {
+                platform::restore(undo, timeout);
+            }
+            stopping.join().unwrap_or(0)
+        });
         if rc != 0 {
             log::warn!("[tun2socks] t2s_stop returned {rc}");
         }

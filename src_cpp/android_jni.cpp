@@ -68,10 +68,80 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     return JNI_VERSION_1_6;
 }
 
+namespace {
+
+// The calling thread's JNIEnv, attaching it on first use.
+//
+// These threads are the Go runtime's and the session worker's: they outlive the
+// call and are reused for the next one, and protect() alone runs once per
+// socket every engine dials while a session comes up. Attaching and detaching
+// per call meant paying that twice per socket, so the thread is attached once,
+// as a daemon, and left attached -- the JVM reclaims it with the process.
+// Returns a null env when the VM is gone.
+class ScopedEnv {
+public:
+    ScopedEnv() {
+        if (!g_vm) return;
+        if (g_vm->GetEnv((void**)&env_, JNI_VERSION_1_6) == JNI_OK) return;
+        if (g_vm->AttachCurrentThreadAsDaemon(&env_, nullptr) != JNI_OK) env_ = nullptr;
+    }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+    JNIEnv* get() const { return env_; }
+
+private:
+    JNIEnv* env_ = nullptr;
+};
+
+// Hold on to the VpnService for the duration of one call.
+//
+// The mutex only covers taking this reference: the JNI calls made with it run
+// concurrently, exactly like the Psiphon owner below. Holding a process-wide
+// lock across them serialised every protect() with the TUN establish, and
+// establish() is a binder round trip to the system server while the backend
+// that is waiting for the interface is dialling -- every socket it opened
+// queued behind the interface creation, and the interface creation queued
+// behind those sockets. A local ref keeps the service alive across the
+// unregister that may delete the global one meanwhile, which is the only thing
+// the lock was protecting.
+class VpnServiceRef {
+public:
+    explicit VpnServiceRef(JNIEnv* env, jmethodID* method_out) : env_(env), method_(nullptr) {
+        std::lock_guard<std::mutex> lock(g_protect_mu);
+        if (g_vpn_service && method_out && *method_out) {
+            service_ = env->NewLocalRef(g_vpn_service);
+            method_ = *method_out;
+        }
+    }
+    ~VpnServiceRef() {
+        if (service_) env_->DeleteLocalRef(service_);
+    }
+    VpnServiceRef(const VpnServiceRef&) = delete;
+    VpnServiceRef& operator=(const VpnServiceRef&) = delete;
+
+    explicit operator bool() const { return service_ != nullptr; }
+    jobject service() const { return service_; }
+    jmethodID method() const { return method_; }
+
+private:
+    JNIEnv* env_;
+    jobject service_ = nullptr;
+    jmethodID method_;
+};
+
+}  // namespace
+
 // Returns 1 on success, 0 on failure, matching the C ABI's contract.
 static int psiphon_protect(int fd) {
-    std::lock_guard<std::mutex> lock(g_protect_mu);
-    if (!g_vm || !g_vpn_service || !g_protect_mid) {
+    ScopedEnv scoped;
+    JNIEnv* env = scoped.get();
+    if (!env) {
+        LOGE("psiphon_protect: could not attach thread");
+        return 0;
+    }
+
+    VpnServiceRef vpn(env, &g_protect_mid);
+    if (!vpn) {
         // This file is only ever compiled into the Android app, where a
         // missing service is never benign: our TUN is up and this socket
         // would be captured by it, so Psiphon would dial the internet
@@ -86,24 +156,10 @@ static int psiphon_protect(int fd) {
         return 0;
     }
 
-    JNIEnv* env = nullptr;
-    bool attached = false;
-    if (g_vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
-        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
-            LOGE("psiphon_protect: could not attach thread");
-            return 0;
-        }
-        attached = true;
-    }
-
-    jboolean ok = env->CallBooleanMethod(g_vpn_service, g_protect_mid, (jint)fd);
+    jboolean ok = env->CallBooleanMethod(vpn.service(), vpn.method(), (jint)fd);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
-        ok = JNI_FALSE;
-    }
-
-    if (attached) {
-        g_vm->DetachCurrentThread();
+        return 0;
     }
     return ok == JNI_TRUE ? 1 : 0;
 }
@@ -124,43 +180,17 @@ static jmethodID g_network_id_mid = nullptr;
 
 namespace {
 
-// Scoped JNIEnv that attaches the calling thread if needed and detaches on
-// destruction. Returns a null env when the VM is gone.
-class ScopedEnv {
-public:
-    ScopedEnv() {
-        if (!g_vm) return;
-        if (g_vm->GetEnv((void**)&env_, JNI_VERSION_1_6) != JNI_OK) {
-            if (g_vm->AttachCurrentThread(&env_, nullptr) != JNI_OK) {
-                env_ = nullptr;
-                return;
-            }
-            attached_ = true;
-        }
-    }
-    ~ScopedEnv() {
-        if (attached_ && g_vm) g_vm->DetachCurrentThread();
-    }
-    ScopedEnv(const ScopedEnv&) = delete;
-    ScopedEnv& operator=(const ScopedEnv&) = delete;
-    JNIEnv* get() const { return env_; }
-
-private:
-    JNIEnv* env_ = nullptr;
-    bool attached_ = false;
-};
-
 // Call a no-argument Java method returning String and hand the result to the
 // caller as a malloc'd C string (which the Go side frees).
-char* call_string_method(jmethodID mid) {
-    std::lock_guard<std::mutex> lock(g_protect_mu);
-    if (!g_vpn_service || !mid) return nullptr;
-
+char* call_string_method(jmethodID* mid) {
     ScopedEnv scoped;
     JNIEnv* env = scoped.get();
     if (!env) return nullptr;
 
-    jobject result = env->CallObjectMethod(g_vpn_service, mid);
+    VpnServiceRef vpn(env, mid);
+    if (!vpn) return nullptr;
+
+    jobject result = env->CallObjectMethod(vpn.service(), vpn.method());
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         if (result) env->DeleteLocalRef(result);
@@ -343,11 +373,11 @@ Java_com_fc_fcaevpn_PsiphonTunnel_nativeNetworkChanged(JNIEnv* env, jclass, jobj
 }
 
 static char* psiphon_dns_servers() {
-    return call_string_method(g_dns_mid);
+    return call_string_method(&g_dns_mid);
 }
 
 static char* psiphon_network_id() {
-    return call_string_method(g_network_id_mid);
+    return call_string_method(&g_network_id_mid);
 }
 
 // 1 when a usable underlying network exists, 0 otherwise.
@@ -356,18 +386,18 @@ static char* psiphon_network_id() {
 // the device was offline, so a network handover looked like a tunnel stuck
 // on "establishing" forever.
 static int psiphon_has_connectivity() {
-    std::lock_guard<std::mutex> lock(g_protect_mu);
-    if (!g_vpn_service || !g_connectivity_mid) {
+    ScopedEnv scoped;
+    JNIEnv* env = scoped.get();
+    if (!env) return 1;
+
+    VpnServiceRef vpn(env, &g_connectivity_mid);
+    if (!vpn) {
         // Unknown: claim connectivity so we never stall a tunnel that could
         // have worked. The dial will fail on its own if it cannot.
         return 1;
     }
 
-    ScopedEnv scoped;
-    JNIEnv* env = scoped.get();
-    if (!env) return 1;
-
-    jboolean ok = env->CallBooleanMethod(g_vpn_service, g_connectivity_mid);
+    jboolean ok = env->CallBooleanMethod(vpn.service(), vpn.method());
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         return 1;
@@ -384,18 +414,24 @@ static int psiphon_has_connectivity() {
 static jmethodID g_establish_mid = nullptr;
 
 // Returns the TUN fd, or negative if the interface could not be created.
+//
+// The TUN fd gates the whole data plane, so this call must not queue behind
+// anything else: the reference is taken under the hook mutex and the binder
+// round trip inside establishTunNow() runs without it. The service re-reads
+// its own session generation before and after, so a disconnect that lands
+// during the call is still caught there.
 static int establish_tun() {
-    std::lock_guard<std::mutex> lock(g_protect_mu);
-    if (!g_vpn_service || !g_establish_mid) {
-        LOGE("establish_tun: no VpnService registered");
-        return -1;
-    }
-
     ScopedEnv scoped;
     JNIEnv* env = scoped.get();
     if (!env) return -1;
 
-    jint fd = env->CallIntMethod(g_vpn_service, g_establish_mid);
+    VpnServiceRef vpn(env, &g_establish_mid);
+    if (!vpn) {
+        LOGE("establish_tun: no VpnService registered");
+        return -1;
+    }
+
+    jint fd = env->CallIntMethod(vpn.service(), vpn.method());
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         LOGE("establish_tun: the service threw while establishing");

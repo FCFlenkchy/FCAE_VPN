@@ -7,6 +7,12 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
   ZIG_CACHE="$(mktemp -d "${RUNNER_TEMP:?}/zeptun-cache.XXXXXX")"
   trap 'rm -rf "$ZIG_CACHE"' EXIT
 fi
+# The app's deployment target. A bare `x86_64-macos` triple lets Zig take the
+# *runner's* macOS version, which stamped the archive with LC_BUILD_VERSION 15.0
+# while the app links against 13.0: ld warns that the object "was built for newer
+# 'macOS' version", and the object may reference APIs that do not exist at the
+# minimum the app still supports. Pin the version into the triple instead.
+MACOS_MIN="13.0"
 case "${FCAE_MATRIX_NAME}" in
   linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=small ;;
   windows-x64)
@@ -19,8 +25,8 @@ case "${FCAE_MATRIX_NAME}" in
     (cd "$ZIG_DIR" && zig build -Dtarget=x86_64-windows-gnu -Doptimize=small \
       --cache-dir "$ZIG_CACHE" --prefix "$ZEPTUN_ROOT/zig-out")
     ;;
-  macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=small ;;
-  macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=small ;;
+  macos-arm64) zig build -Dtarget="aarch64-macos.$MACOS_MIN" -Doptimize=small ;;
+  macos-x64)   zig build -Dtarget="x86_64-macos.$MACOS_MIN" -Doptimize=small ;;
   android-*)
     SYSROOT="${ANDROID_NDK_HOME:?}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
     test -d "$SYSROOT/usr/include"

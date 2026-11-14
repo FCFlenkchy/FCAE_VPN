@@ -1144,11 +1144,130 @@ func startFD(k *engine.Key) error {
     return err
 }
 
-func stopFD() {
-    d, s := fdDevice, fdStack
-    fdDevice, fdStack = nil, nil
-    if d != nil { d.Close() }
-    if s != nil { s.Close(); s.Wait() }
+// stackStopGrace is how long a Disconnect waits for the data plane to retire.
+//
+// gVisor's Stack.Wait() has no deadline of its own: it returns only once every
+// endpoint the stack registered has been destroyed, and one endpoint still held
+// by a transport goroutine pins it for as long as that goroutine lives -- a
+// flow parked on the UDP timeout keeps one for 30s. Waiting that out is what
+// made teardown feel stuck, so the caller waits at most this long and lets the
+// rest finish in the background: by then the device and the stack are closed,
+// no packet can enter or leave any more, and what remains is reclamation.
+const stackStopGrace = 2 * time.Second
+
+// heapOnce keeps the heap policy out of the start path's repeated work.
+//
+// The values are the mobile ones -- collect at 1.5x the live heap and keep the
+// process under a soft limit -- but both setter calls have a side effect when
+// they are re-applied: a soft limit below the current heap starts a collection
+// immediately, and that collection runs on the thread that is bringing the
+// tunnel up, right before gVisor builds its stack and buffer pools. Once is
+// enough: the runtime keeps both settings until they are changed.
+var heapOnce sync.Once
+
+func applyHeapPolicy() {
+	heapOnce.Do(func() {
+		debug.SetGCPercent(50)
+		debug.SetMemoryLimit(48 * 1024 * 1024)
+	})
+}
+
+// retiring is the previous engine run's teardown when it outlived its grace.
+// engine.Start and engine.Stop share one stack and one device, so a new run
+// must not start beside a teardown that is still inside gVisor.
+var retiring <-chan struct{}
+
+// freeingMemory guards the one background collection a stop may start.
+var freeingMemory atomic.Bool
+
+// startTeardown runs teardown on its own goroutine so the caller can stop
+// waiting on it. The goroutine must only touch state the caller already
+// detached (mu is held while it runs).
+func startTeardown(what string, teardown func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				emit(logWarn, "[bridge] panic during %s (ignored): %v", what, r)
+			}
+		}()
+		teardown()
+	}()
+	return done
+}
+
+// settleTeardown waits stackStopGrace for done. An engine teardown that outlives
+// it is remembered, so the next start cannot build a run beside it.
+func settleTeardown(done <-chan struct{}, engineRun bool) {
+	timer := time.NewTimer(stackStopGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		emit(logWarn, "[bridge] teardown still running after %s; the session is not waiting for it", stackStopGrace)
+		if engineRun {
+			retiring = done
+		}
+	}
+}
+
+// awaitRetiring drains a previous engine teardown, reporting false when it is
+// still stuck inside gVisor.
+func awaitRetiring() bool {
+	if retiring == nil {
+		return true
+	}
+	timer := time.NewTimer(stackStopGrace)
+	defer timer.Stop()
+	select {
+	case <-retiring:
+		retiring = nil
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// stopFD closes the caller-owned descriptor and the stack built on it. Both
+// closes happen here, because they are what stops traffic and releases the fd;
+// only the reclamation Wait() runs in the background. The returned channel
+// reports when that finished.
+func stopFD() <-chan struct{} {
+	d, s := fdDevice, fdStack
+	fdDevice, fdStack = nil, nil
+	if d != nil {
+		d.Close()
+	}
+	if s == nil {
+		return closedChannel()
+	}
+	s.Close()
+	return startTeardown("gVisor stack", s.Wait)
+}
+
+// closedChannel returns a channel that is already closed, so callers that
+// settle a teardown do not have to special-case one that never happened.
+func closedChannel() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+// stopRun tears down whatever the current run owns: the descriptor and stack of
+// an fd:// run, the engine otherwise. It reports whether it took the engine
+// path, whose teardown shares state a later start would also touch.
+func stopRun() (done <-chan struct{}, engineRun bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			emit(logWarn, "[bridge] panic during stop (ignored): %v", r)
+			done, engineRun = closedChannel(), false
+		}
+	}()
+	if fdDevice != nil || fdStack != nil {
+		return stopFD(), false
+	}
+	return startTeardown("tun2socks engine", func() { _ = engine.Stop() }), true
 }
 
 //export t2s_start
@@ -1162,8 +1281,15 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char,
 		return -1
 	}
 
-	debug.SetGCPercent(50)
-	debug.SetMemoryLimit(48 * 1024 * 1024)
+	// The engine path owns this package's single stack, so a teardown that
+	// outlived its grace has to be gone before another one is built. An fd://
+	// run builds its own stack and never touches the engine's.
+	if !strings.HasPrefix(C.GoString(device), "fd://") && !awaitRetiring() {
+		emit(logError, "[bridge] the previous tun2socks teardown is still running; refusing to start")
+		return -3
+	}
+
+	applyHeapPolicy()
 
 	key := &engine.Key{
 		Device:   C.GoString(device),
@@ -1218,10 +1344,8 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char,
         stopDNSContext()
         emit(logError, "[bridge] %v", startErr)
         consumedFD := fdDevice != nil
-        func() {
-            defer func() { _ = recover() }()
-            if strings.HasPrefix(key.Device, "fd://") { stopFD() } else { _ = engine.Stop() }
-        }()
+        done, engineRun := stopRun()
+        settleTeardown(done, engineRun)
         if consumedFD { return -4 } // already closed by Go; MUST NOT close again in Rust
         return -3
     }
@@ -1241,23 +1365,30 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char,
 // Tear the stack down. Idempotent; returns 0 on success.
 func t2s_stop() C.int {
 	mu.Lock()
-	defer mu.Unlock()
-
 	if !running {
+		mu.Unlock()
 		return 0
 	}
-    stopDNSContext()
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				emit(logWarn, "[bridge] panic during stop (ignored): %v", r)
-			}
-		}()
-        if fdDevice != nil { stopFD() } else { _ = engine.Stop() }
-	}()
+
+	stopDNSContext()
+	done, engineRun := stopRun()
 	running = false
-	debug.FreeOSMemory()
+	settleTeardown(done, engineRun)
+	mu.Unlock()
+
 	emit(logInfo, "[bridge] tun2socks stopped")
+
+	// The stack's heap is garbage as soon as it is closed and on a phone the
+	// pages are worth returning, but a forced GC plus scavenge is synchronous
+	// work that has nothing to do with the tunnel being down. Keep it off the
+	// thread the Disconnect is waiting on, and never let a reconnect loop pile
+	// one collection up per attempt.
+	if freeingMemory.CompareAndSwap(false, true) {
+		go func() {
+			defer freeingMemory.Store(false)
+			debug.FreeOSMemory()
+		}()
+	}
 	return 0
 }
 

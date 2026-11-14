@@ -12,6 +12,31 @@ fn checked(code: u32, operation: &str) -> Result<()> {
     Err(CoreError::Internal(format!("Windows DNS protection: {operation} failed (0x{code:08x})")))
 }
 
+/// Adds one filter built from exactly the arguments given: a filter can never
+/// inherit a stale condition or weight from the previous one, so no condition is
+/// ever set on a filter that is not submitted with it.
+fn add_filter(
+    engine: HANDLE,
+    layer: GUID,
+    sublayer_key: GUID,
+    name: &mut [u16],
+    conditions: &mut [FWPM_FILTER_CONDITION0],
+    action: FWP_ACTION_TYPE,
+    weight: u8,
+    operation: &str,
+) -> Result<()> {
+    let mut filter = FWPM_FILTER0::default();
+    filter.displayData.name = name.as_mut_ptr();
+    filter.layerKey = layer;
+    filter.subLayerKey = sublayer_key;
+    filter.weight.r#type = FWP_UINT8;
+    filter.weight.Anonymous.uint8 = weight;
+    filter.filterCondition = conditions.as_mut_ptr();
+    filter.numFilterConditions = conditions.len() as u32;
+    filter.action.r#type = action;
+    checked(unsafe { FwpmFilterAdd0(engine, &filter, ptr::null_mut(), ptr::null_mut()) }, operation)
+}
+
 // The dynamic session owns all filters and can be moved between supervisor threads.
 pub(crate) struct DnsFirewall { engine: usize }
 
@@ -47,6 +72,9 @@ impl DnsFirewall {
             ] {
                 for port in [53u16, 853] {
                     for protocol in [6u8, 17u8] {
+                        // Port and protocol block DNS on every interface; the
+                        // third condition scopes the permit to this tunnel's
+                        // interface, and its higher weight wins over the block.
                         let mut conditions = [FWPM_FILTER_CONDITION0::default(); 3];
                         conditions[0].fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
                         conditions[0].matchType = FWP_MATCH_EQUAL;
@@ -56,18 +84,6 @@ impl DnsFirewall {
                         conditions[1].matchType = FWP_MATCH_EQUAL;
                         conditions[1].conditionValue.r#type = FWP_UINT8;
                         conditions[1].conditionValue.Anonymous.uint8 = protocol;
-
-                        let mut filter = FWPM_FILTER0::default();
-                        filter.displayData.name = name.as_mut_ptr();
-                        filter.layerKey = layer;
-                        filter.subLayerKey = sublayer_key;
-                        filter.weight.r#type = FWP_UINT8;
-                        filter.weight.Anonymous.uint8 = 0;
-                        filter.filterCondition = conditions.as_mut_ptr();
-                        filter.numFilterConditions = 2;
-                        filter.action.r#type = FWP_ACTION_BLOCK;
-                        checked(unsafe { FwpmFilterAdd0(engine, &filter, ptr::null_mut(), ptr::null_mut()) }, "add DNS block filter")?;
-
                         conditions[2].matchType = FWP_MATCH_EQUAL;
                         if transport {
                             conditions[2].fieldKey = FWPM_CONDITION_INTERFACE_INDEX;
@@ -78,10 +94,9 @@ impl DnsFirewall {
                             conditions[2].conditionValue.r#type = FWP_UINT64;
                             conditions[2].conditionValue.Anonymous.uint64 = &mut interface_luid;
                         }
-                        filter.numFilterConditions = 3;
-                        filter.weight.Anonymous.uint8 = 15;
-                        filter.action.r#type = FWP_ACTION_PERMIT;
-                        checked(unsafe { FwpmFilterAdd0(engine, &filter, ptr::null_mut(), ptr::null_mut()) }, "add tunnel DNS permit filter")?;
+
+                        add_filter(engine, layer, sublayer_key, &mut name, &mut conditions[..2], FWP_ACTION_BLOCK, 0, "add DNS block filter")?;
+                        add_filter(engine, layer, sublayer_key, &mut name, &mut conditions[..3], FWP_ACTION_PERMIT, 15, "add tunnel DNS permit filter")?;
                     }
                 }
             }

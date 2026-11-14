@@ -491,7 +491,28 @@ impl TunGuard {
     }
 
     fn apply(&mut self, cfg: &SessionConfig, peer_ip: Option<&str>, assign_addresses: bool) -> Result<()> {
-        self.dns_firewall = Some(DnsFirewall::install(&self.device)?);
+        // The DNS firewall is a ruleset/table keyed on the device name alone:
+        // nothing programmed below depends on it, and it depends on none of
+        // that. Installing it first and in series made every desktop TUN start
+        // pay for an nft/pfctl load before it even began on the addresses and
+        // routes, and the tunnel is not up for the user until both are done.
+        let device = self.device.clone();
+        let (firewall, programmed) = std::thread::scope(|scope| {
+            let firewall = scope.spawn(move || DnsFirewall::install(&device));
+            let programmed = self.program(cfg, peer_ip, assign_addresses);
+            let firewall = firewall
+                .join()
+                .unwrap_or_else(|_| Err(CoreError::Internal("[tun] DNS: the firewall installer panicked".into())));
+            (firewall, programmed)
+        });
+        // On an error the guard is dropped, and its Drop is what puts back
+        // whatever either half already changed.
+        self.dns_firewall = Some(firewall?);
+        programmed
+    }
+
+    /// Addresses, routes and resolvers for the device.
+    fn program(&mut self, cfg: &SessionConfig, peer_ip: Option<&str>, assign_addresses: bool) -> Result<()> {
         let v6 = if assign_addresses { self.assign(cfg)? } else { cfg.tun.ipv6.is_some() };
         for peer in crate::backend::bypass_peers(peer_ip) {
             self.bypass(peer);

@@ -348,10 +348,14 @@ impl Supervisor {
                     ))
                 }));
 
-                // Teardown order matters: the bridge must be down before the
-                // runtime is dropped, because its stop path may need to run
-                // blocking OS commands.
-                tun_bridge.stop(stop_timeout);
+                // The attempt loop takes the bridge down on every exit path it
+                // has, so this is only the net for a teardown that a panic or a
+                // cancelled start left half done. Unconditional, it made every
+                // Disconnect tear the TUN down twice -- and the second pass is
+                // the one that pays a whole stack teardown again.
+                if tun_bridge.is_running() {
+                    tun_bridge.stop(stop_timeout);
+                }
                 // A cancelled start may not have returned a BackendHandle.
                 // Drain every provider while its runtime is still alive, not
                 // just the carrier. Dropping the runtime early force-cancelled
