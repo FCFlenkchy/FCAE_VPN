@@ -16,3 +16,9 @@
 [submodule "aether"]
 	path = core/aether
 	url = https://github.com/CluvexStudio/aether.git
+[submodule "core/xray"]
+	path = core/xray
+	url = https://github.com/XTLS/Xray-core.git
+[submodule "core/sing-box"]
+	path = core/sing-box
+	url = https://github.com/SagerNet/sing-box.git
