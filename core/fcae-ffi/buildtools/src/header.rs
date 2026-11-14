@@ -61,7 +61,15 @@ pub fn generate(abi_crate_dir: &Path, header_path: &Path) -> bool {
         .status();
 
     match result {
-        Ok(status) if status.success() => true,
+        Ok(status) if status.success() => {
+            // cbindgen emits no marker of its own, so the freshly written file
+            // would fail [`verify`] on the next build -- every machine with
+            // cbindgen installed would hand CI an unstamped header.
+            if let Err(e) = stamp(&abi_crate_dir.join("src/lib.rs"), header_path) {
+                crate::note(format!("cannot stamp the regenerated header: {e}"));
+            }
+            true
+        }
         other => {
             match other {
                 Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {},
@@ -110,6 +118,29 @@ pub fn fingerprint_line(abi_src: &Path) -> std::io::Result<String> {
         "{FINGERPRINT_PREFIX}0x{:016x} */\n",
         fingerprint(&src)
     ))
+}
+
+/// Rewrite `header_path` with the current fingerprint as its last line,
+/// dropping any marker it carried before.
+///
+/// Idempotent, so it is safe to run over a header cbindgen has just written and
+/// over one that is already stamped.
+pub fn stamp(abi_src: &Path, header_path: &Path) -> std::io::Result<()> {
+    let line = fingerprint_line(abi_src)?;
+    let text = std::fs::read_to_string(header_path)?;
+
+    let mut kept: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(FINGERPRINT_PREFIX))
+        .collect();
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
+    }
+
+    let mut out = kept.join("\n");
+    out.push_str("\n\n");
+    out.push_str(&line);
+    std::fs::write(header_path, out)
 }
 
 #[cfg(test)]

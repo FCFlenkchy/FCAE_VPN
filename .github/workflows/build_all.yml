@@ -227,12 +227,19 @@ jobs:
           key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
+      # NDK r30 (LTS, clang-r574158c / LLVM 22, sysroot API 37). r28 is the
+      # hard floor, not a preference: sing-box's naive outbound statically links
+      # cronet-go's prebuilt Chromium objects, which carry AArch64 GOTPCREL32
+      # relocations (0x13b) that lld only learned in LLVM 18.1 -- every r27
+      # release still dies in ld.lld with "unknown relocation (315)".
+      # `android/app/build.gradle.kts` pins the same revision, so Gradle's CMake
+      # build, the Rust FFI and the Go archive share one toolchain.
       - name: setup ndk
         id: setup-ndk
         if: startsWith(matrix.name, 'android-')
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27
+          ndk-version: r30
           link-to-sdk: true
 
       - name: cache zig

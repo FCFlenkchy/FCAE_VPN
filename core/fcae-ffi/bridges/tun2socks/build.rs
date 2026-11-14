@@ -55,6 +55,22 @@ fn main() {
         return;
     }
 
+    // sing-box's naive outbound links cronet-go's prebuilt Chromium objects,
+    // which carry AArch64 GOTPCREL32 relocations (0x13b). lld learned them in
+    // LLVM 18.1, which no release of NDK r27 ships: there the link dies with
+    // "unknown relocation (315)", naming neither the object nor the reason.
+    // r28 is the floor; CI provisions r30.
+    if singbox && target.is_android() {
+        if let Some(major) = fcae_build::go::ndk_revision() {
+            assert!(
+                major >= 28,
+                "the Android NDK in use is r{major}, but sing-box's naive outbound needs r28 or \
+                 newer: its prebuilt cronet objects use relocations that lld r{major} rejects. \
+                 Point ANDROID_NDK_HOME at NDK r30 (what CI provisions) or r28+."
+            );
+        }
+    }
+
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let go_dir = manifest.join("go");
     let root = fcae_build::repo_root();

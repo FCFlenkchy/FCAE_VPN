@@ -66,6 +66,12 @@ val androidVersionCode = System.getenv("FCAE_ANDROID_VERSION_CODE")?.takeIf { it
 android {
     namespace = "com.fc.fcaevpn"
     compileSdk = 36
+    // Pinned to the NDK CI installs (`setup-ndk` "r30", Pkg.Revision
+    // 30.0.16248370), so Gradle's CMake build, the Rust FFI and the Go archive
+    // link with one toolchain. r28 is the floor: sing-box's naive outbound
+    // links cronet-go's prebuilt Chromium objects, whose relocations lld only
+    // understands from LLVM 18.1 on. See .github/workflows/build_all.yml.
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "com.fc.fcaevpn"

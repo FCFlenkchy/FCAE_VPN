@@ -81,6 +81,30 @@ impl std::fmt::Display for GoError {
 
 impl std::error::Error for GoError {}
 
+/// Major version of the Android NDK the build is pointed at, read from the
+/// `Pkg.Revision` line of its `source.properties`.
+///
+/// `None` when no NDK is configured, or when the file is not where every NDK
+/// since r19 puts it; the link then reports whatever the real problem is.
+pub fn ndk_revision() -> Option<u32> {
+    for key in ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"] {
+        let Ok(dir) = std::env::var(key) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(PathBuf::from(dir).join("source.properties")) else {
+            continue;
+        };
+        let revision = text.lines().find_map(|line| {
+            let (_, value) = line.strip_prefix("Pkg.Revision")?.split_once('=')?;
+            value.trim().split('.').next()?.parse::<u32>().ok()
+        });
+        if revision.is_some() {
+            return revision;
+        }
+    }
+    None
+}
+
 impl<'a> CArchive<'a> {
     pub fn new(module_dir: &'a Path, package: &'a str, lib_name: &'a str) -> Self {
         Self {

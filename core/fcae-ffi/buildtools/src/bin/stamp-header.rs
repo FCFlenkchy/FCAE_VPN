@@ -13,21 +13,7 @@ fn main() {
     let abi = root.join("../abi/src/lib.rs");
     let header = root.join("../include/fcae.h");
 
-    let line = fcae_build::header::fingerprint_line(&abi).expect("read abi source");
-    let text = std::fs::read_to_string(&header).expect("read header");
-
-    let mut kept: Vec<&str> = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("/* fcae-abi-fingerprint:"))
-        .collect();
-    while kept.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
-        kept.pop();
-    }
-
-    let mut out = kept.join("\n");
-    out.push_str("\n\n");
-    out.push_str(&line);
-    std::fs::write(&header, out).expect("write header");
+    fcae_build::header::stamp(&abi, &header).expect("stamp the header");
 
     println!("stamped {}", header.display());
 }
