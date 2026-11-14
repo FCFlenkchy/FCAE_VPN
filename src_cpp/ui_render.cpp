@@ -4290,10 +4290,15 @@ void render_ui() {
                                      g_app.upstream_proxy, sizeof(g_app.upstream_proxy));
             ImGui::PopItemWidth();
             {
+                // The normalised URL and the message kept from it are the same
+                // size, so the copy below cannot truncate; a smaller message
+                // buffer would silently cut a long diagnostic in half (and GCC
+                // flags exactly that with -Wformat-truncation).
+                constexpr std::size_t kProxyUrlCap = 2048;
                 static char checked[sizeof(g_app.upstream_proxy)] = {1};
-                static char proxy_err[192];
+                static char proxy_err[kProxyUrlCap];
                 if (strcmp(checked, g_app.upstream_proxy) != 0) {
-                    char canonical[2048];
+                    char canonical[kProxyUrlCap];
                     proxy_err[0] = 0;
                     if (!fcae_normalize_upstream_proxy(g_app.upstream_proxy, canonical, sizeof(canonical)))
                         snprintf(proxy_err, sizeof(proxy_err), "%s", canonical);

@@ -20,6 +20,24 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
   export ANDROID_NDK_HOME="$NDK"
   export ANDROID_NDK_ROOT="$NDK"
 
+  # A restored cargo cache (rust-cache, or a local target/) can hold build
+  # output configured against the NDK of an earlier run. CMake then reuses its
+  # cached toolchain path and aborts with "include could not find requested
+  # file: .../build/cmake/android.toolchain.cmake". Drop cached native output
+  # that points at an NDK other than the one now in use.
+  ndk_toolchain="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+  if [ -d target ]; then
+    while IFS= read -r -d '' out_dir; do
+      stale="$(grep -rhoE --include=CMakeCache.txt --include='*.cmake' \
+        '/[^"[:space:];]*/build/cmake/android\.toolchain\.cmake' "$out_dir" 2>/dev/null \
+        | sort -u | grep -vxF "$ndk_toolchain" || true)"
+      if [ -n "$stale" ]; then
+        echo "  -> dropping cached output built against another NDK ($stale): $out_dir"
+        rm -rf "$out_dir"
+      fi
+    done < <(find target -type d -path '*/release/build/*/out' -print0)
+  fi
+
   if [ "${FCAE_MATRIX_NAME}" = "android-universal" ]; then
     echo "Building Rust for all Android ABIs (universal)..."
 
@@ -58,7 +76,12 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
       export CXX="${NDK_CLANG_PREFIX}29-clang++"
       export AR=llvm-ar
 
-      export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+      # bindgen drives libclang, which otherwise parses as the *host* triple.
+      # The versioned Android triple is what makes clang define __ANDROID__ and
+      # __ANDROID_MIN_SDK_VERSION__, and bionic's sys/cdefs.h refuses to be
+      # read without the latter ("Unversioned target triples are not
+      # supported!") as soon as --sysroot puts it on the header path.
+      export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
       export "CFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
       export "CXXFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
 
@@ -107,7 +130,9 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
     export CXX="${NDK_CLANG_PREFIX}29-clang++"
     export AR=llvm-ar
 
-    export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+    # See the universal branch: the versioned Android triple, not --sysroot
+    # alone, is what lets libclang read bionic's headers at all.
+    export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
     export "CFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
     export "CXXFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
 

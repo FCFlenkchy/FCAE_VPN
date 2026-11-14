@@ -196,6 +196,46 @@ function(fcae_link_ffi target_name lib_path)
     target_include_directories(${target_name} PRIVATE ${FCAE_FFI_INCLUDE_DIR})
 endfunction()
 
+# sing-box's naive outbound calls Chromium's cronet, which cronet-go ships as a
+# prebuilt archive named in that package's #cgo LDFLAGS. Those flags end at the
+# Go link: libfcae_ffi.a keeps cronet's Go-side cgo objects but none of the
+# Chromium code they call, so the frontend link has to carry the archive too or
+# Cronet_Engine_GetStreamEngine and bidirectional_stream_* stay undefined.
+# Android is not handled here: its cgo links the ABI's copy into the .so.
+function(fcae_cronet_archive out_var goos goarch)
+    set(${out_var} "" PARENT_SCOPE)
+
+    # The archive lives in the module cache the Rust build just populated.
+    set(mod_cache "")
+    find_program(FCAE_GO_EXECUTABLE NAMES go)
+    if(FCAE_GO_EXECUTABLE)
+        execute_process(
+            COMMAND "${FCAE_GO_EXECUTABLE}" env GOMODCACHE
+            OUTPUT_VARIABLE mod_cache
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+    endif()
+    if(NOT mod_cache)
+        set(mod_cache "$ENV{GOMODCACHE}")
+    endif()
+    if(NOT mod_cache)
+        set(mod_cache "$ENV{HOME}/go/pkg/mod")
+    endif()
+
+    # Glob, so a version bump of cronet-go needs no edit here.
+    file(GLOB cronet_libs
+        "${mod_cache}/github.com/sagernet/cronet-go/lib/${goos}_${goarch}@*/libcronet.a")
+    if(NOT cronet_libs)
+        message(WARNING
+            "cronet archive for ${goos}_${goarch} not found under ${mod_cache} "
+            "(build the Rust side first); sing-box's naive outbound will not link")
+        return()
+    endif()
+    list(SORT cronet_libs COMPARE NATURAL ORDER DESCENDING)
+    list(GET cronet_libs 0 cronet_lib)
+    set(${out_var} "${cronet_lib}" PARENT_SCOPE)
+endfunction()
+
 # Give an Android shared object 16 KB-aligned LOAD segments: Android 15 runs
 # with 16 KB pages on new devices and its loader rejects 4 KB-layout .so's
 # (System.loadLibrary threw UnsatisfiedLinkError at launch). NDK r27+ honours
@@ -555,6 +595,15 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
     fcae_link_audio_backend(fcaevpn)
 
+    if(FCAE_FFI_A MATCHES "aarch64-apple-darwin")
+        fcae_cronet_archive(FCAE_CRONET_A darwin arm64)
+    else()
+        fcae_cronet_archive(FCAE_CRONET_A darwin amd64)
+    endif()
+    if(FCAE_CRONET_A)
+        target_link_libraries(fcaevpn PRIVATE "${FCAE_CRONET_A}")
+    endif()
+
     # Link GLFW: use target if available (static), otherwise fall back to lib name
     if(TARGET glfw)
         target_link_libraries(fcaevpn PRIVATE glfw)
@@ -574,6 +623,23 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         resolv
         pthread dl m
         z bz2 lzma
+        # The rest of what the cronet archive imports, verbatim from cronet-go's
+        # own darwin link line; CoreFoundation and Security are above already.
+        bsm pmenergy pmsample
+        "-framework CoreGraphics"
+        "-framework CoreText"
+        "-framework Foundation"
+        "-framework ApplicationServices"
+        "-framework AppKit"
+        "-framework IOKit"
+        "-framework OpenDirectory"
+        "-framework CFNetwork"
+        "-framework CoreServices"
+        "-framework Network"
+        "-framework SystemConfiguration"
+        "-framework UniformTypeIdentifiers"
+        "-framework CryptoTokenKit"
+        "-framework LocalAuthentication"
     )
 
     # macOS-specific linker flags
@@ -657,6 +723,11 @@ elseif(UNIX)
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-unknown-linux-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
     fcae_link_audio_backend(fcaevpn)
+
+    fcae_cronet_archive(FCAE_CRONET_A linux amd64)
+    if(FCAE_CRONET_A)
+        target_link_libraries(fcaevpn PRIVATE "${FCAE_CRONET_A}")
+    endif()
 
     # Link GLFW: use imported target if available, otherwise raw lib name
     if(TARGET glfw)

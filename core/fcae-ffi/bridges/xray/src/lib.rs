@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fcae_abi::FcaeBackend;
 use fcae_runtime::backend::{Backend, BackendContext, BackendHandle, BackendId, Capabilities};
-use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, Running, start};
+use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, start};
 use fcae_runtime::Result;
 
 // Exported by `bridges/xray/go/bridge.go` through the shared archive. The
