@@ -142,6 +142,19 @@ fn main() {
     if singbox || (target.is_android() && psiphon) {
         archive.ldflags.push("-checklinkname=0".into());
     }
+    if singbox {
+        // The rest of sing-box's own release linker state: its version string
+        // (what the Clash API and outbound user-agents report) and the two Go
+        // runtime toggles upstream pins — SHA-1 certificate signatures stay
+        // accepted, which Go rejects by default and older servers still need,
+        // and MPTCP stays off.
+        archive
+            .ldflags
+            .push(format!("-X github.com/sagernet/sing-box/constant.Version={SING_BOX}"));
+        archive
+            .ldflags
+            .push("-X runtime.godebugDefault=multipathtcp=0,tlssha1=1".into());
+    }
 
     match archive.build() {
         Ok(built) => {

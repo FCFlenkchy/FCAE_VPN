@@ -161,7 +161,7 @@ impl Default for FirefoxConfig {
 /// Both cores are compiled into the app and started in-process, so the session
 /// carries only what their bridges need to write a config: the outbound profile
 /// and the core's own log verbosity. There is no executable to point at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CoreConfig {
     /// The outbound the core dials, already parsed and validated — a malformed
     /// link is a config error, not a failed start. `None` only when no core is
@@ -359,7 +359,7 @@ pub struct ListenerPolicy {
 }
 
 /// Fully validated session configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionConfig {
     pub backend: FcaeBackend,
     pub protocol: FcaeProtocol,

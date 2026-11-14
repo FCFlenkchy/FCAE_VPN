@@ -37,7 +37,7 @@ use tokio::time::timeout;
 
 use crate::backend::{BackendContext, BackendHandle, Counters, Endpoints};
 use crate::config::{RoutingConfig, SessionConfig};
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, Result as CoreResult};
 use crate::upstream::UpstreamProxy;
 
 /// How long a core gets to accept its first connection.
@@ -729,7 +729,7 @@ pub struct Plan<'a> {
 struct Reserved(Vec<std::net::TcpListener>);
 
 impl Reserved {
-    fn take(&mut self) -> Result<u16> {
+    fn take(&mut self) -> CoreResult<u16> {
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|error| {
             CoreError::StartFailed(format!("cannot allocate an internal port: {error}"))
         })?;
@@ -749,7 +749,9 @@ impl Reserved {
 /// `lan_sharing` widens the public listeners to 0.0.0.0; internal ones always
 /// stay on loopback. TUN mode and chained hops force a SOCKS listener even when
 /// the user switched the public one off, because both dial the core through it.
-pub fn plan_listeners(config: &SessionConfig) -> Result<(Option<SocketAddr>, Option<SocketAddr>)> {
+pub fn plan_listeners(
+    config: &SessionConfig,
+) -> CoreResult<(Option<SocketAddr>, Option<SocketAddr>)> {
     let mut reserved = Reserved::default();
     let bind = if config.lan_sharing {
         Ipv4Addr::UNSPECIFIED
@@ -869,7 +871,7 @@ pub async fn resolve_peer(
     config: &SessionConfig,
     server: &str,
     port: u16,
-) -> Result<Option<String>> {
+) -> CoreResult<Option<String>> {
     if let Some(pin) = config.force_peer.as_deref() {
         let ip = parse_pin(pin).ok_or_else(|| {
             CoreError::InvalidConfig(format!("force_peer {pin:?} is not an IP address"))
@@ -949,7 +951,7 @@ pub trait Dialect: Send + Sync + 'static {
 
 /// Load the core, start it on the generated config and wait until its listeners
 /// answer.
-pub async fn start<D: Dialect>(cx: &BackendContext) -> Result<Running> {
+pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     let config = &cx.config;
     // Parsed and validated with the rest of the session config; missing here
     // means the route has no core, which the supervisor never starts.
@@ -1070,7 +1072,7 @@ impl Running {
     ///
     /// A bound-but-uninitialised inbound accepts a connection and drops it, so a
     /// TCP connect alone is not enough: the SOCKS listener is greeted.
-    async fn await_ready(&self) -> Result<()> {
+    async fn await_ready(&self) -> CoreResult<()> {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             if !self.alive() {
@@ -1129,7 +1131,7 @@ impl BackendHandle for Running {
 
     /// The cores have no "session ended" event to await, so the handle polls the
     /// running flag. A stop this handle asked for is a clean exit.
-    async fn wait(&self) -> Result<()> {
+    async fn wait(&self) -> CoreResult<()> {
         while self.alive() {
             tokio::time::sleep(POLL).await;
         }
@@ -1140,7 +1142,7 @@ impl BackendHandle for Running {
         }
     }
 
-    async fn stop(&self, timeout: Duration) -> Result<()> {
+    async fn stop(&self, timeout: Duration) -> CoreResult<()> {
         self.stopping.store(true, Ordering::SeqCst);
         halt(self.ffi).await;
         let deadline = tokio::time::Instant::now() + timeout;

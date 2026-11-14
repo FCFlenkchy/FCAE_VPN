@@ -558,8 +558,9 @@ mod tests {
         assert_eq!(rules.len(), 3);
         assert_eq!(rules[0]["outbound"], BLOCK_TAG);
         assert_eq!(rules[0]["domain"][0], "domain:ads.example");
-        assert_eq!(rules[2]["ip"][0], "10.0.0.0/8");
-        assert_eq!(rules[2]["outbound"], DIRECT_TAG);
+        assert_eq!(rules[1]["ip"][0], "10.0.0.0/8");
+        assert_eq!(rules[1]["outbound"], DIRECT_TAG);
+        assert_eq!(rules[2]["domain"][0], "domain:intranet.example");
     }
 
     #[test]
