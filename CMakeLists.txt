@@ -196,16 +196,27 @@ function(fcae_link_ffi target_name lib_path)
     target_include_directories(${target_name} PRIVATE ${FCAE_FFI_INCLUDE_DIR})
 endfunction()
 
-# sing-box's naive outbound calls Chromium's cronet, which cronet-go ships as a
-# prebuilt archive named in that package's #cgo LDFLAGS. Those flags end at the
-# Go link: libfcae_ffi.a keeps cronet's Go-side cgo objects but none of the
-# Chromium code they call, so the frontend link has to carry the archive too or
-# Cronet_Engine_GetStreamEngine and bidirectional_stream_* stay undefined.
-# Android is not handled here: its cgo links the ABI's copy into the .so.
-function(fcae_cronet_archive out_var goos goarch)
+# sing-box's naive outbound drives Chromium's network stack, cronet, and
+# cronet-go binds that C ABI with purego on every desktop target: nothing is
+# linked, the library is dlopened from the executable's own directory at run
+# time -- the first place cronet-go's loader looks -- and its Cronet_* entry
+# points are resolved there.
+#
+# That is what keeps Chromium out of the desktop executables: ~10 MB of net/QUIC
+# on Linux, a second BoringSSL, a bundled libc++, and on macOS an exception
+# personality routine of its own, which is what had pushed the frontend image
+# past the three routines compact unwind can encode. Android still links cronet:
+# there the Go archive is a c-shared library that already carries cgo, so
+# cronet's objects are simply part of the .so Android loads.
+#
+# So a desktop build has to stage the library beside the executable, under the
+# name cronet-go derives from GOOS. Nothing links it.
+
+# Locate one published cronet-go artifact (`lib/${goos}_${goarch}`) in the
+# module cache the Rust build just populated.
+function(fcae_cronet_artifact out_var goos goarch name)
     set(${out_var} "" PARENT_SCOPE)
 
-    # The archive lives in the module cache the Rust build just populated.
     set(mod_cache "")
     find_program(FCAE_GO_EXECUTABLE NAMES go)
     if(FCAE_GO_EXECUTABLE)
@@ -224,11 +235,11 @@ function(fcae_cronet_archive out_var goos goarch)
 
     # Glob, so a version bump of cronet-go needs no edit here.
     file(GLOB cronet_libs
-        "${mod_cache}/github.com/sagernet/cronet-go/lib/${goos}_${goarch}@*/libcronet.a")
+        "${mod_cache}/github.com/sagernet/cronet-go/lib/${goos}_${goarch}@*/${name}")
     if(NOT cronet_libs)
         message(WARNING
-            "cronet archive for ${goos}_${goarch} not found under ${mod_cache} "
-            "(build the Rust side first); sing-box's naive outbound will not link")
+            "cronet-go's ${name} for ${goos}_${goarch} not found under ${mod_cache} "
+            "(build the Rust side first); sing-box's naive outbound will not load")
         return()
     endif()
     list(SORT cronet_libs COMPARE NATURAL ORDER DESCENDING)
@@ -236,137 +247,96 @@ function(fcae_cronet_archive out_var goos goarch)
     set(${out_var} "${cronet_lib}" PARENT_SCOPE)
 endfunction()
 
-# The archives cronet-go ships are LLVM-built, and that shows in two ways the
-# ELF frontend link has to answer before it sees them.
-#
-# Their relocation sections are CREL (SHT_CREL): a compact encoding LLVM 19
-# introduced and GNU binutils has never read, so `ld` rejects every member with
-# "unknown architecture of input file ... is incompatible with i386:x86-64" --
-# no binutils release can change that (binutils PR 31475, still open).
-#
-# They also carry a complete second BoringSSL next to the one boring-sys builds
-# for the Rust side. Cronet pulls the members it needs, those define the same
-# bssl:: symbols with a different version behind them, and the link stops at
-# "multiple definition of bssl::SSL_HANDSHAKE::~SSL_HANDSHAKE()".
-#
-# Both are fixed on the archive instead of at the link line: one LLVM pass folds
-# it into a single relocatable object rooted at its C API, and everything that is
-# not that API gets local binding. Cronet's internals then resolve inside cronet
-# -- the only sound outcome for a library that vendored its own copies of
-# BoringSSL, brotli, protobuf and absl -- while the frontend keeps exactly one
-# global definition per symbol. Nothing is suppressed and no code is dropped: the
-# objects are the same, only their visibility in this link changes.
-#
-# The toolchain is the Rust one the project already builds with; rust-lld reads
-# CREL and llvm-objcopy is the component that can rewrite the symbol table of an
-# object that carries it.
-function(fcae_llvm_binaries out_lld out_nm out_objcopy)
-    find_program(FCAE_RUSTC NAMES rustc)
-    if(NOT FCAE_RUSTC)
-        message(FATAL_ERROR
-            "rustc was not found. The ELF frontend link needs the LLVM linker and "
-            "binutils that ship with the Rust toolchain, because cronet-go's prebuilt "
-            "objects use CREL relocations that GNU binutils cannot read.")
+# Stage a shared library cronet-go publishes as one (Linux, Windows) beside the
+# executable, which is where the purego loader finds it.
+function(fcae_cronet_stage_shared target name goos goarch)
+    fcae_cronet_artifact(FCAE_CRONET_LIB ${goos} ${goarch} ${name})
+    if(NOT FCAE_CRONET_LIB)
+        return()
     endif()
-    execute_process(COMMAND "${FCAE_RUSTC}" --print sysroot
-        OUTPUT_VARIABLE _sysroot OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-    execute_process(COMMAND "${FCAE_RUSTC}" -vV
-        OUTPUT_VARIABLE _version COMMAND_ERROR_IS_FATAL ANY)
-    if(NOT _version MATCHES "host: ([A-Za-z0-9_.-]+)")
-        message(FATAL_ERROR "cannot read the host triple from `rustc -vV`")
-    endif()
-    set(_bin "${_sysroot}/lib/rustlib/${CMAKE_MATCH_1}/bin")
-    foreach(_tool rust-lld llvm-nm llvm-objcopy)
-        if(NOT EXISTS "${_bin}/${_tool}")
-            message(FATAL_ERROR
-                "${_tool} is missing from the Rust toolchain at ${_bin}. Install it with "
-                "`rustup component add llvm-tools-preview`; the ELF frontend link needs "
-                "rust-lld and llvm-objcopy to read cronet-go's CREL objects.")
-        endif()
-    endforeach()
-    set(${out_lld} "${_bin}/rust-lld" PARENT_SCOPE)
-    set(${out_nm} "${_bin}/llvm-nm" PARENT_SCOPE)
-    set(${out_objcopy} "${_bin}/llvm-objcopy" PARENT_SCOPE)
+
+    set(_staged "${CMAKE_BINARY_DIR}/${name}")
+    add_custom_command(OUTPUT "${_staged}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FCAE_CRONET_LIB}" "${_staged}"
+        DEPENDS "${FCAE_CRONET_LIB}"
+        COMMENT "Staging ${name} beside the executable"
+        VERBATIM)
+    add_custom_target(fcae_cronet_runtime ALL DEPENDS "${_staged}")
+    add_dependencies(${target} fcae_cronet_runtime)
+    message(STATUS "cronet runtime library: ${FCAE_CRONET_LIB}")
 endfunction()
 
-# Rewrite `archive` into `out_obj`: one relocatable object reachable from the
-# archive's C API, with every other definition local to it.
-function(fcae_cronet_isolate archive out_obj lld nm objcopy)
-    if(EXISTS "${out_obj}")
-        if(NOT "${archive}" IS_NEWER_THAN "${out_obj}")
-            return()
-        endif()
-    endif()
+# cronet-go publishes macOS cronet only as a static archive, so the dylib the
+# app loads is linked from it here.
+#
+# The image is rooted at the archive's C API -- the only symbols cronet-go's
+# binding resolves -- so the closure those entry points pull is the whole
+# library, and its dependencies are the ones cronet-go's own darwin cgo line
+# names. Sharing code with the frontend is a non-issue in a dylib: a two-level
+# namespace keeps cronet's copy of BoringSSL and libc++ private to it even when
+# the frontend carries its own, and the binding resolves symbols in this image
+# only.
+function(fcae_cronet_stage_darwin target archive arch)
+    set(_out "${CMAKE_BINARY_DIR}/libcronet.dylib")
 
-    # The roots are the archive's own C API. Nothing else is called across the
-    # boundary: cronet-go's cgo wrappers name Cronet_* and bidirectional_stream_*
-    # and no other symbol of the archive.
-    # stderr carries a "no symbols" line for every foreign-architecture member
-    # the archive holds; they are neither errors nor ours to print.
-    execute_process(COMMAND "${nm}" -j --defined-only --extern-only "${archive}"
-        OUTPUT_VARIABLE _symbols RESULT_VARIABLE _rc
-        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    # Whole symbol names in Mach-O spelling: the leading underscore is also what
+    # the linker's -u takes.
+    find_program(FCAE_NM NAMES nm REQUIRED)
+    execute_process(COMMAND "${FCAE_NM}" -g "${archive}"
+        OUTPUT_VARIABLE _symbols RESULT_VARIABLE _rc ERROR_QUIET)
     if(NOT _rc EQUAL 0)
         message(FATAL_ERROR "cannot read the symbol table of ${archive}")
     endif()
     string(REPLACE "\n" ";" _lines "${_symbols}")
-    # Anchored on a whole symbol name: llvm-nm prints a member header per archive
-    # member and those names end in `.o:`, which is not a symbol.
-    list(FILTER _lines INCLUDE REGEX "^(Cronet_|bidirectional_stream_)[A-Za-z0-9_]*$")
-    list(REMOVE_DUPLICATES _lines)
-    list(LENGTH _lines _count)
+    # Only a defined symbol carries an address and a type letter in front of its
+    # name; an undefined reference carries neither, so this keeps the archive's
+    # defined Cronet_*/bidirectional_stream_* entry points and nothing else.
+    list(FILTER _lines INCLUDE REGEX
+        "^[0-9a-fA-F]+ +[A-Za-z] +_(Cronet_|bidirectional_stream_)[A-Za-z0-9_]*$")
+    set(_roots)
+    foreach(_line IN LISTS _lines)
+        string(REGEX REPLACE "^[0-9a-fA-F]+ +[A-Za-z] +" "" _symbol "${_line}")
+        list(APPEND _roots "-Wl,-u,${_symbol}")
+    endforeach()
+    list(REMOVE_DUPLICATES _roots)
+    list(LENGTH _roots _count)
     if(_count LESS 100)
         message(FATAL_ERROR
             "${archive} exposes only ${_count} C API symbols; the archive layout changed")
     endif()
 
-    get_filename_component(_dir "${out_obj}" DIRECTORY)
-    file(MAKE_DIRECTORY "${_dir}")
-    set(_api "${_dir}/cronet-api.txt")
-    string(REPLACE ";" "\n" _api_text "${_lines}")
-    file(WRITE "${_api}" "${_api_text}\n")
+    set(_deploy "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    if(NOT _deploy)
+        set(_deploy 13.0)
+    endif()
+    # Only a resolved path is an -isysroot argument; a bare name ("macosx") is
+    # what the compiler resolves on its own.
+    set(_sysroot)
+    if(IS_ABSOLUTE "${CMAKE_OSX_SYSROOT}")
+        set(_sysroot "-isysroot" "${CMAKE_OSX_SYSROOT}")
+    endif()
 
-    set(_roots "")
-    foreach(_symbol IN LISTS _lines)
-        list(APPEND _roots "-u${_symbol}")
-    endforeach()
-
-    set(_merged "${_dir}/cronet-merged.o")
-    execute_process(COMMAND "${lld}" -r -o "${_merged}" ${_roots} "${archive}"
-        COMMAND_ERROR_IS_FATAL ANY)
-    execute_process(COMMAND "${objcopy}" "--keep-global-symbols=${_api}" "${_merged}" "${out_obj}"
-        COMMAND_ERROR_IS_FATAL ANY)
-    file(REMOVE "${_merged}")
-    message(STATUS "cronet isolated: ${_count} API symbols global, ${archive}")
-endfunction()
-
-# Put the isolated cronet object in `target`'s link and switch that link to LLVM.
-function(fcae_link_cronet_elf target archive)
-    fcae_llvm_binaries(FCAE_LLVM_LLD FCAE_LLVM_NM FCAE_LLVM_OBJCOPY)
-
-    # rust-lld takes its dialect from the name it was invoked under, and gcc
-    # looks its linker up by name too, so one `ld.lld` symlink serves both the
-    # isolation pass here and the frontend link below. rustup ships the same
-    # link as rustlib/<host>/bin/gcc-ld/ld.lld.
-    set(_lld_dir "${CMAKE_BINARY_DIR}/lld")
-    file(MAKE_DIRECTORY "${_lld_dir}")
-    file(REMOVE "${_lld_dir}/ld.lld")
-    file(CREATE_LINK "${FCAE_LLVM_LLD}" "${_lld_dir}/ld.lld" SYMBOLIC)
-    set(_lld "${_lld_dir}/ld.lld")
-
-    set(_isolated "${CMAKE_BINARY_DIR}/cronet/libcronet-isolated.o")
-    fcae_cronet_isolate("${archive}" "${_isolated}"
-        "${_lld}" "${FCAE_LLVM_NM}" "${FCAE_LLVM_OBJCOPY}")
-    target_link_libraries(${target} PRIVATE "${_isolated}")
-
-    # The isolated object still carries CREL relocations, and anything else LLVM
-    # built will too, so the ELF frontend links with LLVM's linker instead of one
-    # that cannot read its input.
-    target_link_options(${target} PRIVATE
-        "-B${_lld_dir}"
-        "-fuse-ld=lld"
-    )
-    message(STATUS "ELF frontend link uses rust-lld: ${FCAE_LLVM_LLD}")
+    add_custom_command(OUTPUT "${_out}"
+        COMMAND "${CMAKE_C_COMPILER}" -dynamiclib -o "${_out}"
+            -arch "${arch}" ${_sysroot}
+            -mmacosx-version-min="${_deploy}"
+            -install_name "@executable_path/libcronet.dylib"
+            ${_roots}
+            "${archive}"
+            -lbsm -lpmenergy -lpmsample -lresolv
+            -framework CoreFoundation -framework CoreGraphics -framework CoreText
+            -framework Foundation -framework Security
+            -framework ApplicationServices -framework AppKit
+            -framework IOKit -framework OpenDirectory -framework CFNetwork
+            -framework CoreServices -framework Network
+            -framework SystemConfiguration -framework UniformTypeIdentifiers
+            -framework CryptoTokenKit -framework LocalAuthentication
+        DEPENDS "${archive}"
+        COMMENT "Linking libcronet.dylib (${_count} C API roots) from cronet-go's archive"
+        VERBATIM)
+    add_custom_target(fcae_cronet_runtime ALL DEPENDS "${_out}")
+    add_dependencies(${target} fcae_cronet_runtime)
+    message(STATUS "cronet runtime library: ${_out} (from ${archive})")
 endfunction()
 
 # Give an Android shared object 16 KB-aligned LOAD segments: Android 15 runs
@@ -647,6 +617,10 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         winmm
     )
 
+    # cronet is not linked here either: cronet-go's purego binding loads
+    # libcronet.dll from beside the executable (see the cronet notes above).
+    fcae_cronet_stage_shared(fcaevpn libcronet.dll windows amd64)
+
     if(MINGW)
         set(MINGW_LIB /usr/x86_64-w64-mingw32/lib)
         target_link_options(fcaevpn PRIVATE
@@ -728,13 +702,18 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
     fcae_link_audio_backend(fcaevpn)
 
+    # cronet is not linked here: cronet-go's purego binding loads the dylib
+    # from beside the executable (see the cronet notes above).
     if(FCAE_FFI_A MATCHES "aarch64-apple-darwin")
-        fcae_cronet_archive(FCAE_CRONET_A darwin arm64)
+        set(FCAE_CRONET_GOARCH arm64)
+        set(FCAE_CRONET_ARCH arm64)
     else()
-        fcae_cronet_archive(FCAE_CRONET_A darwin amd64)
+        set(FCAE_CRONET_GOARCH amd64)
+        set(FCAE_CRONET_ARCH x86_64)
     endif()
+    fcae_cronet_artifact(FCAE_CRONET_A darwin ${FCAE_CRONET_GOARCH} libcronet.a)
     if(FCAE_CRONET_A)
-        target_link_libraries(fcaevpn PRIVATE "${FCAE_CRONET_A}")
+        fcae_cronet_stage_darwin(fcaevpn "${FCAE_CRONET_A}" "${FCAE_CRONET_ARCH}")
     endif()
 
     # Link GLFW: use target if available (static), otherwise fall back to lib name
@@ -757,12 +736,12 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         pthread dl m
         z bz2 lzma
         # What the Go dependencies' own cgo link lines ask for and a c-archive
-        # cannot carry: cronet's darwin libraries (bsm, pmenergy, pmsample) and
-        # the frameworks sing-box's usbip service needs - sing-usbip's
-        # usbhost_darwin is cgo with "-framework Foundation -framework IOKit
-        # -framework IOUSBHost", and only the last one was missing.
-        # CoreFoundation, IOKit, Foundation, Security and Network are above.
-        bsm pmenergy pmsample
+        # cannot carry: sing-box's usbip service, whose usbhost_darwin is cgo
+        # with "-framework Foundation -framework IOKit -framework IOUSBHost",
+        # and only the last one was missing. CoreFoundation, IOKit, Foundation,
+        # Security and Network are above. cronet's darwin libraries (bsm,
+        # pmenergy, pmsample) were on this list only while cronet was linked in;
+        # they belong to the dylib now.
         "-framework CoreGraphics"
         "-framework CoreText"
         "-framework Foundation"
@@ -782,6 +761,12 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
 
     # macOS-specific linker flags
     # -S/-x drop the debug map (STABS) and local symbols ld64 keeps by default.
+    #
+    # No -no_compact_unwind: this image carries exactly three exception
+    # personality routines -- Rust's for libfcae_ffi.a, libc++'s for the C++
+    # frontend, and the audio backend's Objective-C one -- and three is what
+    # compact unwind encodes. The fourth, base::apple's, came from cronet's
+    # ObjC++ exception shim and left with the dylib (see the cronet notes above).
     target_link_options(fcaevpn PRIVATE
         -Wl,-dead_strip
         -Wl,-S
@@ -862,10 +847,9 @@ elseif(UNIX)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
     fcae_link_audio_backend(fcaevpn)
 
-    fcae_cronet_archive(FCAE_CRONET_A linux amd64)
-    if(FCAE_CRONET_A)
-        fcae_link_cronet_elf(fcaevpn "${FCAE_CRONET_A}")
-    endif()
+    # cronet is not linked here: cronet-go's purego binding loads libcronet.so
+    # from beside the executable (see the cronet notes above).
+    fcae_cronet_stage_shared(fcaevpn libcronet.so linux amd64)
 
     # Link GLFW: use imported target if available, otherwise raw lib name
     if(TARGET glfw)

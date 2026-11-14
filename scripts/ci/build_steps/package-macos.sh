@@ -11,6 +11,16 @@ cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
 chmod +x "$APP/Contents/MacOS/fcaevpn"
 # Desktop Psiphon shares the statically linked Go archive with tun2socks.
 
+# cronet, the Chromium network stack behind sing-box's naive outbound, is a
+# dylib rather than part of the executable. sing-box's Go binding loads it
+# in-process with cronet-go's purego loader, which looks in the executable's own
+# directory first and by that exact name -- so it goes in MacOS/, not Frameworks/.
+test -f build/libcronet.dylib || {
+  echo "::error::build/libcronet.dylib is missing; sing-box's naive outbound cannot load"
+  exit 1
+}
+cp build/libcronet.dylib "$APP/Contents/MacOS/libcronet.dylib"
+
 ICONSET="$RUNNER_TEMP/AppIcon.iconset"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
@@ -38,6 +48,12 @@ otool -L "$APP/Contents/MacOS/fcaevpn" || true
 # statically, and breaks on machines without that path.
 if otool -L "$APP/Contents/MacOS/fcaevpn" | tail -n +2 | grep -qiE 'libzeptun|libfcae_psiphon|libhev|libfcae_go_bridge|/usr/local/|/opt/homebrew|/opt/local/'; then
   echo "::error::fcaevpn links a library that is supposed to be statically linked or embedded"
+  exit 1
+fi
+# cronet is the one engine library that is not linked: it is loaded at run time
+# from beside the executable, so an entry here means Chromium is in the binary.
+if otool -L "$APP/Contents/MacOS/fcaevpn" | tail -n +2 | grep -qi 'libcronet'; then
+  echo "::error::fcaevpn links libcronet; it must be loaded at run time from beside the executable"
   exit 1
 fi
 
@@ -84,12 +100,19 @@ touch "$APP"
 
 KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
 if [ -f "$KEYCHAIN_PATH" ]; then
-  codesign --force --deep --sign "FC" --keychain "$KEYCHAIN_PATH" --timestamp "$APP" || \
-    codesign --force --deep --sign "FC" --keychain "$KEYCHAIN_PATH" "$APP"
+  sign() {
+    codesign --force --sign "FC" --keychain "$KEYCHAIN_PATH" --timestamp "$@" || \
+      codesign --force --sign "FC" --keychain "$KEYCHAIN_PATH" "$@"
+  }
 else
   echo "No signing keychain found, falling back to ad-hoc signing"
-  codesign --force --deep --sign - "$APP"
+  sign() { codesign --force --sign - "$@"; }
 fi
+# The cronet dylib is loaded inside the process, not by the loader, so it is
+# code of its own and carries its own signature. Signing it before the bundle
+# keeps the seal over it intact.
+sign "$APP/Contents/MacOS/libcronet.dylib"
+sign --deep "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP" || true
 
 DMG_ROOT="$RUNNER_TEMP/dmgroot"

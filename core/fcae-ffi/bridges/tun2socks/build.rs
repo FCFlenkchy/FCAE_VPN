@@ -142,11 +142,17 @@ fn main() {
             ]
             .map(str::to_string),
         );
-        // `with_naive_outbound` is a cgo dependency on most platforms, but its
-        // Windows half is published gated on `with_purego` only: without the
-        // tag the package has no buildable files at all. Upstream's Windows tag
-        // set carries it for the same reason.
-        if target.is_windows() {
+        // cronet is consumed through its C ABI, and `with_purego` is what makes
+        // that binding call it at run time instead of linking it: cronet-go's
+        // cgo files then contribute no LDFLAGS, so Chromium's objects stay out
+        // of libfcae_ffi.a and out of the frontend link — the app loads
+        // libcronet.so/.dylib/.dll from its own directory instead (see the
+        // cronet notes in CMakeLists.txt). It is also the only way the naive
+        // outbound exists on Windows, whose half of the package is gated on
+        // `with_purego` alone. Android is the exception: its Go archive is a
+        // c-shared library that already carries cgo, so cronet's objects are
+        // part of the .so Android loads.
+        if !target.is_android() {
             archive.tags.push("with_purego".into());
         }
     }

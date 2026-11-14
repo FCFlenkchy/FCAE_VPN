@@ -11,6 +11,21 @@ case "${FCAE_MATRIX_NAME}" in
 esac
 chmod +x package/* 2>/dev/null || true
 
+# cronet, the Chromium network stack behind sing-box's naive outbound, is not
+# linked into the executable: sing-box's Go binding loads it in-process with
+# cronet-go's purego loader, which looks in the executable's own directory first
+# and nowhere near a lib/ subdirectory. So it ships flat beside the binary, under
+# the name that loader builds from GOOS.
+case "${FCAE_MATRIX_NAME}" in
+  windows-x64) CRONET_LIB=libcronet.dll ;;
+  *)           CRONET_LIB=libcronet.so ;;
+esac
+test -f "build/$CRONET_LIB" || {
+  echo "::error::build/$CRONET_LIB is missing; sing-box's naive outbound cannot load"
+  exit 1
+}
+cp "build/$CRONET_LIB" "package/$CRONET_LIB"
+
 if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
   # HEV, Zeptun, Psiphon and tun2socks are linked in-process.
   # Wintun remains dynamically loaded.
@@ -19,7 +34,6 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
 fi
 
 if [ "${FCAE_MATRIX_NAME}" = "linux-x64" ]; then
-  mkdir -p package/lib
   BIN=build/fcaevpn
   if [ -f "$BIN" ]; then
     echo "Checking dynamic dependencies:"
@@ -76,6 +90,12 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
       echo "::error::$EXE imports a DLL that is supposed to be embedded or statically linked"
       exit 1
     fi
+    # cronet is loaded at run time beside the exe, so it must not be an import
+    # as well: that would put Chromium's net/QUIC stack back into the exe.
+    if echo "$IMPORTS" | grep -qiE '^libcronet\.dll$'; then
+      echo "::error::$EXE imports libcronet.dll; it must be loaded at run time from beside the exe"
+      exit 1
+    fi
   fi
 
   : "${FCAE_HEV_LIBDIR:?the HEV static archive directory was not exported}"
@@ -107,6 +127,13 @@ if [ "${FCAE_MATRIX_NAME}" = "linux-x64" ]; then
   # back.
   if echo "$NEEDED" | grep -qiE 'libzeptun|libfcae_psiphon|libhev|libfcae_go_bridge|libglfw|libstdc\+\+|libgcc_s|libz\.so|libbz2|liblzma|libssl|libcrypto'; then
     echo "::error::$SHIPPED links a library that is supposed to be statically linked"
+    exit 1
+  fi
+  # cronet is the one engine library that is *not* linked: sing-box loads it
+  # through cronet-go's purego binding, so a DT_NEEDED entry for it means the
+  # executable carries Chromium's net/QUIC stack again.
+  if echo "$NEEDED" | grep -qi 'libcronet'; then
+    echo "::error::$SHIPPED links libcronet; it must be loaded at run time from beside the executable"
     exit 1
   fi
   if echo "$NEEDED" | grep -q 'libOpenGL\.so'; then
