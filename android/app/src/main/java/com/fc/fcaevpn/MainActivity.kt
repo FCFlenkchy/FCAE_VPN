@@ -2603,7 +2603,7 @@ class MainActivity : AppCompatActivity() {
         val label = if (spinner != null && position in 0 until spinner.count)
             spinner.getItem(position)?.toString() else null
         findViewById<MaterialButton>(R.id.btnProtocolSettings).text =
-            if (label.isNullOrBlank()) "Protocol" else label
+            if (label.isNullOrBlank()) "Protocol" else taggedLabel(label)
     }
 
     private fun dp(value: Int): Int =
@@ -2630,7 +2630,7 @@ class MainActivity : AppCompatActivity() {
             protocols.addView(android.widget.RadioButton(this).apply {
                 // id 0 is View.NO_ID, which a RadioGroup cannot track.
                 id = index + 1
-                text = label
+                text = taggedLabel(label)
                 setTextColor(Color.parseColor("#FFE0E4EE"))
                 buttonTintList = ColorStateList.valueOf(Color.parseColor("#FF60A5FA"))
                 textSize = 14f
@@ -2727,7 +2727,7 @@ class MainActivity : AppCompatActivity() {
 
     /** A saved Xray/sing-box config. */
     private data class CoreConfig(val name: String, val backend: Int, val config: String) {
-        val backendLabel: String get() = if (backend == 1) "sing-box" else "Xray"
+        val backendTag: String get() = MainActivity.CORE_TAGS[if (backend == 1) 1 else 0]
     }
 
     /** Every saved config, in protocol-list order. */
@@ -2886,7 +2886,24 @@ class MainActivity : AppCompatActivity() {
      * (backend, protocol) mapping.
      */
     private fun protocolChoices(): List<String> =
-        BUILTIN_PROTOCOL_LABELS + coreConfigEntries().map { it.name }
+        BUILTIN_PROTOCOL_LABELS + coreConfigEntries().map { "${it.name}  ${it.backendTag}" }
+
+    /**
+     * [label] with its core tag in its own colour: a saved config reads
+     * `name  xray`, the name in the list's white and the tag beside it. A
+     * built-in transport has no tag and comes back unchanged.
+     */
+    private fun taggedLabel(label: String): CharSequence {
+        val tag = CORE_TAGS.firstOrNull { label.endsWith("  $it") } ?: return label
+        return android.text.SpannableString(label).apply {
+            setSpan(
+                android.text.style.ForegroundColorSpan(Color.parseColor(CORE_TAG_COLOR)),
+                label.length - tag.length,
+                label.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+    }
 
     /**
      * Rebuild the protocol list after the saved configs changed, keeping the
@@ -6551,6 +6568,13 @@ class MainActivity : AppCompatActivity() {
         private const val SING_BOX_HTTP_PORT = 1830
         /** Saved-config backends, indexed the way the stored tag is. */
         private val CORE_BACKEND_LABELS = listOf("Xray", "sing-box")
+        /**
+         * The tag a saved config's row carries: the core's own name, lower case
+         * and unparenthesised, because it is a label and not a sentence.
+         */
+        private val CORE_TAGS = listOf("xray", "sing-box")
+        /** Colour of that tag, distinct from the row's white name. */
+        private const val CORE_TAG_COLOR = "#FF8CB4F5"
         // fcae.h FCAE_CORE_LISTENER_*: what a saved config can serve.
         private const val LISTENER_SOCKS = 1
         private const val LISTENER_HTTP = 2

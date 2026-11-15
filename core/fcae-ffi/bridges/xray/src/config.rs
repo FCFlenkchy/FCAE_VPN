@@ -5,6 +5,7 @@
 //! is left to Xray's own defaults, so the same session profile behaves the same
 //! way on every release.
 
+use fcae_abi::FcaeBackend;
 use fcae_runtime::sing_xray::Level;
 use fcae_runtime::sing_xray::Plan;
 use fcae_runtime::sing_xray::Rules;
@@ -24,6 +25,12 @@ pub fn generate(plan: &Plan<'_>) -> Result<Value, String> {
     match plan.profile {
         CoreProfile::Native(config) => native(config, plan),
         CoreProfile::Link(outbound) => {
+            // The QUIC and AnyTLS families exist only in sing-box; the editor
+            // refuses such a link already, but a caller that ships a profile
+            // without a library comes through here.
+            if !outbound.carried_by(FcaeBackend::Xray) {
+                return Err(outbound.refusal(FcaeBackend::Xray));
+            }
             if plan.socks.is_none() && plan.http.is_none() {
                 return Err("the session has no listener for the core to serve".into());
             }
@@ -107,8 +114,13 @@ fn level(level: Level) -> &'static str {
 
 fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> {
     let (protocol, settings) = match &outbound.protocol {
-        Protocol::Vless { uuid, flow } => {
-            let mut user = json!({"id": uuid, "encryption": "none"});
+        Protocol::Vless { uuid, flow, encryption } => {
+            // Xray reads `encryption` itself: `none`, or its ML-KEM dot config,
+            // which it splits into keys and padding at start.
+            let mut user = json!({
+                "id": uuid,
+                "encryption": encryption.as_deref().unwrap_or("none"),
+            });
             if let Some(flow) = flow {
                 user["flow"] = json!(flow);
             }
@@ -141,7 +153,9 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
                 "password": password,
             }]}),
         ),
-        Protocol::Shadowsocks { method, password } => (
+        Protocol::Shadowsocks {
+            method, password, ..
+        } => (
             "shadowsocks",
             json!({"servers": [{
                 "address": outbound.server,
@@ -172,15 +186,12 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
         // so the session is refused with the reason instead of a config the
         // core would reject with a protocol name nobody can act on.
         Protocol::Hysteria2 { .. } | Protocol::Tuic { .. } | Protocol::AnyTls { .. } => {
-            return Err(format!(
-                "Xray-core cannot carry a {} outbound; save this link as a sing-box config",
-                outbound.protocol.name()
-            ))
+            return Err(outbound.refusal(FcaeBackend::Xray))
         }
     };
 
     let mut value = json!({"tag": PROXY_TAG, "protocol": protocol, "settings": settings});
-    let stream = stream_settings(outbound, chained);
+    let stream = stream_settings(outbound, chained)?;
     if !stream.is_empty() {
         value["streamSettings"] = Value::Object(stream);
     }
@@ -199,14 +210,20 @@ fn account_server(address: &str, port: u16, user: Option<&str>, password: Option
     server
 }
 
-fn stream_settings(outbound: &Outbound, chained: bool) -> Map<String, Value> {
+fn stream_settings(
+    outbound: &Outbound,
+    chained: bool,
+) -> Result<Map<String, Value>, String> {
     let mut stream = Map::new();
     let network = match &outbound.transport {
         Transport::Tcp => "tcp",
         Transport::Ws { .. } => "ws",
-        Transport::Grpc { .. } => "grpc",
-        Transport::H2 { .. } => "h2",
         Transport::HttpUpgrade { .. } => "httpupgrade",
+        Transport::Grpc { .. } => "grpc",
+        Transport::Kcp { .. } => "kcp",
+        Transport::Xhttp { .. } => "xhttp",
+        // `generate` refuses these for Xray before a config is built.
+        Transport::H2 { .. } => return Err(outbound.refusal(FcaeBackend::Xray)),
     };
     if network != "tcp" {
         stream.insert("network".into(), json!(network));
@@ -217,7 +234,10 @@ fn stream_settings(outbound: &Outbound, chained: bool) -> Map<String, Value> {
             sni,
             alpn,
             fingerprint,
-            allow_insecure,
+            pinned_cert_sha256,
+            verify_cert_by_name,
+            ech,
+            ..
         } => {
             stream.insert("security".into(), json!("tls"));
             let mut tls = Map::new();
@@ -230,8 +250,14 @@ fn stream_settings(outbound: &Outbound, chained: bool) -> Map<String, Value> {
             if let Some(fingerprint) = fingerprint {
                 tls.insert("fingerprint".into(), json!(fingerprint));
             }
-            if *allow_insecure {
-                tls.insert("allowInsecure".into(), json!(true));
+            if let Some(pinned) = pinned_cert_sha256 {
+                tls.insert("pinnedPeerCertSha256".into(), json!(pinned));
+            }
+            if let Some(names) = verify_cert_by_name {
+                tls.insert("verifyPeerCertByName".into(), json!(names));
+            }
+            if let Some(ech) = ech {
+                tls.insert("echConfigList".into(), json!(ech));
             }
             stream.insert("tlsSettings".into(), Value::Object(tls));
         }
@@ -241,54 +267,135 @@ fn stream_settings(outbound: &Outbound, chained: bool) -> Map<String, Value> {
             public_key,
             short_id,
             spider_x,
+            mldsa65_verify,
         } => {
             stream.insert("security".into(), json!("reality"));
-            stream.insert(
-                "realitySettings".into(),
-                json!({
-                    "serverName": sni,
-                    "fingerprint": fingerprint,
-                    "publicKey": public_key,
-                    "shortId": short_id,
-                    "spiderX": spider_x,
-                }),
-            );
+            let mut reality = Map::new();
+            reality.insert("serverName".into(), json!(sni));
+            reality.insert("fingerprint".into(), json!(fingerprint));
+            reality.insert("publicKey".into(), json!(public_key));
+            reality.insert("shortId".into(), json!(short_id));
+            reality.insert("spiderX".into(), json!(spider_x));
+            if let Some(verify) = mldsa65_verify {
+                reality.insert("mldsa65Verify".into(), json!(verify));
+            }
+            stream.insert("realitySettings".into(), Value::Object(reality));
         }
     }
     match &outbound.transport {
-        Transport::Tcp => {}
-        Transport::Ws { path, host } => {
+        Transport::Tcp | Transport::H2 { .. } => {}
+        Transport::Ws {
+            path,
+            host,
+            max_early_data,
+            ..
+        } => {
             let mut ws = Map::new();
-            ws.insert("path".into(), json!(path));
+            ws.insert("path".into(), json!(early_data_path(path, *max_early_data)));
             if let Some(host) = host {
                 ws.insert("headers".into(), json!({"Host": host}));
             }
             stream.insert("wsSettings".into(), Value::Object(ws));
         }
-        Transport::Grpc { service } => {
-            stream.insert("grpcSettings".into(), json!({"serviceName": service}));
-        }
-        Transport::H2 { path, host } => {
-            let mut h2 = Map::new();
-            h2.insert("path".into(), json!(path));
-            if let Some(host) = host {
-                h2.insert("host".into(), json!([host]));
-            }
-            stream.insert("httpSettings".into(), Value::Object(h2));
-        }
-        Transport::HttpUpgrade { path, host } => {
+        Transport::HttpUpgrade {
+            path,
+            host,
+            max_early_data,
+        } => {
             let mut upgrade = Map::new();
-            upgrade.insert("path".into(), json!(path));
+            upgrade.insert("path".into(), json!(early_data_path(path, *max_early_data)));
             if let Some(host) = host {
                 upgrade.insert("host".into(), json!(host));
             }
             stream.insert("httpupgradeSettings".into(), Value::Object(upgrade));
         }
+        Transport::Grpc {
+            service,
+            authority,
+            multi_mode,
+        } => {
+            let mut grpc = Map::new();
+            grpc.insert("serviceName".into(), json!(service));
+            if let Some(authority) = authority {
+                grpc.insert("authority".into(), json!(authority));
+            }
+            if *multi_mode {
+                grpc.insert("multiMode".into(), json!(true));
+            }
+            stream.insert("grpcSettings".into(), Value::Object(grpc));
+        }
+        Transport::Kcp {
+            mtu,
+            tti,
+            uplink_capacity,
+            downlink_capacity,
+            congestion,
+            read_buffer,
+            write_buffer,
+        } => {
+            let mut kcp = Map::new();
+            for (key, value) in [
+                ("mtu", mtu),
+                ("tti", tti),
+                ("uplinkCapacity", uplink_capacity),
+                ("downlinkCapacity", downlink_capacity),
+                ("readBufferSize", read_buffer),
+                ("writeBufferSize", write_buffer),
+            ] {
+                if let Some(value) = value {
+                    kcp.insert(key.to_string(), json!(value));
+                }
+            }
+            if let Some(congestion) = congestion {
+                kcp.insert("congestion".into(), json!(congestion));
+            }
+            stream.insert("kcpSettings".into(), Value::Object(kcp));
+        }
+        Transport::Xhttp {
+            path,
+            host,
+            mode,
+            extra,
+        } => {
+            let mut xhttp = Map::new();
+            xhttp.insert("path".into(), json!(path));
+            if let Some(host) = host {
+                xhttp.insert("host".into(), json!(host));
+            }
+            if let Some(mode) = mode {
+                xhttp.insert("mode".into(), json!(mode));
+            }
+            // Xray reads `extra` as the whole settings object once it is there,
+            // so it goes in as one value rather than being unpacked here.
+            if let Some(extra) = extra {
+                let extra: Value = serde_json::from_str(extra)
+                    .map_err(|error| format!("xhttp extra is not JSON: {error}"))?;
+                xhttp.insert("extra".into(), extra);
+            }
+            stream.insert("xhttpSettings".into(), Value::Object(xhttp));
+        }
+    }
+    if let Some(finalmask) = &outbound.finalmask {
+        let finalmask: Value = serde_json::from_str(finalmask)
+            .map_err(|error| format!("finalmask fm is not JSON: {error}"))?;
+        stream.insert("finalmask".into(), finalmask);
     }
     if chained {
         stream.insert("dialerProxy".into(), json!(UPSTREAM_TAG));
     }
-    stream
+    Ok(stream)
+}
+
+/// Xray takes early data as an `ed` query inside the transport's own path and
+/// strips it before the request goes out; the count is not a separate setting.
+fn early_data_path(path: &str, count: Option<u32>) -> String {
+    match count {
+        Some(count) => {
+            let separator = if path.contains('?') { '&' } else { '?' };
+            format!("{path}{separator}ed={count}")
+        }
+        None => path.to_string(),
+    }
 }
 
 fn upstream_config(upstream: &UpstreamProxy) -> Value {
@@ -586,6 +693,28 @@ mod tests {
     }
 
     #[test]
+    fn vless_encryption_reaches_the_user_object() {
+        let key32 = "A".repeat(43);
+        let encryption = format!("mlkem768x25519plus.native.0rtt.{key32}");
+        let profile = Profile::parse(&format!(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls\
+             &encryption={encryption}"
+        ))
+        .expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        let user = &config["outbounds"][0]["settings"]["vnext"][0]["users"][0];
+        // Verbatim: the core splits the dot config into keys and padding itself.
+        assert_eq!(user["encryption"], encryption);
+        // A plain link still names `none`, which is what the core expects there.
+        let plain = build(&plan(&vless(), &routing, None));
+        assert_eq!(
+            plain["outbounds"][0]["settings"]["vnext"][0]["users"][0]["encryption"],
+            "none"
+        );
+    }
+
+    #[test]
     fn reality_and_vision_flow_reach_the_wire() {
         let profile = Profile::parse(
             "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443\
@@ -699,6 +828,89 @@ mod tests {
         assert_eq!(inbounds[0]["listen"], "127.0.0.1");
         assert_eq!(inbounds[0]["port"], 1080);
         assert_eq!(inbounds[0]["settings"]["udp"], true);
+    }
+
+    #[test]
+    fn early_data_reaches_the_path_and_the_tls_pins_reach_the_tls_block() {
+        let profile = Profile::parse(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=ws\
+             &path=%2Fray&ed=2048&security=tls&sni=www.example.com&pcs=AB12\
+             &vcn=www.example.com&ech=ECHLIST",
+        )
+        .expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        let stream = &config["outbounds"][0]["streamSettings"];
+        // Xray reads the count out of the path and strips it before sending.
+        assert_eq!(stream["wsSettings"]["path"], "/ray?ed=2048");
+        assert_eq!(stream["tlsSettings"]["pinnedPeerCertSha256"], "AB12");
+        assert_eq!(stream["tlsSettings"]["verifyPeerCertByName"], "www.example.com");
+        assert_eq!(stream["tlsSettings"]["echConfigList"], "ECHLIST");
+    }
+
+    #[test]
+    fn mkcp_xhttp_and_finalmask_reach_the_stream_settings() {
+        let routing = routing();
+        let kcp = build(&plan(
+            &Profile::parse(
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=kcp\
+                 &mtu=1350&tti=20&uplinkCapacity=5&congestion=false",
+            )
+            .expect("profile parses"),
+            &routing,
+            None,
+        ));
+        let stream = &kcp["outbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "kcp");
+        assert_eq!(stream["kcpSettings"]["mtu"], 1350);
+        assert_eq!(stream["kcpSettings"]["tti"], 20);
+        assert_eq!(stream["kcpSettings"]["uplinkCapacity"], 5);
+        assert_eq!(stream["kcpSettings"]["congestion"], false);
+
+        let xhttp = build(&plan(
+            &Profile::parse(
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=xhttp\
+                 &path=%2Fecho&host=cdn.example.com&mode=auto\
+                 &extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D&security=tls\
+                 &fm=%7B%22tcp%22%3A%5B%5D%7D",
+            )
+            .expect("profile parses"),
+            &routing,
+            None,
+        ));
+        let stream = &xhttp["outbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "xhttp");
+        assert_eq!(stream["xhttpSettings"]["path"], "/echo");
+        assert_eq!(stream["xhttpSettings"]["host"], "cdn.example.com");
+        assert_eq!(stream["xhttpSettings"]["mode"], "auto");
+        // The link's own settings object, verbatim.
+        assert_eq!(stream["xhttpSettings"]["extra"]["xPaddingBytes"], "100-1000");
+        assert!(stream["finalmask"]["tcp"].is_array());
+    }
+
+    #[test]
+    fn settings_xray_removed_are_refused_with_the_core_that_carries_them() {
+        let routing = routing();
+        for (link, expected) in [
+            (
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=h2&security=tls",
+                "sing-box",
+            ),
+            (
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls&allowInsecure=1",
+                "sing-box",
+            ),
+            (
+                "ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388?plugin=obfs-local%3Bobfs%3Dhttp",
+                "sing-box",
+            ),
+            // A method Xray dropped in favour of the AEAD set.
+            ("ss://YWVzLTI1Ni1jZmI6c2VjcmV0@example.com:8388", "sing-box"),
+        ] {
+            let profile = Profile::parse(link).expect("profile parses");
+            let error = generate(&plan(&profile, &routing, None)).expect_err("xray cannot carry it");
+            assert!(error.contains(expected), "{link}: {error}");
+        }
     }
 
     #[test]

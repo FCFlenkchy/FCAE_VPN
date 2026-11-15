@@ -28,7 +28,7 @@ use fcae_abi::FcaeBackend;
 use serde_json::Value;
 
 use crate::config::backend_label;
-use crate::sing_xray::{carries, native_dialect, CoreProfile};
+use crate::sing_xray::{native_dialect, CoreProfile};
 
 /// Upper bound on saved configs. A menu longer than this is not a menu.
 pub const MAX_ENTRIES: usize = 64;
@@ -194,12 +194,8 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
     // A scheme only one core implements is refused for the other here, where
     // the editor can say why, rather than as a start failure later.
     if let CoreProfile::Link(outbound) = &profile {
-        if !carries(backend, outbound) {
-            return Err(format!(
-                "a {} link runs on sing-box only; {} cannot carry it",
-                outbound.protocol.name(),
-                backend_label(backend)
-            ));
+        if !outbound.carried_by(backend) {
+            return Err(outbound.refusal(backend));
         }
     }
     Ok(profile)
@@ -422,6 +418,19 @@ mod tests {
     fn an_empty_config_is_rejected_by_the_checker() {
         assert!(check_config(FcaeBackend::Xray, "   ").is_err());
         assert!(check_config(FcaeBackend::Xray, "socks5://127.0.0.1:1080").is_ok());
+    }
+
+    #[test]
+    fn xray_only_encryption_is_refused_for_sing_box_and_accepted_for_xray() {
+        let key32 = "A".repeat(43);
+        let link = format!(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?encryption=\
+             mlkem768x25519plus.native.0rtt.{key32}"
+        );
+        assert!(check_config(FcaeBackend::Xray, &link).is_ok());
+        let error = check_config(FcaeBackend::SingBox, &link).expect_err("sing-box cannot carry it");
+        assert!(error.contains("Xray"), "{error}");
+        assert!(error.contains("encryption"), "{error}");
     }
 
     #[test]

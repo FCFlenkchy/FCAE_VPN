@@ -6,6 +6,7 @@
 //! parameterised one. What both must agree on is the *behaviour*: the session's
 //! listeners, its upstream detour and its split-routing rules.
 
+use fcae_abi::FcaeBackend;
 use fcae_runtime::upstream::{ProxyKind, UpstreamProxy};
 use fcae_runtime::sing_xray::Plan;
 use fcae_runtime::sing_xray::Rules;
@@ -25,15 +26,21 @@ pub fn generate(plan: &Plan<'_>) -> Result<Value, String> {
     match plan.profile {
         CoreProfile::Native(config) => native(config, plan),
         CoreProfile::Link(outbound) => {
+            // sing-box speaks plain VLESS; Xray's VLESS encryption has no field
+            // in its grammar. The editor refuses such a link already, but a
+            // caller that ships a profile without a library comes through here.
+            if !outbound.carried_by(FcaeBackend::SingBox) {
+                return Err(outbound.refusal(FcaeBackend::SingBox));
+            }
             if plan.socks.is_none() && plan.http.is_none() {
                 return Err("the session has no listener for the core to serve".into());
             }
-            Ok(config(plan, outbound, &Rules::build(plan.routing)?))
+            config(plan, outbound, &Rules::build(plan.routing)?)
         }
     }
 }
 
-fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Value {
+fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Result<Value, String> {
     let mut inbounds = Vec::with_capacity(2);
     if let Some(socks) = plan.socks {
         inbounds.push(json!({
@@ -53,7 +60,7 @@ fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Value {
     }
 
     let mut outbounds = Vec::with_capacity(4);
-    outbounds.push(outbound_config(outbound, plan.upstream.is_some()));
+    outbounds.push(outbound_config(outbound, plan.upstream.is_some())?);
     if let Some(upstream) = plan.upstream {
         outbounds.push(upstream_config(upstream));
     }
@@ -61,12 +68,12 @@ fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Value {
     outbounds.push(json!({"type": "direct", "tag": DIRECT_TAG}));
     outbounds.push(json!({"type": "block", "tag": BLOCK_TAG}));
 
-    json!({
+    Ok(json!({
         "log": log(plan.level),
         "inbounds": inbounds,
         "outbounds": outbounds,
         "route": {"rules": routing_rules(rules), "final": PROXY_TAG},
-    })
+    }))
 }
 
 /// sing-box's log block. `disabled` is the only way to switch its logger off;
@@ -88,9 +95,11 @@ fn level_name(level: Level) -> &'static str {
     }
 }
 
-fn outbound_config(outbound: &Outbound, chained: bool) -> Value {
+fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> {
     let mut value = match &outbound.protocol {
-        Protocol::Vless { uuid, flow } => {
+        // `generate` refuses a link carrying Xray's VLESS encryption before this
+        // point, and sing-box's grammar has no field to put it in.
+        Protocol::Vless { uuid, flow, .. } => {
             let mut value = json!({
                 "type": "vless",
                 "tag": PROXY_TAG,
@@ -125,14 +134,27 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Value {
             "server_port": outbound.port,
             "password": password,
         }),
-        Protocol::Shadowsocks { method, password } => json!({
-            "type": "shadowsocks",
-            "tag": PROXY_TAG,
-            "server": outbound.server,
-            "server_port": outbound.port,
-            "method": method,
-            "password": password,
-        }),
+        Protocol::Shadowsocks {
+            method,
+            password,
+            plugin,
+        } => {
+            let mut value = json!({
+                "type": "shadowsocks",
+                "tag": PROXY_TAG,
+                "server": outbound.server,
+                "server_port": outbound.port,
+                "method": method,
+                "password": password,
+            });
+            if let Some(plugin) = plugin {
+                value["plugin"] = json!(plugin.name);
+                if let Some(options) = &plugin.options {
+                    value["plugin_opts"] = json!(options);
+                }
+            }
+            value
+        }
         Protocol::Socks { user, password } => {
             let mut value = json!({
                 "type": "socks",
@@ -238,13 +260,13 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Value {
         value["tls"]["certificate_public_key_sha256"] = json!([pin]);
     }
 
-    if let Some(transport) = transport_config(&outbound.transport) {
+    if let Some(transport) = transport_config(outbound)? {
         value["transport"] = transport;
     }
     if chained {
         value["detour"] = json!(UPSTREAM_TAG);
     }
-    value
+    Ok(value)
 }
 
 /// Whether the protocol's own handshake is TLS, which sing-box requires even
@@ -276,6 +298,8 @@ fn tls_config(security: &Security, server: &str) -> Option<Value> {
             alpn,
             fingerprint,
             allow_insecure,
+            ech,
+            ..
         } => {
             let mut tls = Map::new();
             tls.insert("enabled".into(), json!(true));
@@ -290,6 +314,9 @@ fn tls_config(security: &Security, server: &str) -> Option<Value> {
             }
             if let Some(fingerprint) = fingerprint {
                 tls.insert("utls".into(), json!({"enabled": true, "fingerprint": fingerprint}));
+            }
+            if let Some(ech) = ech {
+                tls.insert("ech".into(), json!({"enabled": true, "config": [ech]}));
             }
             Some(Value::Object(tls))
         }
@@ -308,26 +335,75 @@ fn tls_config(security: &Security, server: &str) -> Option<Value> {
     }
 }
 
-fn transport_config(transport: &Transport) -> Option<Value> {
-    match transport {
-        Transport::Tcp => None,
-        Transport::Ws { path, host } => {
+/// The outbound's `transport` block, or `None` when it speaks over plain TCP.
+fn transport_config(outbound: &Outbound) -> Result<Option<Value>, String> {
+    let transport = match &outbound.transport {
+        Transport::Tcp => return Ok(None),
+        Transport::Ws {
+            path,
+            host,
+            max_early_data,
+            early_data_header,
+        } => {
+            // sing-box's WebSocket block has no `host` field: the Host header
+            // is one of the headers it sends.
             let mut headers = Map::new();
             if let Some(host) = host {
                 headers.insert("Host".into(), json!(host));
             }
-            Some(json!({"type": "ws", "path": path, "headers": headers}))
+            let mut ws = Map::new();
+            ws.insert("type".into(), json!("ws"));
+            ws.insert("path".into(), json!(path));
+            if !headers.is_empty() {
+                ws.insert("headers".into(), Value::Object(headers));
+            }
+            if let Some(count) = max_early_data {
+                ws.insert("max_early_data".into(), json!(count));
+            }
+            if let Some(header) = early_data_header {
+                ws.insert("early_data_header_name".into(), json!(header));
+            }
+            Value::Object(ws)
         }
-        Transport::Grpc { service } => Some(json!({"type": "grpc", "service_name": service})),
-        Transport::H2 { path, host } => match host {
-            Some(host) => Some(json!({"type": "http", "path": path, "host": [host]})),
-            None => Some(json!({"type": "http", "path": path})),
-        },
-        Transport::HttpUpgrade { path, host } => match host {
-            Some(host) => Some(json!({"type": "httpupgrade", "path": path, "host": host})),
-            None => Some(json!({"type": "httpupgrade", "path": path})),
-        },
-    }
+        Transport::HttpUpgrade {
+            path,
+            host,
+            max_early_data,
+        } => {
+            let mut upgrade = Map::new();
+            upgrade.insert("type".into(), json!("httpupgrade"));
+            upgrade.insert("path".into(), json!(path));
+            if let Some(host) = host {
+                upgrade.insert("host".into(), json!(host));
+            }
+            if let Some(count) = max_early_data {
+                upgrade.insert("max_early_data".into(), json!(count));
+            }
+            Value::Object(upgrade)
+        }
+        Transport::H2 { path, host, method } => {
+            let mut http = Map::new();
+            http.insert("type".into(), json!("http"));
+            http.insert("path".into(), json!(path));
+            if let Some(host) = host {
+                http.insert("host".into(), json!([host]));
+            }
+            if let Some(method) = method {
+                http.insert("method".into(), json!(method));
+            }
+            Value::Object(http)
+        }
+        // sing-box's gRPC block is the service name and its timeouts; an
+        // authority or multi-stream link is refused for sing-box before this.
+        Transport::Grpc { service, .. } => {
+            json!({"type": "grpc", "service_name": service})
+        }
+        // `generate` refuses these for sing-box before a config is built.
+        Transport::Kcp { .. } | Transport::Xhttp { .. } => {
+            return Err(outbound.refusal(FcaeBackend::SingBox))
+        }
+    };
+    Ok(Some(transport))
 }
 
 fn upstream_config(upstream: &UpstreamProxy) -> Value {
@@ -646,6 +722,91 @@ mod tests {
         assert_eq!(outbound["type"], "anytls");
         assert_eq!(outbound["password"], "secret");
         assert_eq!(outbound["tls"]["utls"]["fingerprint"], "chrome");
+    }
+
+    #[test]
+    fn early_data_and_http2_settings_reach_the_transport_block() {
+        let routing = routing();
+        let ws = build(&plan(
+            &Profile::parse(
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=ws&path=%2Fray\
+                 &host=cdn.example.com&ed=2048&eh=X-Retry&security=tls&ech=ECHLIST",
+            )
+            .expect("profile parses"),
+            &routing,
+            None,
+        ));
+        let transport = &ws["outbounds"][0]["transport"];
+        assert_eq!(transport["type"], "ws");
+        assert_eq!(transport["path"], "/ray");
+        assert_eq!(transport["headers"]["Host"], "cdn.example.com");
+        assert_eq!(transport["max_early_data"], 2048);
+        assert_eq!(transport["early_data_header_name"], "X-Retry");
+        assert_eq!(ws["outbounds"][0]["tls"]["ech"]["config"][0], "ECHLIST");
+
+        let h2 = build(&plan(
+            &Profile::parse(
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=http\
+                 &path=%2F&host=cdn.example.com&method=GET&security=tls",
+            )
+            .expect("profile parses"),
+            &routing,
+            None,
+        ));
+        let transport = &h2["outbounds"][0]["transport"];
+        assert_eq!(transport["type"], "http");
+        assert_eq!(transport["host"][0], "cdn.example.com");
+        assert_eq!(transport["method"], "GET");
+    }
+
+    #[test]
+    fn shadowsocks_plugins_reach_the_outbound() {
+        let routing = routing();
+        let config = build(&plan(
+            &Profile::parse(
+                "ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388\
+                 ?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dbing.com",
+            )
+            .expect("profile parses"),
+            &routing,
+            None,
+        ));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["plugin"], "obfs-local");
+        assert_eq!(outbound["plugin_opts"], "obfs=http;obfs-host=bing.com");
+    }
+
+    #[test]
+    fn settings_only_xray_has_are_refused_by_name() {
+        let routing = routing();
+        for link in [
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=kcp&mtu=1350",
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=xhttp&path=%2Fecho",
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=reality&sni=www.example.com&pbk=KEY&pqv=PQKEY",
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls&pcs=AB12",
+        ] {
+            let profile = Profile::parse(link).expect("profile parses");
+            let error = generate(&plan(&profile, &routing, None)).expect_err("sing-box cannot carry it");
+            assert!(error.contains("Xray"), "{link}: {error}");
+        }
+    }
+
+    #[test]
+    fn vless_encryption_is_refused_for_sing_box() {
+        let key32 = "A".repeat(43);
+        let profile = Profile::parse(&format!(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls\
+             &encryption=mlkem768x25519plus.native.0rtt.{key32}"
+        ))
+        .expect("profile parses");
+        let routing = routing();
+        let error = generate(&plan(&profile, &routing, None))
+            .expect_err("sing-box has no VLESS encryption");
+        assert!(error.contains("Xray"), "{error}");
+        assert!(error.contains("encryption"), "{error}");
+        // Plain VLESS is unaffected.
+        let config = build(&plan(&vless(), &routing, None));
+        assert_eq!(config["outbounds"][0]["type"], "vless");
     }
 
     #[test]

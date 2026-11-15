@@ -3089,20 +3089,55 @@ static const char* const kTransportNames[kCoreTransportBase] = {
     "Firefox IP Protection",
 };
 
+/// The core a saved-config row is tagged with, lower case and unparenthesised:
+/// it is a label, not a sentence. A built-in transport answers nullptr.
+static const char* transport_tag(int transport) {
+    const AppState::CoreConfigEntry* entry = g_app.core_config_at(transport);
+    if (!entry) return nullptr;
+    return entry->backend == 1 ? "sing-box" : "xray";
+}
+
+/// The colour the tag is drawn in: distinct from the row's white name, and the
+/// same for both cores so the list stays quiet.
+static const ImVec4 kCoreTagColor(0.55f, 0.72f, 0.98f, 1.0f);
+/// Space between a saved config's name and its tag.
+static constexpr float kCoreTagGap = 8.0f;
+
 /// The protocol list as the user sees it: the built-in transports followed by
-/// one entry per saved core config, named after it so a chained route reads the
-/// way it was written. `labels` owns the storage the pointers refer to.
-static void transport_labels(std::vector<std::string>& labels, std::vector<const char*>& pointers) {
-    labels.clear();
-    labels.reserve((size_t)kCoreTransportBase + g_app.core_configs.size());
-    for (const char* name : kTransportNames) labels.emplace_back(name);
+/// one entry per saved core config, named after it and tagged with the core
+/// that runs it so a chained route reads the way it was written.
+///
+/// A row is `name  xray`; the editor draws the name and the tag with a gap and
+/// two colours between them, so `names` keeps them apart and `rows` is the flat
+/// text a combo box can take.
+struct TransportLabels {
+    /// The row's own text, without the tag.
+    std::vector<std::string> names;
+    /// `name`, two spaces, the core tag — what a combo box shows.
+    std::vector<std::string> rows;
+    std::vector<const char*> pointers;
+};
+
+static void transport_labels(TransportLabels& labels) {
+    const size_t count = (size_t)kCoreTransportBase + g_app.core_configs.size();
+    labels.names.clear();
+    labels.rows.clear();
+    labels.names.reserve(count);
+    labels.rows.reserve(count);
+    for (const char* name : kTransportNames) {
+        labels.names.emplace_back(name);
+    }
     for (size_t i = 0; i < g_app.core_configs.size(); ++i) {
         const std::string& name = g_app.core_configs[i].name;
-        labels.push_back(name.empty() ? "Saved config " + std::to_string(i + 1) : name);
+        labels.names.push_back(name.empty() ? "Saved config " + std::to_string(i + 1) : name);
     }
-    pointers.clear();
-    pointers.reserve(labels.size());
-    for (const std::string& label : labels) pointers.push_back(label.c_str());
+    for (size_t i = 0; i < labels.names.size(); ++i) {
+        const char* tag = transport_tag((int)i);
+        labels.rows.push_back(tag ? labels.names[i] + "  " + tag : labels.names[i]);
+    }
+    labels.pointers.clear();
+    labels.pointers.reserve(labels.rows.size());
+    for (const std::string& row : labels.rows) labels.pointers.push_back(row.c_str());
 }
 
 static int transport_count() {
@@ -3472,12 +3507,23 @@ static void render_protocol_editor() {
     const float footer_height = ImGui::GetFrameHeightWithSpacing() * (compact_footer ? 2.0f : 1.0f) + 8.0f;
     ImGui::BeginChild("##protocol-scroll", ImVec2(0, -footer_height),
                       ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
-    std::vector<std::string> labels;
-    std::vector<const char*> names;
-    transport_labels(labels, names);
-    if (s_protocol_draft < 0 || s_protocol_draft >= (int)names.size()) s_protocol_draft = 0;
-    for (int i = 0; i < (int)names.size(); ++i) {
-        changed |= ImGui::RadioButton(names[(size_t)i], &s_protocol_draft, i);
+    TransportLabels labels;
+    transport_labels(labels);
+    const char* const* names = labels.pointers.data();
+    const int transport_choices = (int)labels.pointers.size();
+    if (s_protocol_draft < 0 || s_protocol_draft >= transport_choices) s_protocol_draft = 0;
+    for (int i = 0; i < transport_choices; ++i) {
+        // The radio carries the name alone and the tag follows it with a gap in
+        // its own colour, so a saved config never reads as one long white run.
+        // The position is the row's identity here: two saved configs may well
+        // share a name, and a radio button's own id is its label.
+        ImGui::PushID(i);
+        changed |= ImGui::RadioButton(labels.names[(size_t)i].c_str(), &s_protocol_draft, i);
+        if (const char* tag = transport_tag(i)) {
+            ImGui::SameLine(0.0f, kCoreTagGap);
+            ImGui::TextColored(kCoreTagColor, "%s", tag);
+        }
+        ImGui::PopID();
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::Text("Additional exits (optional)");
@@ -3487,8 +3533,8 @@ static void render_protocol_editor() {
         ImGui::Text("Exit %d", (int)i + 1);
         const float remove_width = ImGui::CalcTextSize("Remove").x + 2.0f * ImGui::GetStyle().FramePadding.x;
         ImGui::SetNextItemWidth(std::max(1.0f, ImGui::GetContentRegionAvail().x - remove_width - ImGui::GetStyle().ItemSpacing.x));
-        if (s_chain_draft[i] < 0 || s_chain_draft[i] >= (int)names.size()) s_chain_draft[i] = 0;
-        changed |= ImGui::Combo("##transport", &s_chain_draft[i], names.data(), (int)names.size());
+        if (s_chain_draft[i] < 0 || s_chain_draft[i] >= transport_choices) s_chain_draft[i] = 0;
+        changed |= ImGui::Combo("##transport", &s_chain_draft[i], names, transport_choices);
         ImGui::SameLine();
         if (ImGui::Button("Remove")) remove_index = (int)i;
         ImGui::PopID();

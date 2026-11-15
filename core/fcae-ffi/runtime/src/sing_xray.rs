@@ -16,8 +16,10 @@
 //! * share-link / native-config parsing for [`CoreProfile`] — session configuration,
 //!   parsed once with the rest of [`crate::config::SessionConfig`]. The grammar
 //!   covers both cores' protocols, including the sing-box-only Hysteria2, TUIC
-//!   and AnyTLS; [`Protocol::xray_carries`] says which of them Xray-core can
-//!   actually run,
+//!   and AnyTLS, and every transport and security setting either core's own
+//!   grammar defines. [`Outbound::carried_by`] answers whether a core can run
+//!   one whole — a setting neither can express is refused with the reason
+//!   naming the core that can, never dropped,
 //! * [`Plan`] and [`plan_listeners`] — what the session asks of the core,
 //! * [`Rules`] — the app's split-routing rules, validated,
 //! * [`Dialect`] + [`start`] — the only per-core seam: the config dialect and
@@ -53,15 +55,76 @@ const POLL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Transports both cores can carry an outbound over.
+/// An outbound's transport, carrying every field a share link can name for it.
+///
+/// The two cores do not overlap here: Xray-core owns mKCP and XHTTP, sing-box
+/// owns plain HTTP/2 — and each refuses the other's, which
+/// [`Outbound::carried_by`] reports by name rather than dropping the settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
     Tcp,
-    Ws { path: String, host: Option<String> },
-    Grpc { service: String },
-    /// HTTP/2 as Xray names it (sing-box calls the same thing `http`).
-    H2 { path: String, host: Option<String> },
-    HttpUpgrade { path: String, host: Option<String> },
+    Ws {
+        path: String,
+        host: Option<String>,
+        /// WebSocket early data: Xray keeps the byte count in the path's own
+        /// `ed` query, sing-box in `max_early_data`.
+        max_early_data: Option<u32>,
+        /// The header sing-box sends early data in. Xray-core removed the
+        /// setting when it moved early data into the path.
+        early_data_header: Option<String>,
+    },
+    HttpUpgrade {
+        path: String,
+        host: Option<String>,
+        max_early_data: Option<u32>,
+    },
+    /// HTTP/2 — sing-box's `http` transport. Xray-core removed it in favour of
+    /// XHTTP, so this is sing-box-only.
+    H2 {
+        path: String,
+        host: Option<String>,
+        method: Option<String>,
+    },
+    Grpc {
+        service: String,
+        authority: Option<String>,
+        /// Xray's multi-stream mode; sing-box opens one stream per connection.
+        multi_mode: bool,
+    },
+    /// mKCP — Xray-core only. Header and seed are gone from the core, so a link
+    /// naming either is refused instead of producing a config it rejects.
+    Kcp {
+        mtu: Option<u32>,
+        tti: Option<u32>,
+        uplink_capacity: Option<u32>,
+        downlink_capacity: Option<u32>,
+        congestion: Option<bool>,
+        read_buffer: Option<u32>,
+        write_buffer: Option<u32>,
+    },
+    /// XHTTP (SplitHTTP) — Xray-core only. `extra` is the core's own settings
+    /// object for everything a link does not name, carried verbatim.
+    Xhttp {
+        path: String,
+        host: Option<String>,
+        mode: Option<String>,
+        extra: Option<String>,
+    },
+}
+
+impl Transport {
+    /// The name the cores and the config editor use for this transport.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Transport::Tcp => "tcp",
+            Transport::Ws { .. } => "ws",
+            Transport::HttpUpgrade { .. } => "httpupgrade",
+            Transport::H2 { .. } => "http",
+            Transport::Grpc { .. } => "grpc",
+            Transport::Kcp { .. } => "kcp",
+            Transport::Xhttp { .. } => "xhttp",
+        }
+    }
 }
 
 /// The outer security layer of a single outbound.
@@ -73,7 +136,17 @@ pub enum Security {
         alpn: Vec<String>,
         /// uTLS fingerprint, e.g. `chrome`.
         fingerprint: Option<String>,
+        /// `allowInsecure`. Xray-core removed the setting, so only sing-box can
+        /// carry an outbound that asks for it.
         allow_insecure: bool,
+        /// `pcs`: hex SHA-256 pins of the server certificate. Xray-core only —
+        /// sing-box pins the public key, which is a different digest.
+        pinned_cert_sha256: Option<String>,
+        /// `vcn`: the names the peer certificate is verified against.
+        /// Xray-core only.
+        verify_cert_by_name: Option<String>,
+        /// `ech`: the base64 ECH config list, which both cores take verbatim.
+        ech: Option<String>,
     },
     Reality {
         sni: String,
@@ -81,7 +154,18 @@ pub enum Security {
         public_key: String,
         short_id: String,
         spider_x: String,
+        /// ML-DSA-65 verification key (`pqv`). Xray-core verifies the server's
+        /// handshake with it; sing-box's REALITY has no such field.
+        mldsa65_verify: Option<String>,
     },
+}
+
+/// A SIP003 plugin, as a share link spells it: the name up to the first `;` and
+/// the plugin's own options after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowSocksPlugin {
+    pub name: String,
+    pub options: Option<String>,
 }
 
 /// Which protocol the outbound speaks.
@@ -90,6 +174,10 @@ pub enum Protocol {
     Vless {
         uuid: String,
         flow: Option<String>,
+        /// Xray's VLESS encryption, as the link spells it
+        /// (`mlkem768x25519plus.<mode>.<rtt>.<key>…`); `None` for `none`.
+        /// sing-box's VLESS has no such handshake, so this is Xray-only.
+        encryption: Option<String>,
     },
     Vmess {
         uuid: String,
@@ -102,6 +190,9 @@ pub enum Protocol {
     Shadowsocks {
         method: String,
         password: String,
+        /// SIP003 plugin, which is how sing-box reaches obfs-local and
+        /// v2ray-plugin servers. Xray-core has no plugin support at all.
+        plugin: Option<ShadowSocksPlugin>,
     },
     Socks {
         user: Option<String>,
@@ -165,20 +256,79 @@ impl Protocol {
     /// is refused for Xray here — at save time and again at start — instead of
     /// reaching the core as a config it cannot parse.
     pub fn xray_carries(&self) -> bool {
-        !matches!(
-            self,
-            Protocol::Hysteria2 { .. } | Protocol::Tuic { .. } | Protocol::AnyTls { .. }
-        )
+        match self {
+            Protocol::Hysteria2 { .. } | Protocol::Tuic { .. } | Protocol::AnyTls { .. } => false,
+            // Xray's cipher list is the AEAD set plus Shadowsocks 2022; the
+            // stream ciphers sing-box still carries are gone from it.
+            Protocol::Shadowsocks { method, plugin, .. } => {
+                plugin.is_none() && xray_cipher(method)
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether sing-box can express this outbound.
+    ///
+    /// Everything but one case: sing-box speaks plain VLESS, without the
+    /// ML-KEM handshake Xray added on top, and its outbound grammar has no
+    /// field to name one.
+    pub fn sing_box_carries(&self) -> bool {
+        match self {
+            Protocol::Vless { encryption: Some(_), .. } => false,
+            // sing-box's outbound method enum is Xray's set plus the stream
+            // ciphers; anything else is a link neither core implements.
+            Protocol::Shadowsocks { method, .. } => sing_box_cipher(method),
+            _ => true,
+        }
     }
 }
 
-/// Whether `backend` can carry `outbound`.
-pub fn carries(backend: FcaeBackend, outbound: &Outbound) -> bool {
-    match backend {
-        FcaeBackend::Xray => outbound.protocol.xray_carries(),
-        FcaeBackend::SingBox => true,
-        _ => false,
-    }
+/// Xray's Shadowsocks cipher names, as `cipherFromString` and the 2022 list
+/// spell them.
+fn xray_cipher(method: &str) -> bool {
+    matches!(
+        method,
+        "aes-128-gcm"
+            | "aead_aes_128_gcm"
+            | "aes-256-gcm"
+            | "aead_aes_256_gcm"
+            | "chacha20-poly1305"
+            | "aead_chacha20_poly1305"
+            | "chacha20-ietf-poly1305"
+            | "xchacha20-poly1305"
+            | "aead_xchacha20_poly1305"
+            | "xchacha20-ietf-poly1305"
+            | "none"
+            | "plain"
+            | "2022-blake3-aes-128-gcm"
+            | "2022-blake3-aes-256-gcm"
+            | "2022-blake3-chacha20-poly1305"
+    )
+}
+
+/// sing-box's Shadowsocks outbound `method` enum.
+fn sing_box_cipher(method: &str) -> bool {
+    matches!(
+        method,
+        "none"
+            | "aes-128-gcm"
+            | "aes-192-gcm"
+            | "aes-256-gcm"
+            | "chacha20-ietf-poly1305"
+            | "xchacha20-ietf-poly1305"
+            | "2022-blake3-aes-128-gcm"
+            | "2022-blake3-aes-256-gcm"
+            | "2022-blake3-chacha20-poly1305"
+            | "aes-128-ctr"
+            | "aes-192-ctr"
+            | "aes-256-ctr"
+            | "aes-128-cfb"
+            | "aes-192-cfb"
+            | "aes-256-cfb"
+            | "rc4-md5"
+            | "chacha20-ietf"
+            | "xchacha20"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,8 +338,136 @@ pub struct Outbound {
     pub port: u16,
     pub transport: Transport,
     pub security: Security,
+    /// `fm`: Xray's finalmask, carried as the JSON object the link encoded.
+    /// Only Xray-core has the setting.
+    pub finalmask: Option<String>,
     /// `#fragment` of the link, carried through for log lines only.
     pub remark: Option<String>,
+}
+
+impl Outbound {
+    /// Whether `backend` can run this outbound: one answer for the config
+    /// editor, the session loader and the bridges, so none of them disagree.
+    pub fn carried_by(&self, backend: FcaeBackend) -> bool {
+        self.blocker(backend).is_none()
+    }
+
+    /// Why `backend` cannot run this outbound, in the words the config editor
+    /// shows. Only meaningful when [`Outbound::carried_by`] is false.
+    pub fn refusal(&self, backend: FcaeBackend) -> String {
+        self.blocker(backend).unwrap_or_else(|| {
+            format!(
+                "{} can carry this link",
+                crate::config::backend_label(backend)
+            )
+        })
+    }
+
+    /// The first setting `backend` cannot express, named along with the core
+    /// that can: a link is either carried whole or refused with a reason, never
+    /// silently trimmed to what one core happens to understand.
+    fn blocker(&self, backend: FcaeBackend) -> Option<String> {
+        use FcaeBackend::{SingBox, Xray};
+        let label = crate::config::backend_label(backend);
+        let other = match backend {
+            Xray => crate::config::backend_label(SingBox),
+            _ => crate::config::backend_label(Xray),
+        };
+        let refuse = |what: &str| {
+            Some(format!(
+                "{what}; save it as a {other} config, {label} cannot carry it"
+            ))
+        };
+        let name = self.protocol.name();
+        if backend == Xray && !self.protocol.xray_carries() {
+            return match &self.protocol {
+                Protocol::Shadowsocks { plugin: Some(plugin), .. } => refuse(&format!(
+                    "the shadowsocks plugin {:?} is sing-box only",
+                    plugin.name
+                )),
+                Protocol::Shadowsocks { method, .. } => refuse(&format!(
+                    "the shadowsocks method {method:?} was removed from Xray-core"
+                )),
+                _ => refuse(&format!("a {name} link runs on sing-box only")),
+            };
+        }
+        if backend == SingBox && !self.protocol.sing_box_carries() {
+            return match &self.protocol {
+                Protocol::Vless { encryption: Some(_), .. } => Some(format!(
+                    "this {name} link uses Xray-core's VLESS encryption; save it as an Xray config, {label} cannot carry it"
+                )),
+                Protocol::Shadowsocks { method, .. } => refuse(&format!(
+                    "the shadowsocks method {method:?} is not one {label} implements"
+                )),
+                _ => refuse(&format!("a {name} link runs on Xray only")),
+            };
+        }
+        match (&self.transport, backend) {
+            (Transport::H2 { .. }, Xray) => {
+                return refuse(&format!(
+                    "Xray-core removed the {} transport in favour of XHTTP",
+                    self.transport.name()
+                ))
+            }
+            (Transport::Kcp { .. } | Transport::Xhttp { .. }, SingBox) => {
+                return refuse(&format!(
+                    "the {} transport is an Xray-core one",
+                    self.transport.name()
+                ))
+            }
+            (
+                Transport::Ws {
+                    early_data_header: Some(_),
+                    ..
+                },
+                Xray,
+            ) => {
+                return refuse("the WebSocket early-data header is a sing-box setting")
+            }
+            (Transport::Grpc { multi_mode: true, .. }, SingBox) => {
+                return refuse("gRPC multi-stream mode is an Xray-core setting")
+            }
+            (Transport::Grpc { authority: Some(_), .. }, SingBox) => {
+                return refuse("the gRPC authority is an Xray-core setting")
+            }
+            _ => {}
+        }
+        match &self.security {
+            Security::Reality {
+                mldsa65_verify: Some(_),
+                ..
+            } if backend == SingBox => {
+                return refuse("the REALITY ML-DSA-65 key is an Xray-core setting")
+            }
+            // Xray-core refuses `allowInsecure` outright now and points at the
+            // certificate pins; sing-box still takes it.
+            Security::Tls {
+                allow_insecure: true,
+                ..
+            } if backend == Xray => {
+                return refuse(
+                    "Xray-core removed allowInsecure; use the certificate pins, or sing-box",
+                )
+            }
+            Security::Tls {
+                pinned_cert_sha256: Some(_),
+                ..
+            } if backend == SingBox => {
+                return refuse("the certificate pin is an Xray-core setting")
+            }
+            Security::Tls {
+                verify_cert_by_name: Some(_),
+                ..
+            } if backend == SingBox => {
+                return refuse("the verified certificate name is an Xray-core setting")
+            }
+            _ => {}
+        }
+        if self.finalmask.is_some() && backend == SingBox {
+            return refuse("finalmask is an Xray-core setting");
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,13 +571,15 @@ fn parse_vless(rest: &str) -> Result<Outbound, String> {
         return Err(format!("vless uuid {:?} is not a UUID", excerpt(&uuid)));
     }
     let (server, port) = split_host_port(target, None)?;
-    if let Some(encryption) = query.get("encryption") {
-        if !encryption.eq_ignore_ascii_case("none") {
-            return Err(format!(
-                "vless encryption={encryption:?} is not supported (only \"none\")"
-            ));
-        }
-    }
+    // `encryption` is Xray's own addition: `none`, or its dot config naming the
+    // ML-KEM/X25519 handshake. Xray parses the value itself, so this only
+    // rejects what the core would reject at start, and only after the editor
+    // could have said so.
+    let encryption = query
+        .get("encryption")
+        .map(vless_encryption)
+        .transpose()?
+        .flatten();
     let flow = query.string("flow");
     if let Some(flow) = flow.as_deref() {
         if !matches!(flow, "xtls-rprx-vision" | "xtls-rprx-vision-udp443") {
@@ -313,13 +593,68 @@ fn parse_vless(rest: &str) -> Result<Outbound, String> {
         return Err("vless flow requires tls or reality security".into());
     }
     Ok(Outbound {
-        protocol: Protocol::Vless { uuid, flow },
+        protocol: Protocol::Vless { uuid, flow, encryption },
         transport: parse_transport(&query)?,
         security,
+        finalmask: parse_finalmask(&query)?,
         server,
         port,
         remark,
     })
+}
+
+/// Xray's VLESS encryption value: `none`, or its dot config
+/// `mlkem768x25519plus.<native|xorpub|random>.<0rtt|1rtt>.<key>…`.
+///
+/// The keys are raw URL-safe base64: 32 bytes for X25519, 1184 for an ML-KEM-768
+/// encapsulation key. Segments shorter than 20 characters are the padding Xray
+/// folds back in with the dots it split on, so they carry no key. This mirrors
+/// `infra/conf/vless.go`, which is the only other place that reads the value.
+fn vless_encryption(raw: &str) -> Result<Option<String>, String> {
+    const SHAPE: &str = "mlkem768x25519plus.<native|xorpub|random>.<0rtt|1rtt>.<key>";
+    let text = raw.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = text.split('.').collect();
+    if parts.len() < 4 || parts[0] != "mlkem768x25519plus" {
+        return Err(format!(
+            "vless encryption={:?} is not {SHAPE} (an Xray-core link)",
+            excerpt(text)
+        ));
+    }
+    if !matches!(parts[1], "native" | "xorpub" | "random") {
+        return Err(format!(
+            "vless encryption mode {:?} is not native, xorpub or random",
+            parts[1]
+        ));
+    }
+    if !matches!(parts[2], "0rtt" | "1rtt") {
+        return Err(format!(
+            "vless encryption round trip {:?} is not 0rtt or 1rtt",
+            parts[2]
+        ));
+    }
+    let mut keys = 0;
+    for part in &parts[3..] {
+        if part.len() < 20 {
+            continue;
+        }
+        let usable = URL_SAFE_NO_PAD
+            .decode(part)
+            .is_ok_and(|key| key.len() == 32 || key.len() == 1184);
+        if !usable {
+            return Err(format!(
+                "vless encryption key {:?} is not a base64url X25519 or ML-KEM-768 public key",
+                excerpt(part)
+            ));
+        }
+        keys += 1;
+    }
+    if keys == 0 {
+        return Err("vless encryption carries no public key".into());
+    }
+    Ok(Some(text.to_string()))
 }
 
 fn parse_vmess(rest: &str) -> Result<Outbound, String> {
@@ -337,38 +672,40 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         .and_then(|text| text.trim().parse::<u16>().ok())
         .unwrap_or(0);
     let cipher = json_text(&json, "scy").unwrap_or_else(|| "auto".into());
-    let path = json_text(&json, "path");
-    let host = json_text(&json, "host");
-    let transport = match json_text(&json, "net")
-        .unwrap_or_else(|| "tcp".into())
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "tcp" => Transport::Tcp,
-        "ws" => Transport::Ws {
-            path: path.unwrap_or_else(|| "/".into()),
-            host,
-        },
-        "h2" | "http" => Transport::H2 {
-            path: path.unwrap_or_else(|| "/".into()),
-            host,
-        },
-        "grpc" => Transport::Grpc {
-            service: path.or(host).unwrap_or_default(),
-        },
-        other => {
+    // `type` is the old TCP/mKCP header obfuscation, which the core removed
+    // along with the mKCP header itself: a link still naming one is reported,
+    // not quietly downgraded to a plain header.
+    if let Some(kind) = json_text(&json, "type") {
+        if !kind.eq_ignore_ascii_case("none") {
             return Err(format!(
-                "unsupported vmess transport {other:?} (tcp, ws, h2, grpc)"
-            ))
+                "the vmess header type {kind:?} was removed from Xray-core (finalmask replaced it)"
+            ));
         }
-    };
+    }
+    // The JSON names the same transports the query grammar does, only under
+    // `net`/`path`/`host`, so it is handed to the one parser that knows all of
+    // them instead of a second, shorter copy of it.
+    let network = json_text(&json, "net");
+    let mut params = Query::new();
+    params.set("type", network.clone());
+    if network.is_some_and(|net| net.eq_ignore_ascii_case("grpc")) {
+        params.set(
+            "servicename",
+            json_text(&json, "path").or_else(|| json_text(&json, "host")),
+        );
+    } else {
+        params.set("path", json_text(&json, "path"));
+        params.set("host", json_text(&json, "host"));
+    }
+    let transport = parse_transport(&params)?;
     let security = if json_text(&json, "tls").is_some_and(|tls| tls.eq_ignore_ascii_case("tls")) {
-        Security::Tls {
-            sni: json_text(&json, "sni").or_else(|| json_text(&json, "host")),
-            alpn: split_list(json_text(&json, "alpn").as_deref()),
-            fingerprint: json_text(&json, "fp"),
-            allow_insecure: false,
-        }
+        tls_security(
+            json_text(&json, "sni").or_else(|| json_text(&json, "host")),
+            split_list(json_text(&json, "alpn").as_deref()),
+            json_text(&json, "fp"),
+            false,
+            None,
+        )
     } else {
         Security::None
     };
@@ -380,6 +717,7 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         },
         transport,
         security,
+        finalmask: None,
         server,
         port,
         remark: percent_text(rest.split_once('#').map(|(_, remark)| remark)),
@@ -403,6 +741,7 @@ fn parse_trojan(rest: &str) -> Result<Outbound, String> {
         transport: parse_transport(&query)?,
         // Trojan is TLS by definition; links routinely omit `security=tls`.
         security: parse_security(&query, &server, true)?,
+        finalmask: parse_finalmask(&query)?,
         server,
         port,
         remark,
@@ -411,7 +750,8 @@ fn parse_trojan(rest: &str) -> Result<Outbound, String> {
 
 fn parse_shadowsocks(rest: &str) -> Result<Outbound, String> {
     let (body, remark) = split_fragment(rest);
-    let (body, _params) = split_query(body);
+    let (body, params) = split_query(body);
+    let query = Query::parse(params);
     let (credentials, target) = match body.rsplit_once('@') {
         Some((credentials, target)) => (decode_credentials(credentials), target.to_string()),
         None => {
@@ -436,9 +776,11 @@ fn parse_shadowsocks(rest: &str) -> Result<Outbound, String> {
         protocol: Protocol::Shadowsocks {
             method: method.trim().to_ascii_lowercase(),
             password: password.to_string(),
+            plugin: parse_ss_plugin(&query)?,
         },
         transport: Transport::Tcp,
         security: Security::None,
+        finalmask: None,
         server,
         port,
         remark,
@@ -460,6 +802,7 @@ fn parse_socks(rest: &str) -> Result<Outbound, String> {
         security: Security::None,
         server,
         port,
+        finalmask: None,
         remark,
     })
 }
@@ -477,17 +820,13 @@ fn parse_http(rest: &str, tls: bool) -> Result<Outbound, String> {
         protocol: Protocol::Http { user, password },
         transport: Transport::Tcp,
         security: if tls {
-            Security::Tls {
-                sni: host_name(&server),
-                alpn: Vec::new(),
-                fingerprint: None,
-                allow_insecure: false,
-            }
+            tls_security(host_name(&server), Vec::new(), None, false, None)
         } else {
             Security::None
         },
         server,
         port,
+        finalmask: None,
         remark,
     })
 }
@@ -537,17 +876,19 @@ fn parse_hysteria2(rest: &str) -> Result<Outbound, String> {
             pin: query.pin()?,
         },
         transport: Transport::Tcp,
-        security: Security::Tls {
-            sni: query
+        security: tls_security(
+            query
                 .string("sni")
                 .or_else(|| query.string("peer"))
                 .or_else(|| host_name(&server)),
-            alpn: query.list("alpn"),
-            fingerprint: None,
-            allow_insecure: query.flag("insecure") || query.flag("allowinsecure"),
-        },
+            query.list("alpn"),
+            None,
+            query.flag("insecure") || query.flag("allowinsecure"),
+            Some(&query),
+        ),
         server,
         port,
+        finalmask: None,
         remark,
     })
 }
@@ -598,16 +939,16 @@ fn parse_tuic(rest: &str) -> Result<Outbound, String> {
                 || query.flag("reduce_rtt"),
         },
         transport: Transport::Tcp,
-        security: Security::Tls {
-            sni: query.string("sni").or_else(|| host_name(&server)),
-            alpn: query.list("alpn"),
-            fingerprint: query.string("fp"),
-            allow_insecure: query.flag("insecure")
-                || query.flag("allow_insecure")
-                || query.flag("allowinsecure"),
-        },
+        security: tls_security(
+            query.string("sni").or_else(|| host_name(&server)),
+            query.list("alpn"),
+            query.string("fp"),
+            query.flag("insecure") || query.flag("allow_insecure") || query.flag("allowinsecure"),
+            Some(&query),
+        ),
         server,
         port,
+        finalmask: None,
         remark,
     })
 }
@@ -627,17 +968,19 @@ fn parse_anytls(rest: &str) -> Result<Outbound, String> {
     Ok(Outbound {
         protocol: Protocol::AnyTls { password },
         transport: Transport::Tcp,
-        security: Security::Tls {
-            sni: query
+        security: tls_security(
+            query
                 .string("sni")
                 .or_else(|| query.string("peer"))
                 .or_else(|| host_name(&server)),
-            alpn: query.list("alpn"),
-            fingerprint: query.string("fp"),
-            allow_insecure: query.flag("insecure") || query.flag("allowinsecure"),
-        },
+            query.list("alpn"),
+            query.string("fp"),
+            query.flag("insecure") || query.flag("allowinsecure"),
+            Some(&query),
+        ),
         server,
         port,
+        finalmask: None,
         remark,
     })
 }
@@ -660,23 +1003,85 @@ fn parse_transport(query: &Query) -> Result<Transport, String> {
         .to_ascii_lowercase();
     let path = query.string("path").unwrap_or_else(|| "/".into());
     let host = query.string("host");
+    // Early data travels as a count plus the header it is sent in; Xray keeps
+    // the count in the path query and dropped the header, sing-box names both.
+    let max_early_data = query
+        .number("ed")?
+        .or(query.number("maxearlydata")?)
+        .filter(|count| *count > 0);
     let transport = match network.as_str() {
         // `raw` is the name Xray 25.x gave the plain TCP transport.
         "tcp" | "raw" | "none" => Transport::Tcp,
-        "ws" => Transport::Ws { path, host },
-        "h2" | "http" => Transport::H2 { path, host },
-        "httpupgrade" => Transport::HttpUpgrade { path, host },
-        "grpc" | "gun" => {
-            if query.get("mode").is_some_and(|mode| mode.eq_ignore_ascii_case("multi")) {
-                return Err("grpc multi-stream mode is not supported; use a single grpc stream".into());
+        "ws" => Transport::Ws {
+            path,
+            host,
+            max_early_data,
+            early_data_header: query.string("eh"),
+        },
+        "httpupgrade" => Transport::HttpUpgrade {
+            path,
+            host,
+            max_early_data,
+        },
+        "h2" | "http" => Transport::H2 {
+            path,
+            host,
+            method: query.string("method"),
+        },
+        "grpc" | "gun" => Transport::Grpc {
+            service: query.string("servicename").unwrap_or_default(),
+            authority: query.string("authority"),
+            multi_mode: query
+                .get("mode")
+                .is_some_and(|mode| mode.eq_ignore_ascii_case("multi")),
+        },
+        // mKCP. Xray-core removed the header and seed fields the transport used
+        // to have, and refuses a config that still names them, so a link that
+        // does is reported here instead of at start.
+        "kcp" | "mkcp" => {
+            if let Some(kind) = query.get("headertype").filter(|kind| !kind.eq_ignore_ascii_case("none")) {
+                return Err(format!(
+                    "mKCP headerType={kind:?} was removed from Xray-core (finalmask replaced it)"
+                ));
             }
-            Transport::Grpc {
-                service: query.string("servicename").unwrap_or_default(),
+            if query.get("seed").is_some() {
+                return Err("mKCP seed was removed from Xray-core (finalmask replaced it)".into());
+            }
+            Transport::Kcp {
+                mtu: query.number("mtu")?,
+                tti: query.number("tti")?,
+                uplink_capacity: query.number("uplinkcapacity")?,
+                downlink_capacity: query.number("downlinkcapacity")?,
+                congestion: query.boolean("congestion")?,
+                read_buffer: query.number("readbuffersize")?,
+                write_buffer: query.number("writebuffersize")?,
+            }
+        }
+        // XHTTP. Everything past path, host and mode is the core's own settings
+        // object, which the link carries as one URL-encoded JSON value.
+        "xhttp" | "splithttp" => {
+            let extra = match query.get("extra") {
+                Some(raw) => {
+                    let value: Value = serde_json::from_str(raw).map_err(|error| {
+                        format!("xhttp extra is not JSON: {error}")
+                    })?;
+                    if !value.is_object() {
+                        return Err("xhttp extra must be a JSON object".into());
+                    }
+                    Some(value.to_string())
+                }
+                None => None,
+            };
+            Transport::Xhttp {
+                path,
+                host,
+                mode: query.string("mode"),
+                extra,
             }
         }
         other => {
             return Err(format!(
-                "unsupported transport {other:?} (tcp, ws, grpc, h2, httpupgrade)"
+                "unsupported transport {other:?} (tcp, ws, httpupgrade, h2, grpc, kcp, xhttp)"
             ))
         }
     };
@@ -698,6 +1103,9 @@ fn parse_security(query: &Query, server: &str, implicit_tls: bool) -> Result<Sec
             alpn: query.list("alpn"),
             fingerprint: query.string("fp"),
             allow_insecure: query.flag("allowinsecure") || query.flag("insecure"),
+            pinned_cert_sha256: query.string("pcs"),
+            verify_cert_by_name: query.string("vcn"),
+            ech: query.string("ech"),
         }),
         "reality" => {
             let public_key = query
@@ -715,12 +1123,73 @@ fn parse_security(query: &Query, server: &str, implicit_tls: bool) -> Result<Sec
                 public_key,
                 short_id: query.string("sid").unwrap_or_default(),
                 spider_x: query.string("spx").unwrap_or_else(|| "/".into()),
+                mldsa65_verify: query.string("pqv"),
             })
         }
         other => Err(format!(
             "unsupported security {other:?} (none, tls, reality)"
         )),
     }
+}
+
+/// A `tls` block from what a link names, plus the advanced parameters Xray's
+/// grammar adds on top of them. `query` is `None` where the caller has no link
+/// to read those from.
+fn tls_security(
+    sni: Option<String>,
+    alpn: Vec<String>,
+    fingerprint: Option<String>,
+    allow_insecure: bool,
+    query: Option<&Query>,
+) -> Security {
+    Security::Tls {
+        sni,
+        alpn,
+        fingerprint,
+        allow_insecure,
+        pinned_cert_sha256: query.and_then(|query| query.string("pcs")),
+        verify_cert_by_name: query.and_then(|query| query.string("vcn")),
+        ech: query.and_then(|query| query.string("ech")),
+    }
+}
+
+/// SIP002's `plugin` parameter: the plugin's name up to the first `;`, its own
+/// options after it. sing-box is the only core that runs one, and it implements
+/// exactly these two.
+fn parse_ss_plugin(query: &Query) -> Result<Option<ShadowSocksPlugin>, String> {
+    const PLUGINS: [&str; 2] = ["obfs-local", "v2ray-plugin"];
+    let Some(raw) = query.get("plugin") else {
+        return Ok(None);
+    };
+    let (name, options) = match raw.split_once(';') {
+        Some((name, options)) => (name.trim(), Some(options.trim().to_string())),
+        None => (raw.trim(), None),
+    };
+    if !PLUGINS.contains(&name) {
+        return Err(format!(
+            "shadowsocks plugin {:?} is not one sing-box implements (obfs-local, v2ray-plugin)",
+            excerpt(name)
+        ));
+    }
+    Ok(Some(ShadowSocksPlugin {
+        name: name.to_string(),
+        options: options.filter(|options| !options.is_empty()),
+    }))
+}
+
+/// `fm`: Xray's finalmask, a URL-encoded JSON object of the packet masks and
+/// the QUIC parameters its own grammar defines. Nothing here is interpreted —
+/// the object goes into the generated config as it arrived.
+fn parse_finalmask(query: &Query) -> Result<Option<String>, String> {
+    let Some(raw) = query.get("fm") else {
+        return Ok(None);
+    };
+    let value: Value =
+        serde_json::from_str(raw).map_err(|error| format!("finalmask fm is not JSON: {error}"))?;
+    if !value.is_object() {
+        return Err("finalmask fm must be a JSON object".into());
+    }
+    Ok(Some(value.to_string()))
 }
 
 fn split_fragment(rest: &str) -> (&str, Option<String>) {
@@ -926,6 +1395,18 @@ fn b64_decode(text: &str) -> Option<String> {
 struct Query(HashMap<String, String>);
 
 impl Query {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    /// Set a parameter as if the link had carried it, for the parsers whose
+    /// grammar is a JSON object rather than a query string.
+    fn set(&mut self, key: &str, value: Option<String>) {
+        if let Some(value) = value {
+            self.0.insert(key.to_string(), value);
+        }
+    }
+
     fn parse(params: &str) -> Self {
         let mut map = HashMap::new();
         for pair in params.split('&') {
@@ -955,6 +1436,32 @@ impl Query {
 
     fn list(&self, key: &str) -> Vec<String> {
         split_list(self.get(key))
+    }
+
+    /// A plain count: `ed`, `mtu`, `readBufferSize`. A value that is not a
+    /// number is refused rather than dropped, because the core would either
+    /// ignore the setting or fail on it.
+    fn number(&self, key: &str) -> Result<Option<u32>, String> {
+        let Some(raw) = self.get(key) else {
+            return Ok(None);
+        };
+        raw.trim()
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| format!("{key}={raw:?} is not a number"))
+    }
+
+    /// A setting that is present and means yes/no: `congestion=false` differs
+    /// from an absent `congestion`.
+    fn boolean(&self, key: &str) -> Result<Option<bool>, String> {
+        let Some(raw) = self.get(key) else {
+            return Ok(None);
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(Some(true)),
+            "0" | "false" | "no" | "off" => Ok(Some(false)),
+            _ => Err(format!("{key}={raw:?} is not true or false")),
+        }
     }
 
     /// The first of `keys` the link carries, in a caller-chosen priority
@@ -1827,7 +2334,9 @@ mod tests {
             outbound.transport,
             Transport::Ws {
                 path: "/ray".into(),
-                host: Some("cdn.example.com".into())
+                host: Some("cdn.example.com".into()),
+                max_early_data: None,
+                early_data_header: None,
             }
         );
         match outbound.security {
@@ -1863,8 +2372,82 @@ mod tests {
         let error = CoreProfile::parse(&format!(
             "vless://{UUID}@example.com:443?encryption=aes-128-gcm"
         ))
-        .expect_err("non-none encryption must be rejected");
+        .expect_err("a value that is not Xray's dot config must be rejected");
         assert!(error.contains("encryption"), "{error}");
+    }
+
+    /// Xray's VLESS encryption, in the shape a `vless://` link carries it: the
+    /// scheme, the mode, the round trip, then raw-base64 public keys — 32 bytes
+    /// for X25519, 1184 for an ML-KEM-768 encapsulation key.
+    fn vless_encryption_link(key: &str) -> String {
+        format!("vless://{UUID}@example.com:443?security=tls&encryption={key}")
+    }
+
+    #[test]
+    fn vless_encryption_is_carried_verbatim() {
+        let key32 = "A".repeat(43);
+        let mlkem = "A".repeat(1579);
+        for good in [
+            format!("mlkem768x25519plus.native.0rtt.{key32}"),
+            format!("mlkem768x25519plus.xorpub.1rtt.{mlkem}"),
+            // Several keys, and the short segments Xray reads back as padding.
+            format!("mlkem768x25519plus.random.0rtt.{key32}.{key32}.AABB"),
+        ] {
+            let outbound = link(&vless_encryption_link(&good));
+            match &outbound.protocol {
+                Protocol::Vless { encryption, .. } => {
+                    // Verbatim: the core parses the dot config itself.
+                    assert_eq!(encryption.as_deref(), Some(good.as_str()));
+                }
+                other => panic!("expected vless, got {other:?}"),
+            }
+        }
+        // `none`, in any spelling, and an empty value, mean no encryption.
+        for none in ["none", "NONE", ""] {
+            let outbound = link(&format!("vless://{UUID}@example.com:443?encryption={none}"));
+            match outbound.protocol {
+                Protocol::Vless { encryption, .. } => assert!(encryption.is_none(), "{none:?}"),
+                other => panic!("expected vless, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn vless_encryption_rejects_what_the_core_would() {
+        let key32 = "A".repeat(43);
+        let short = "A".repeat(24);
+        for bad in [
+            // Not the scheme, no mode, no round trip, an unknown mode or trip.
+            "mlkem768x25519plus".to_string(),
+            format!("x25519plus.native.0rtt.{key32}"),
+            format!("mlkem768x25519plus.native.{key32}"),
+            format!("mlkem768x25519plus.fast.0rtt.{key32}"),
+            format!("mlkem768x25519plus.native.2rtt.{key32}"),
+            // A key of the wrong size, and one that is not base64url at all.
+            format!("mlkem768x25519plus.native.0rtt.{short}"),
+            format!("mlkem768x25519plus.native.0rtt.{}+", key32),
+        ] {
+            let error = CoreProfile::parse(&vless_encryption_link(&bad))
+                .expect_err("the core would refuse it at start");
+            assert!(error.contains("encryption"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn vless_encryption_is_xray_only() {
+        let key32 = "A".repeat(43);
+        let encrypted = link(&vless_encryption_link(&format!(
+            "mlkem768x25519plus.native.0rtt.{key32}"
+        )));
+        assert!(encrypted.carried_by(FcaeBackend::Xray));
+        assert!(!encrypted.carried_by(FcaeBackend::SingBox));
+        let refusal = encrypted.refusal(FcaeBackend::SingBox);
+        assert!(refusal.contains("Xray"), "{refusal}");
+        assert!(refusal.contains("sing-box"), "{refusal}");
+        // Plain VLESS stays on both cores.
+        let plain = link(&format!("vless://{UUID}@example.com:443"));
+        assert!(plain.carried_by(FcaeBackend::Xray));
+        assert!(plain.carried_by(FcaeBackend::SingBox));
     }
 
     #[test]
@@ -1892,6 +2475,18 @@ mod tests {
             Transport::Ws { ref path, .. } if path == "/vm"
         ));
         assert!(matches!(outbound.security, Security::Tls { .. }));
+
+        // `type` was the TCP/mKCP header camouflage, which the core removed.
+        let legacy = serde_json::json!({
+            "add": "v2.example.net",
+            "port": "8443",
+            "id": UUID,
+            "net": "tcp",
+            "type": "http",
+        })
+        .to_string();
+        let encoded = STANDARD_NO_PAD.encode(legacy);
+        assert!(CoreProfile::parse(&format!("vmess://{encoded}")).is_err());
     }
 
     #[test]
@@ -1904,7 +2499,8 @@ mod tests {
             explicit.protocol,
             Protocol::Shadowsocks {
                 method: "aes-256-gcm".into(),
-                password: "secret".into()
+                password: "secret".into(),
+                plugin: None,
             }
         );
 
@@ -1943,12 +2539,207 @@ mod tests {
     }
 
     #[test]
-    fn grpc_multi_mode_is_refused_rather_than_silently_downgraded() {
-        let error = CoreProfile::parse(&format!(
-            "vless://{UUID}@example.com:443?type=grpc&mode=multi&serviceName=svc"
+    fn grpc_multi_mode_and_authority_reach_xray_and_are_refused_for_sing_box() {
+        let outbound = link(&format!(
+            "vless://{UUID}@example.com:443?type=grpc&mode=multi&serviceName=svc\
+             &authority=grpc.example.com"
+        ));
+        assert_eq!(
+            outbound.transport,
+            Transport::Grpc {
+                service: "svc".into(),
+                authority: Some("grpc.example.com".into()),
+                multi_mode: true,
+            }
+        );
+        assert!(outbound.carried_by(FcaeBackend::Xray));
+        assert!(!outbound.carried_by(FcaeBackend::SingBox));
+        assert!(outbound.refusal(FcaeBackend::SingBox).contains("Xray"));
+    }
+
+    #[test]
+    fn websocket_early_data_is_carried_for_both_cores() {
+        let outbound = link(&format!(
+            "vless://{UUID}@example.com:443?type=ws&path=%2Fray&ed=2048&eh=X-Retry\
+             &security=tls"
+        ));
+        assert_eq!(
+            outbound.transport,
+            Transport::Ws {
+                path: "/ray".into(),
+                host: None,
+                max_early_data: Some(2048),
+                early_data_header: Some("X-Retry".into()),
+            }
+        );
+        // The header is sing-box's; Xray kept only the count, inside the path.
+        assert!(!outbound.carried_by(FcaeBackend::Xray));
+        assert!(outbound.carried_by(FcaeBackend::SingBox));
+        let plain = link(&format!(
+            "vless://{UUID}@example.com:443?type=ws&path=%2Fray&ed=2048&security=tls"
+        ));
+        assert!(plain.carried_by(FcaeBackend::Xray));
+    }
+
+    #[test]
+    fn mkcp_and_xhttp_links_belong_to_xray() {
+        let kcp = link(&format!(
+            "vless://{UUID}@example.com:443?type=kcp&mtu=1350&tti=20&uplinkCapacity=5\
+             &downlinkCapacity=20&congestion=false&readBufferSize=1&writeBufferSize=1"
+        ));
+        assert_eq!(
+            kcp.transport,
+            Transport::Kcp {
+                mtu: Some(1350),
+                tti: Some(20),
+                uplink_capacity: Some(5),
+                downlink_capacity: Some(20),
+                congestion: Some(false),
+                read_buffer: Some(1),
+                write_buffer: Some(1),
+            }
+        );
+        assert!(kcp.carried_by(FcaeBackend::Xray));
+        assert!(!kcp.carried_by(FcaeBackend::SingBox));
+        assert!(kcp.refusal(FcaeBackend::SingBox).contains("Xray"));
+
+        // Header and seed are gone from the core, which refuses a config that
+        // still names them.
+        assert!(CoreProfile::parse(&format!(
+            "vless://{UUID}@example.com:443?type=kcp&headerType=srtp"
         ))
-        .expect_err("multi mode must be refused");
-        assert!(error.contains("multi"), "{error}");
+        .is_err());
+        assert!(CoreProfile::parse(&format!(
+            "vless://{UUID}@example.com:443?type=kcp&seed=abcd"
+        ))
+        .is_err());
+
+        let extra = "%7B%22xPaddingBytes%22%3A%22100-1000%22%7D";
+        let xhttp = link(&format!(
+            "vless://{UUID}@example.com:443?type=xhttp&path=%2Fecho&host=cdn.example.com\
+             &mode=auto&extra={extra}&security=tls"
+        ));
+        assert_eq!(
+            xhttp.transport,
+            Transport::Xhttp {
+                path: "/echo".into(),
+                host: Some("cdn.example.com".into()),
+                mode: Some("auto".into()),
+                extra: Some("{\"xPaddingBytes\":\"100-1000\"}".into()),
+            }
+        );
+        assert!(xhttp.carried_by(FcaeBackend::Xray));
+        assert!(!xhttp.carried_by(FcaeBackend::SingBox));
+        assert!(CoreProfile::parse(&format!(
+            "vless://{UUID}@example.com:443?type=xhttp&extra=not-json"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn http2_is_sing_box_only_now_that_xray_removed_it() {
+        let h2 = link(&format!(
+            "vless://{UUID}@example.com:443?type=h2&path=%2F&host=cdn.example.com\
+             &security=tls"
+        ));
+        assert_eq!(
+            h2.transport,
+            Transport::H2 {
+                path: "/".into(),
+                host: Some("cdn.example.com".into()),
+                method: None,
+            }
+        );
+        assert!(h2.carried_by(FcaeBackend::SingBox));
+        assert!(!h2.carried_by(FcaeBackend::Xray));
+        assert!(h2.refusal(FcaeBackend::Xray).contains("sing-box"));
+    }
+
+    #[test]
+    fn xray_removed_allow_insecure_and_only_sing_box_takes_it() {
+        let outbound = link(&format!(
+            "vless://{UUID}@example.com:443?security=tls&allowInsecure=1"
+        ));
+        assert!(outbound.carried_by(FcaeBackend::SingBox));
+        assert!(!outbound.carried_by(FcaeBackend::Xray));
+        assert!(outbound.refusal(FcaeBackend::Xray).contains("sing-box"));
+
+        // What replaced it on Xray is a pair of certificate settings.
+        let pinned = link(&format!(
+            "vless://{UUID}@example.com:443?security=tls&pcs=AB12&vcn=example.com&ech=ECHLIST"
+        ));
+        assert!(pinned.carried_by(FcaeBackend::Xray));
+        assert!(!pinned.carried_by(FcaeBackend::SingBox));
+        match pinned.security {
+            Security::Tls {
+                pinned_cert_sha256,
+                verify_cert_by_name,
+                ech,
+                ..
+            } => {
+                assert_eq!(pinned_cert_sha256.as_deref(), Some("AB12"));
+                assert_eq!(verify_cert_by_name.as_deref(), Some("example.com"));
+                assert_eq!(ech.as_deref(), Some("ECHLIST"));
+            }
+            other => panic!("expected TLS, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shadowsocks_plugins_and_stream_ciphers_are_sing_box_only() {
+        let plugin = link("ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388\
+            ?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dbing.com");
+        match &plugin.protocol {
+            Protocol::Shadowsocks { plugin, .. } => {
+                let plugin = plugin.as_ref().expect("plugin parsed");
+                assert_eq!(plugin.name, "obfs-local");
+                assert_eq!(plugin.options.as_deref(), Some("obfs=http;obfs-host=bing.com"));
+            }
+            other => panic!("expected shadowsocks, got {other:?}"),
+        }
+        assert!(plugin.carried_by(FcaeBackend::SingBox));
+        assert!(!plugin.carried_by(FcaeBackend::Xray));
+        assert!(plugin.refusal(FcaeBackend::Xray).contains("sing-box"));
+        assert!(CoreProfile::parse(
+            "ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388?plugin=kcptun"
+        )
+        .is_err());
+
+        // A stream cipher Xray dropped, and a name only Xray still knows.
+        let legacy = link("ss://YWVzLTI1Ni1jZmI6c2VjcmV0@example.com:8388");
+        assert!(legacy.carried_by(FcaeBackend::SingBox));
+        assert!(!legacy.carried_by(FcaeBackend::Xray));
+        let aead = link("ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388");
+        assert!(aead.carried_by(FcaeBackend::Xray));
+        assert!(aead.carried_by(FcaeBackend::SingBox));
+    }
+
+    #[test]
+    fn reality_ml_dsa_and_finalmask_are_xray_settings() {
+        let outbound = link(&format!(
+            "vless://{UUID}@example.com:443?security=reality&sni=www.example.com&pbk=KEY\
+             &sid=ab&pqv=PQKEY"
+        ));
+        match outbound.security {
+            Security::Reality {
+                mldsa65_verify, ..
+            } => assert_eq!(mldsa65_verify.as_deref(), Some("PQKEY")),
+            other => panic!("expected reality, got {other:?}"),
+        }
+        assert!(outbound.carried_by(FcaeBackend::Xray));
+        assert!(!outbound.carried_by(FcaeBackend::SingBox));
+
+        let mask = "%7B%22tcp%22%3A%5B%5D%7D";
+        let masked = link(&format!(
+            "vless://{UUID}@example.com:443?security=tls&fm={mask}"
+        ));
+        assert_eq!(masked.finalmask.as_deref(), Some("{\"tcp\":[]}"));
+        assert!(masked.carried_by(FcaeBackend::Xray));
+        assert!(!masked.carried_by(FcaeBackend::SingBox));
+        assert!(CoreProfile::parse(&format!(
+            "vless://{UUID}@example.com:443?security=tls&fm=[]"
+        ))
+        .is_err());
     }
 
     #[test]
