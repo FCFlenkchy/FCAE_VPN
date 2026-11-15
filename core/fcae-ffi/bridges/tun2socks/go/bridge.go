@@ -1165,10 +1165,26 @@ const stackStopGrace = 2 * time.Second
 // enough: the runtime keeps both settings until they are changed.
 var heapOnce sync.Once
 
+// heapGCPercent makes the runtime collect at 1.5x the live heap: gVisor's
+// per-packet allocations are short-lived, so a lower percentage would collect
+// constantly on the data plane and a higher one would let the stack's garbage
+// pile up until a stop has to reclaim it.
+const heapGCPercent = 50
+
+// heapSoftLimit is the runtime's soft memory limit. It has to sit above what a
+// live stack costs -- gVisor's buffer pools, the reassembly queues and the
+// channel endpoints run to tens of MiB on a busy tunnel -- because a limit below
+// the live heap turns every allocation into a trigger for a full collection,
+// which is paid on the goroutine that is moving packets. 192 MiB still keeps a
+// phone process well inside what a 2 GiB device will tolerate before the OS
+// reclaims it, and the limit is a ceiling on *garbage*, not a cap on the
+// tunnel's throughput.
+const heapSoftLimit = 192 << 20
+
 func applyHeapPolicy() {
 	heapOnce.Do(func() {
-		debug.SetGCPercent(50)
-		debug.SetMemoryLimit(48 * 1024 * 1024)
+		debug.SetGCPercent(heapGCPercent)
+		debug.SetMemoryLimit(heapSoftLimit)
 	})
 }
 
@@ -1179,6 +1195,11 @@ var retiring <-chan struct{}
 
 // freeingMemory guards the one background collection a stop may start.
 var freeingMemory atomic.Bool
+
+// scrubMinReclaimable is how much idle-but-unreturned heap makes the post-stop
+// scrub worth its stop-the-world pause. FreeOSMemory returns exactly this, so a
+// runtime below it has nothing to hand back.
+const scrubMinReclaimable = 16 << 20
 
 // startTeardown runs teardown on its own goroutine so the caller can stop
 // waiting on it. The goroutine must only touch state the caller already
@@ -1229,21 +1250,56 @@ func awaitRetiring() bool {
 	}
 }
 
-// stopFD closes the caller-owned descriptor and the stack built on it. Both
-// closes happen here, because they are what stops traffic and releases the fd;
-// only the reclamation Wait() runs in the background. The returned channel
-// reports when that finished.
+// fdDeviceCloseWakes reports whether closing the descriptor is what stops the
+// data plane.
+//
+// The fd device has two implementations. On linux (and android, where Go's
+// build tags make the linux one apply) the stack polls the descriptor and its
+// own stop eventfd together with ppoll, and the eventfd -- signalled while the
+// stack retires its NIC -- is what wakes the dispatcher. Everywhere else the
+// descriptor is wrapped in an *os.File and the dispatcher parks in the runtime
+// netpoller, which only File.Close unblocks: there the device has to be closed
+// first, or the dispatch goroutine outlives the stack forever.
+func fdDeviceCloseWakes() bool {
+	return runtime.GOOS != "linux" && runtime.GOOS != "android"
+}
+
+// stopFD closes the caller-owned descriptor and the stack built on it, in the
+// order the platform needs.
+//
+// Closing the descriptor is not a wake-up on linux: ppoll does not return when
+// another thread closes a descriptor it is polling, so a device closed first
+// leaves the dispatcher asleep until the number is reused -- at which point it
+// is polling an unrelated socket and may never wake at all, pinning its buffers
+// and one gVisor stack reference for the life of the process. The stack's stop
+// eventfd does wake it, and it is signalled from Stack.Wait() while the NIC is
+// retired, so the descriptor is closed after Wait() has reaped every dispatch
+// goroutine: it is then the last owner, and nothing polls the number again.
+// On darwin/bsd the two steps are the other way round (see
+// fdDeviceCloseWakes), because there the descriptor is the wake-up.
+//
+// Both closes still happen on this side, and the caller is not made to wait for
+// the stack's reclamation: the returned channel reports when Wait() finished.
 func stopFD() <-chan struct{} {
 	d, s := fdDevice, fdStack
 	fdDevice, fdStack = nil, nil
-	if d != nil {
+	closeAfter := d != nil && !fdDeviceCloseWakes()
+	if d != nil && fdDeviceCloseWakes() {
 		d.Close()
 	}
 	if s == nil {
+		if closeAfter {
+			d.Close()
+		}
 		return closedChannel()
 	}
 	s.Close()
-	return startTeardown("gVisor stack", s.Wait)
+	return startTeardown("gVisor stack", func() {
+		s.Wait()
+		if closeAfter {
+			d.Close()
+		}
+	})
 }
 
 // closedChannel returns a channel that is already closed, so callers that
@@ -1267,6 +1323,11 @@ func stopRun() (done <-chan struct{}, engineRun bool) {
 	if fdDevice != nil || fdStack != nil {
 		return stopFD(), false
 	}
+	// The engine owns its device and its stack together and stops them in its
+	// own order, which on linux closes the device before the stack (the hazard
+	// stopFD documents). That path is the desktop TUN device only: Android and
+	// the iOS/desktop fd handoff always come through fd://, and the submodule
+	// stays pristine, so the ordering is left to it rather than forked here.
 	return startTeardown("tun2socks engine", func() { _ = engine.Stop() }), true
 }
 
@@ -1381,11 +1442,18 @@ func t2s_stop() C.int {
 	// The stack's heap is garbage as soon as it is closed and on a phone the
 	// pages are worth returning, but a forced GC plus scavenge is synchronous
 	// work that has nothing to do with the tunnel being down. Keep it off the
-	// thread the Disconnect is waiting on, and never let a reconnect loop pile
-	// one collection up per attempt.
+	// thread the Disconnect is waiting on, never let a reconnect loop pile one
+	// collection up per attempt, and skip it outright when the runtime is
+	// already holding nothing worth handing back -- a session that failed before
+	// a stack existed would otherwise pay a full collection on every retry.
 	if freeingMemory.CompareAndSwap(false, true) {
 		go func() {
 			defer freeingMemory.Store(false)
+			var stats runtime.MemStats
+			runtime.ReadMemStats(&stats)
+			if stats.HeapIdle-stats.HeapReleased < scrubMinReclaimable {
+				return
+			}
 			debug.FreeOSMemory()
 		}()
 	}

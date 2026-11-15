@@ -742,6 +742,21 @@ Java_com_fc_fcaevpn_NativeEngine_nativeNormalizeUpstreamProxy(JNIEnv* env, jclas
     return normalize_upstream_proxy(env, text, out) ? env->NewStringUTF(out) : nullptr;
 }
 
+// "" when the saved core config can be used, else the reason. The editor shows
+// it under the config field, so a bad paste is refused before it is saved.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeCheckCoreConfig(JNIEnv* env, jclass, jstring config, jint backend) {
+    const std::string value = jstr(env, config);
+    char out[512] = {};
+    if (fcae_core_check_profile(value.c_str(), (int32_t)backend, out, sizeof(out)))
+        return env->NewStringUTF("");
+    // NewStringUTF needs modified UTF-8: a message that came back with a byte
+    // the runtime cannot represent would abort the editor instead of showing it.
+    for (char* c = out; *c; ++c)
+        if ((unsigned char)*c >= 0x80) *c = '?';
+    return env->NewStringUTF(out);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeInit(JNIEnv*, jclass) {
     ensure_init();
@@ -831,6 +846,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jboolean fragmentSni,
     jstring upstreamProxy,
     jintArray chainTransports,
+    jstring coreConfigs,
+    jstring coreConfigId,
     jstring firefoxAccountId,
     jstring firefoxLocation,
     jstring firefoxServer,
@@ -852,6 +869,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     std::string torLinesOwned = jstr(env, torBridgeLines);
     std::string psiCfgOwned = jstr(env, psiphonConfig);
     std::string psiRegionOwned = jstr(env, psiphonRegion);
+    std::string coreConfigsOwned = jstr(env, coreConfigs);
+    std::string coreConfigIdOwned = jstr(env, coreConfigId);
     std::string firefoxAccountOwned = jstr(env, firefoxAccountId);
     std::string firefoxLocationOwned = jstr(env, firefoxLocation);
     std::string firefoxServerOwned = jstr(env, firefoxServer);
@@ -868,12 +887,27 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.backend = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
     const jsize chain_count = chainTransports ? env->GetArrayLength(chainTransports) : 0;
     std::vector<FcaeChainHop> chain_hops((size_t)chain_count);
+    // A saved-config hop holds a pointer to its reference, so the references
+    // live here and are reserved up front: a reallocation would move them.
+    std::vector<std::string> core_refs;
+    core_refs.reserve((size_t)chain_count);
     if (chain_count > 0) {
         jint* transports = env->GetIntArrayElements(chainTransports, nullptr);
         if (!transports) return JNI_FALSE;
         for (jsize i = 0; i < chain_count; ++i) {
             const int transport = transports[i];
             FcaeChainHop& hop = chain_hops[(size_t)i];
+            if (transport >= FCAE_CORE_TRANSPORT_BASE) {
+                // A saved config: the engine resolves this position in
+                // coreConfigs and takes the hop's backend from the entry, so the
+                // fallback here stays neutral instead of claiming a core.
+                hop.backend = FCAE_BACKEND_AETHER;
+                hop.protocol = FCAE_PROTOCOL_AUTO;
+                hop.config_ref = core_refs
+                    .emplace_back("#" + std::to_string(transport - FCAE_CORE_TRANSPORT_BASE))
+                    .c_str();
+                continue;
+            }
             hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : FCAE_BACKEND_AETHER;
             hop.h2_enabled = transport == 1 || transport == 7 || transport == 9;
             switch (transport) {
@@ -890,6 +924,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     }
     cfg.chain.hops = chain_hops.data();
     cfg.chain.hop_count = (uint32_t)chain_hops.size();
+    // Saved Xray/sing-box configs: the library every reference above points
+    // into, and the entry the main protocol runs.
+    cfg.core.library    = coreConfigsOwned.empty() ? nullptr : coreConfigsOwned.c_str();
+    cfg.core.config_ref = coreConfigIdOwned.empty() ? nullptr : coreConfigIdOwned.c_str();
     cfg.firefox.account_id = firefoxAccountOwned.empty() ? nullptr : firefoxAccountOwned.c_str();
     cfg.firefox.location = firefoxLocationOwned.empty() ? nullptr : firefoxLocationOwned.c_str();
     cfg.firefox.server = firefoxServerOwned.empty() ? nullptr : firefoxServerOwned.c_str();

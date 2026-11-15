@@ -18,9 +18,21 @@ use std::time::Duration;
 
 use fcae_abi::*;
 
+use crate::core_library::{CoreEntry, CoreLibrary};
 use crate::sing_xray::CoreProfile;
 use crate::error::{CoreError, Result};
 use crate::upstream::UpstreamProxy;
+
+/// The name a UI shows for a backend.
+pub fn backend_label(backend: FcaeBackend) -> &'static str {
+    match backend {
+        FcaeBackend::Aether => "Aether",
+        FcaeBackend::Psiphon => "Psiphon",
+        FcaeBackend::Firefox => "Firefox",
+        FcaeBackend::Xray => "Xray",
+        FcaeBackend::SingBox => "sing-box",
+    }
+}
 
 /// Shared requested Windows Wintun identity for every TUN engine.
 pub const WINTUN_ADAPTER_GUID: &str = "24198F4C-7895-434C-AD65-9E29A92DDC61";
@@ -169,6 +181,11 @@ pub struct CoreConfig {
     pub profile: Option<CoreProfile>,
     /// The core's own log verbosity.
     pub log_level: FcaeEngineLog,
+    /// The user's saved configs. A route names one of these by position or
+    /// name; nothing else can introduce a profile.
+    pub library: CoreLibrary,
+    /// The saved config the main backend runs, when it runs one.
+    pub selection: Option<CoreEntry>,
 }
 
 impl Default for CoreConfig {
@@ -176,7 +193,16 @@ impl Default for CoreConfig {
         Self {
             profile: None,
             log_level: FcaeEngineLog::Info,
+            library: CoreLibrary::default(),
+            selection: None,
         }
+    }
+}
+
+impl CoreConfig {
+    /// The label the UI shows for this session's core, if it named one.
+    pub fn selection_name(&self) -> Option<&str> {
+        self.selection.as_ref().map(|entry| entry.name.as_str())
     }
 }
 
@@ -335,16 +361,27 @@ impl TorConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChainHop {
     pub backend: FcaeBackend,
     pub protocol: FcaeProtocol,
     pub h2_enabled: bool,
+    /// The saved config this hop runs, resolved from the library. A core hop
+    /// without one falls back to the session's `core.profile`, which is what a
+    /// pre-library caller (ABI v24) necessarily meant.
+    pub core: Option<CoreEntry>,
 }
 
 impl ChainHop {
     pub fn new(backend: FcaeBackend, protocol: FcaeProtocol, h2_enabled: bool) -> Self {
-        Self { backend, protocol, h2_enabled }
+        Self { backend, protocol, h2_enabled, core: None }
+    }
+
+    /// The label the protocol list shows for this hop.
+    pub fn label(&self) -> &str {
+        self.core
+            .as_ref()
+            .map_or_else(|| backend_label(self.backend), |entry| entry.name.as_str())
     }
 }
 
@@ -641,41 +678,83 @@ unsafe fn parse_aether(raw: &FcaeAether) -> Result<AetherOptions> {
     })
 }
 
+/// Parse the saved configs a session may point at, and resolve the one the main
+/// backend runs.
+///
+/// The library is parsed before anything else can use it: a malformed document
+/// or a dangling reference is worth reporting even on a route that never dials
+/// a core, because the editor that wrote it will write it again.
+///
+/// # Safety
+/// `raw` must be a valid `FcaeCore` whose string fields are NULL or valid
+/// NUL-terminated strings that outlive this call.
+unsafe fn parse_core_library(raw: &FcaeCore) -> Result<(CoreLibrary, Option<CoreEntry>)> {
+    let library = match cstr_opt(raw.library) {
+        Some(text) => CoreLibrary::parse(&text)
+            .map_err(|error| CoreError::InvalidConfig(format!("core.library: {error}")))?,
+        None => CoreLibrary::default(),
+    };
+    let selection = match cstr_opt(raw.config_ref) {
+        Some(reference) => {
+            let entry = library
+                .resolve(&reference)
+                .map_err(|error| CoreError::InvalidConfig(format!("core.config_ref: {error}")))?;
+            Some(entry.clone())
+        }
+        None => None,
+    };
+    Ok((library, selection))
+}
+
 /// Parse and validate the external-core options.
 ///
 /// Only the shape is checked here. The share-link grammar lives in the bridge
 /// that expands it — duplicating it would let the two copies drift apart, and
 /// the bridge reports the offending field with the same `InvalidConfig` status.
-unsafe fn parse_core(raw: &FcaeCore, required: bool) -> Result<CoreConfig> {
+unsafe fn parse_core(
+    raw: &FcaeCore,
+    required: bool,
+    library: CoreLibrary,
+    selection: Option<CoreEntry>,
+) -> Result<CoreConfig> {
     let log_level = FcaeEngineLog::try_from(raw.log_level as u32).map_err(|_| {
         CoreError::InvalidConfig(format!("core.log_level={} is invalid", raw.log_level as u32))
     })?;
-    let text = cstr_opt(raw.profile);
-    let profile = match text.as_deref() {
-        Some(text) => match CoreProfile::parse(text) {
-            Ok(profile) => Some(profile),
-            // A stale profile must not block a session that never dials a core,
-            // but on a core route it is the difference between a working tunnel
-            // and a child process that exits a second after start.
-            Err(error) if !required => {
-                log::warn!("[config] ignoring core.profile: {error}");
-                None
+
+    // A selected saved config is the profile: it was validated when the library
+    // was parsed, and it is the entry the user picked out of the protocol list.
+    let mut profile = selection.as_ref().map(|entry| entry.profile.clone());
+    if profile.is_none() {
+        profile = match cstr_opt(raw.profile).as_deref() {
+            Some(text) => match CoreProfile::parse(text) {
+                Ok(profile) => Some(profile),
+                // A stale profile must not block a session that never dials a
+                // core, but on a core route it is the difference between a
+                // working tunnel and a child process that exits a second after
+                // start.
+                Err(error) if !required => {
+                    log::warn!("[config] ignoring core.profile: {error}");
+                    None
+                }
+                Err(error) => {
+                    return Err(CoreError::InvalidConfig(format!("core.profile: {error}")));
+                }
+            },
+            None if required => {
+                return Err(CoreError::InvalidConfig(
+                    "the Xray/sing-box backend needs a saved config (core.config_ref) or core.profile"
+                        .into(),
+                ))
             }
-            Err(error) => {
-                return Err(CoreError::InvalidConfig(format!("core.profile: {error}")));
-            }
-        },
-        None if required => {
-            return Err(CoreError::InvalidConfig(
-                "the Xray/sing-box backend needs core.profile (a share link or a native config JSON)"
-                    .into(),
-            ))
-        }
-        None => None,
-    };
+            None => None,
+        };
+    }
+
     Ok(CoreConfig {
         profile,
         log_level,
+        library,
+        selection,
     })
 }
 
@@ -733,6 +812,17 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
 
     let _ = FcaeTorBridges::try_from(raw.tor.bridges as u32)
         .map_err(|_| CoreError::InvalidConfig(format!("tor.bridges={} is invalid", raw.tor.bridges as u32)))?;
+
+    // The saved core configs, and the one the main backend runs. Resolved here
+    // rather than after the chain so that a selected config decides its own
+    // backend for every check below: it is the only thing that knows whether it
+    // is an Xray or a sing-box profile, and a UI that sends both a config
+    // reference and a stale backend id must not end up running the wrong core.
+    let (library, main_core) = parse_core_library(&raw.core)?;
+    let (backend, protocol) = match &main_core {
+        Some(entry) => (entry.backend, FcaeProtocol::Auto),
+        None => (backend, protocol),
+    };
 
     let mut cfg = SessionConfig {
         backend,
@@ -904,12 +994,29 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         if raw.chain.hops.is_null() {
             return Err(CoreError::InvalidConfig("chain.hops is null with a nonzero hop_count".into()));
         }
-        for exit in std::slice::from_raw_parts(raw.chain.hops, raw.chain.hop_count as usize) {
+        for (index, exit) in std::slice::from_raw_parts(raw.chain.hops, raw.chain.hop_count as usize)
+            .iter()
+            .enumerate()
+        {
             let backend = FcaeBackend::try_from(exit.backend as u32)
                 .map_err(|_| CoreError::InvalidConfig("chain contains an unknown backend".into()))?;
             let protocol = FcaeProtocol::try_from(exit.protocol as u32)
                 .map_err(|_| CoreError::InvalidConfig("chain contains an unknown protocol".into()))?;
-            cfg.chain.push(ChainHop::new(backend, protocol, exit.h2_enabled));
+            let mut hop = ChainHop::new(backend, protocol, exit.h2_enabled);
+            if let Some(reference) = cstr_opt(exit.config_ref) {
+                let entry = library.resolve(&reference).map_err(|error| {
+                    CoreError::InvalidConfig(format!("chain hop {}: {error}", index + 1))
+                })?;
+                // A saved config knows which core reads it and has no protocol
+                // dimension of its own, so the entry wins over both fields.
+                hop = ChainHop {
+                    backend: entry.backend,
+                    protocol: FcaeProtocol::Auto,
+                    h2_enabled: exit.h2_enabled,
+                    core: Some(entry.clone()),
+                };
+            }
+            cfg.chain.push(hop);
         }
     } else {
         if raw.chain.count > raw.chain.exits.len() as u32 {
@@ -956,8 +1063,8 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         hop.chain.clear();
         if hop.upstream_requires_udp() && !previous_udp {
             return Err(CoreError::InvalidConfig(format!(
-                "the {:?} hop requires a UDP-capable upstream; the preceding backend is TCP-only",
-                exit.backend
+                "the {} hop requires a UDP-capable upstream; the preceding backend is TCP-only",
+                exit.label()
             )));
         }
         previous_udp = match exit.backend {
@@ -970,9 +1077,14 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // The built-in cores (Xray-core, sing-box) carry their own uplink, so their
     // profile is part of the session config: parsed here, with the chain known,
     // instead of after a supervisor task has already started.
+    // A core hop that names its own saved config brings its own profile, so only
+    // the ones falling back to the session profile make that profile required.
     let core_in_path = is_core_backend(cfg.backend)
-        || cfg.chain.iter().any(|hop| is_core_backend(hop.backend));
-    cfg.core = parse_core(&raw.core, core_in_path)?;
+        || cfg
+            .chain
+            .iter()
+            .any(|hop| is_core_backend(hop.backend) && hop.core.is_none());
+    cfg.core = parse_core(&raw.core, core_in_path, library, main_core)?;
 
     // Tor
     let t = &raw.tor;
@@ -1632,6 +1744,84 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_config_is_the_route_and_decides_its_own_core() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        // A stale Aether id and no profile at all: the reference is the route.
+        raw.backend = FcaeBackend::Aether;
+        let library = std::ffi::CString::new(
+            r##"[{"name": "Home", "backend": "xray", "config": "socks5://127.0.0.1:1080"}]"##,
+        )
+        .unwrap();
+        let reference = std::ffi::CString::new("#0").unwrap();
+        raw.core.library = library.as_ptr();
+        raw.core.config_ref = reference.as_ptr();
+        let cfg = unsafe { parse(&raw) }.expect("a selected saved config is a whole route");
+        assert_eq!(cfg.backend, FcaeBackend::Xray);
+        assert_eq!(cfg.protocol, FcaeProtocol::Auto);
+        assert_eq!(cfg.core.selection_name(), Some("Home"));
+        assert!(cfg.core.profile.is_some());
+        assert_eq!(cfg.core.library.len(), 1);
+
+        // A dangling reference is reported, not ignored: the editor wrote it.
+        let missing = std::ffi::CString::new("#1").unwrap();
+        raw.core.config_ref = missing.as_ptr();
+        assert!(matches!(
+            unsafe { parse(&raw) },
+            Err(CoreError::InvalidConfig(message)) if message.contains("core.config_ref")
+        ));
+    }
+
+    #[test]
+    fn a_chained_saved_config_carries_its_own_profile() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.backend = FcaeBackend::Aether;
+        raw.protocol = FcaeProtocol::Masque;
+        let library = std::ffi::CString::new(
+            r##"[{"name": "Exit", "backend": "sing-box", "config": "socks5://127.0.0.1:1090"}]"##,
+        )
+        .unwrap();
+        raw.core.library = library.as_ptr();
+        let reference = std::ffi::CString::new("#0").unwrap();
+        let hops = [FcaeChainHop {
+            // The entry overrides both of these.
+            backend: FcaeBackend::Aether,
+            protocol: FcaeProtocol::WireGuard,
+            h2_enabled: true,
+            config_ref: reference.as_ptr(),
+        }];
+        raw.chain.hops = hops.as_ptr();
+        raw.chain.hop_count = 1;
+        // No core.profile and no main core.config_ref: every core hop brought
+        // its own saved config, so nothing else is required.
+        let cfg = unsafe { parse(&raw) }.expect("a chained saved config needs no session profile");
+        assert_eq!(cfg.backend, FcaeBackend::Aether);
+        assert_eq!(cfg.chain.len(), 1);
+        assert_eq!(cfg.chain[0].backend, FcaeBackend::SingBox);
+        assert_eq!(cfg.chain[0].protocol, FcaeProtocol::Auto);
+        assert_eq!(cfg.chain[0].label(), "Exit");
+        assert!(cfg.core.profile.is_none());
+        assert_eq!(cfg.core.library.len(), 1);
+    }
+
+    #[test]
+    fn a_broken_library_is_reported_even_without_a_core_in_the_route() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.backend = FcaeBackend::Aether;
+        let broken = std::ffi::CString::new(r#"[{"name": "X", "backend": "xray"}]"#).unwrap();
+        raw.core.library = broken.as_ptr();
+        assert!(matches!(
+            unsafe { parse(&raw) },
+            Err(CoreError::InvalidConfig(message)) if message.contains("core.library")
+        ));
+    }
+
+    #[test]
     fn a_stale_profile_never_blocks_a_session_that_does_not_use_a_core() {
         let mut raw = raw_test_config();
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
@@ -1928,11 +2118,11 @@ mod tests {
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
         raw.abi_version = FCAE_ABI_VERSION;
         let hops = [
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false },
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false },
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::Masque, h2_enabled: true },
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::Gool, h2_enabled: false },
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::MasqueInMasque, h2_enabled: true },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::Masque, h2_enabled: true, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::Gool, h2_enabled: false, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::MasqueInMasque, h2_enabled: true, config_ref: std::ptr::null() },
         ];
         raw.chain.hops = hops.as_ptr();
         raw.chain.hop_count = hops.len() as u32;
@@ -1956,6 +2146,7 @@ mod tests {
         raw.http_port = 1819;
         let hops = [FcaeChainHop {
             backend: FcaeBackend::Firefox, protocol: FcaeProtocol::Auto, h2_enabled: true,
+            config_ref: std::ptr::null(),
         }];
         raw.chain.hops = hops.as_ptr();
         raw.chain.hop_count = 1;
@@ -1976,6 +2167,7 @@ mod tests {
         assert_eq!(unsafe { parse(&raw) }.unwrap().firefox.transport, "h1");
         let hops = [FcaeChainHop {
             backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false,
+            config_ref: std::ptr::null(),
         }];
         raw.chain.hops = hops.as_ptr();
         raw.chain.hop_count = 1;

@@ -44,7 +44,14 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 24
+#define FCAE_ABI_VERSION 25
+
+/* Protocol-list positions at and above this index name a saved Xray/sing-box
+ * config (its position in FcaeCore::library) instead of one of the built-in
+ * transports. Shared by the desktop and Android UIs, so a saved config is
+ * pickable everywhere a built-in transport is: as the main protocol and as a
+ * chained exit. Below it, positions follow the built-in transport order. */
+#define FCAE_CORE_TRANSPORT_BASE 11
 /* Opt in to an HTTP listener in TUN mode when http_port is nonzero. */
 #define FCAE_CONFIG_TUN_HTTP (UINT64_C(1) << 63)
 
@@ -329,17 +336,27 @@ typedef struct {
  * started in-process: the app supplies only the outbound profile, the bridge
  * generates the core's config and drives the core it links. There is no
  * executable to ship or point at. `profile` is NULL only when no core is in
- * the route. ABI v24. */
+ * the route. ABI v24; `library` and `config_ref` are ABI v25.
+ *
+ * `library` is the user's saved configs, a JSON array of
+ *   {"name": "...", "backend": "xray" | "sing-box", "config": ...}
+ * where "config" is a share link string or the core's own config object. The
+ * UI owns that document; positions in it are what `config_ref` points at. */
 typedef struct {
     const char     *profile;      /* share link or native config JSON       */
     FcaeEngineLog   log_level;    /* the core's own log verbosity           */
+    const char     *library;      /* saved configs JSON array, or NULL      */
+    const char     *config_ref;   /* "#<index>" or a saved config's name    */
 } FcaeCore;
 
-/* One dynamic exit, including the transport used by an Aether hop. */
+/* One dynamic exit, including the transport used by an Aether hop.
+ * `config_ref` names a saved config in FcaeCore::library ("#<index>" or its
+ * name); when set it decides the hop's backend and profile. ABI v25. */
 typedef struct {
     FcaeBackend  backend;
     FcaeProtocol protocol;
     bool         h2_enabled;
+    const char  *config_ref;
 } FcaeChainHop;
 
 /* Additional exits in carrier-to-final-exit order. hops/hop_count accepts any
@@ -564,6 +581,11 @@ uint32_t fcae_parse_tcp_buffer_size(const char *text);
  * writes its canonical URL ("" for none) into `out`, or returns false and
  * writes the reason (truncated to `cap`). */
 bool fcae_normalize_upstream_proxy(const char *text, char *out, uint32_t cap);
+
+/* Validates one saved core config (a share link or the core's own config JSON)
+ * for the given backend (FCAE_BACKEND_XRAY or FCAE_BACKEND_SINGBOX). Returns
+ * true and writes "" into `out`, or false and writes the reason there. */
+bool fcae_core_check_profile(const char *config, int32_t backend, char *out, uint32_t cap);
 
 /* True if the process can create a TUN device (admin/root). */
 bool       fcae_is_privileged(void);

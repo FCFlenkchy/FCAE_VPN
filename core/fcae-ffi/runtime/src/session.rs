@@ -20,7 +20,7 @@ use fcae_abi::{FcaeBackend, FcaeMode, FcaeProtocol, FcaeState, FcaeTorMode};
 use parking_lot::Mutex;
 
 use crate::backend::{BackendContext, BackendHandle, CancelToken, Endpoints};
-use crate::config::{ChainHop, SessionConfig};
+use crate::config::{backend_label, ChainHop, SessionConfig};
 use crate::error::{CoreError, Result};
 use crate::registry;
 use crate::telemetry::{TelemetryCell, TelemetrySink};
@@ -588,7 +588,10 @@ async fn run_session(
         let mut carrier_config = config.clone();
         if !config.chain.is_empty() {
             configure_internal_listeners(&mut carrier_config)?;
-            carrier_config.require_udp_proxy = config.chain.first().is_some_and(|hop| hop_needs_udp(&config, *hop));
+            carrier_config.require_udp_proxy = config
+                .chain
+                .first()
+                .is_some_and(|hop| hop_needs_udp(&config, hop));
         }
         let cx = BackendContext::new(carrier_config.clone(), sink.clone(), cancel.clone());
         cx.report(
@@ -888,31 +891,39 @@ async fn start_downstream(
     let target_len = config.chain.len() + 1;
     while handles.len() < target_len {
         let hop = handles.len();
-        let exit = config.chain[hop - 1];
+        let exit = config.chain[hop - 1].clone();
         let final_hop = hop == config.chain.len();
         let previous = handles[hop - 1].endpoints();
         let (previous_backend, previous_protocol) = if hop == 1 {
             (config.backend, config.protocol)
         } else {
-            let prior = config.chain[hop - 2];
+            let prior = &config.chain[hop - 2];
             (prior.backend, prior.protocol)
         };
         let previous_name = if previous_backend == FcaeBackend::Aether
             && (previous_protocol == FcaeProtocol::Tor
                 || (hop == 1 && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain))) {
-            "Tor"
+            "Tor".to_string()
+        } else if hop == 1 {
+            // What the hop above this one is called: the saved config's own name
+            // when the route starts from one, so a message names the same thing
+            // the protocol list does.
+            config.core.selection_name().unwrap_or(backend_label(config.backend)).to_owned()
         } else {
-            backend_label(previous_backend)
+            config.chain[hop - 2].label().to_owned()
         };
+        // The hop's own label, kept for messages: `exit` is moved into the start
+        // future below, and its Debug form carries a whole profile.
+        let exit_name = exit.label().to_string();
         let monitored = handles.to_vec();
         let started = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(CoreError::StartFailed("chain cancelled".into())),
             (index, result) = exits_ended(monitored) => {
                 let detail = result.err().map(|error| format!(": {error}")).unwrap_or_default();
-                Err(CoreError::StartFailed(format!("chain hop {index} dropped while exit {exit:?} was connecting{detail}")))
+                Err(CoreError::StartFailed(format!("chain hop {index} dropped while exit {exit_name} was connecting{detail}")))
             }
-            result = start_chain_hop(config, exit, final_hop, config.chain.get(hop).is_some_and(|next| hop_needs_udp(config, *next)), &previous, previous_name, sink, cancel) => result,
+            result = start_chain_hop(config, exit, final_hop, config.chain.get(hop).is_some_and(|next| hop_needs_udp(config, next)), &previous, &previous_name, sink, cancel) => result,
         };
         match started {
             Ok(handle) => {
@@ -921,7 +932,7 @@ async fn start_downstream(
                     let _ = handle.stop(stop_timeout).await;
                     let required = if final_hop { "TUN mode" } else { "the next chain hop" };
                     return Err(CoreError::StartFailed(format!(
-                        "chained {exit:?} has no SOCKS5 endpoint; enable SOCKS5 for {required}"
+                        "chained {exit_name} has no SOCKS5 endpoint; enable SOCKS5 for {required}"
                     )));
                 }
                 *endpoints = Endpoints { peer_ip: endpoints.peer_ip.clone(), ..next };
@@ -960,6 +971,18 @@ async fn start_chain_hop(
     hop.backend = backend;
     hop.protocol = exit.protocol;
     hop.obfuscation.h2_enabled = exit.h2_enabled;
+    // The hop's own saved config, when it named one. Otherwise it keeps the
+    // session's profile from the clone above: that is what a single-core
+    // session, and every pre-library caller, means.
+    if let Some(entry) = &exit.core {
+        hop.core.profile = Some(entry.profile.clone());
+        hop.core.selection = Some(entry.clone());
+    } else {
+        // A hop without a saved config of its own is a built-in backend, and
+        // inheriting the main protocol's selection would label it with a config
+        // it does not run.
+        hop.core.selection = None;
+    }
     if backend == FcaeBackend::Aether {
         if exit.protocol == FcaeProtocol::Tor {
             hop.tor.mode = FcaeTorMode::Only;
@@ -986,7 +1009,9 @@ async fn start_chain_hop(
     }
     let budget = if hop.tor.is_enabled() { hop.tor_start_timeout() } else { hop.start_timeout() } + CHAIN_START_GRACE;
     let backend_impl = registry::resolve(backend)?;
-    sink.set_state(FcaeState::Connecting, format!("Establishing {backend:?} chain hop…"));
+    // Owned, because `hop` is moved into the backend context right after.
+    let hop_name = hop.core.selection_name().unwrap_or(backend_label(backend)).to_owned();
+    sink.set_state(FcaeState::Connecting, format!("Establishing {hop_name} chain hop…"));
     let cx = BackendContext::new(hop, sink.clone(), cancel.clone());
     let handle = tokio::select! {
         biased;
@@ -994,17 +1019,21 @@ async fn start_chain_hop(
         result = tokio::time::timeout(budget, backend_impl.start(cx)) => match result {
             Ok(Ok(handle)) => handle,
             Ok(Err(error)) => {
-                log::warn!("[session] {backend:?} could not start through {previous_name} SOCKS5: {error}");
+                log::warn!("[session] {hop_name} could not start through {previous_name} SOCKS5: {error}");
                 return Err(error);
             }
-            Err(_) => return Err(CoreError::StartFailed(format!("{backend:?} chain startup timed out via {url}"))),
+            Err(_) => {
+                return Err(CoreError::StartFailed(format!(
+                    "{hop_name} chain startup timed out via {url}"
+                )))
+            }
         },
     };
-    log::info!("[session] chained {backend:?} via {url}");
+    log::info!("[session] chained {hop_name} via {url}");
     Ok(Arc::from(handle))
 }
 
-fn hop_needs_udp(config: &SessionConfig, hop: ChainHop) -> bool {
+fn hop_needs_udp(config: &SessionConfig, hop: &ChainHop) -> bool {
     let mut target = config.clone();
     target.backend = hop.backend;
     target.protocol = hop.protocol;
@@ -1080,31 +1109,28 @@ fn configure_internal_listeners(config: &mut SessionConfig) -> Result<()> {
 }
 
 fn route_name(config: &SessionConfig) -> String {
+    // A saved config is named by the user, and that name is what they picked
+    // out of the protocol list: showing "Xray" instead would leave a route of
+    // three saved configs unreadable.
+    let first = config
+        .core
+        .selection_name()
+        .unwrap_or_else(|| backend_label(config.backend));
     if config.chain.is_empty() && !config.psiphon.through_tunnel {
         if config.backend == FcaeBackend::Aether
             && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain)
         {
             return "Tor".into();
         }
-        return backend_label(config.backend).into();
+        return first.into();
     }
-    let mut names = vec![backend_label(config.backend)];
+    let mut names = vec![first.to_string()];
     if config.chain.is_empty() && config.psiphon.through_tunnel {
-        names.push("Psiphon");
+        names.push("Psiphon".into());
     } else {
-        names.extend(config.chain.iter().map(|hop| backend_label(hop.backend)));
+        names.extend(config.chain.iter().map(|hop| hop.label().to_string()));
     }
     names.join(" → ")
-}
-
-fn backend_label(backend: FcaeBackend) -> &'static str {
-    match backend {
-        FcaeBackend::Aether => "Aether",
-        FcaeBackend::Psiphon => "Psiphon",
-        FcaeBackend::Firefox => "Firefox",
-        FcaeBackend::Xray => "Xray",
-        FcaeBackend::SingBox => "sing-box",
-    }
 }
 
 fn should_retry(auto: bool, max: u32, attempt: u32, cancel: &CancelToken) -> bool {
@@ -1287,6 +1313,30 @@ mod tests {
             ChainHop::new(FcaeBackend::Firefox, cfg.protocol, cfg.obfuscation.h2_enabled),
         ];
         assert_eq!(route_name(&cfg), "Aether → Psiphon → Firefox");
+    }
+
+    #[test]
+    fn routing_label_uses_the_names_the_user_gave_saved_configs() {
+        let entry = |name: &str, backend: FcaeBackend| crate::core_library::CoreEntry {
+            name: name.into(),
+            backend,
+            profile: crate::sing_xray::CoreProfile::parse("socks5://127.0.0.1:1080").unwrap(),
+        };
+        let mut cfg = SessionConfig {
+            backend: FcaeBackend::Xray,
+            ..Default::default()
+        };
+        cfg.core.selection = Some(entry("Home", FcaeBackend::Xray));
+        assert_eq!(route_name(&cfg), "Home");
+
+        let mut hop = ChainHop::new(FcaeBackend::SingBox, FcaeProtocol::Auto, false);
+        hop.core = Some(entry("Backup", FcaeBackend::SingBox));
+        cfg.chain = vec![hop];
+        assert_eq!(route_name(&cfg), "Home → Backup");
+
+        // Without a selection the generic backend name is still the answer.
+        cfg.core.selection = None;
+        assert_eq!(route_name(&cfg), "Xray → Backup");
     }
 
     #[test]

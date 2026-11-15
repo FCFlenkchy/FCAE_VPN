@@ -544,6 +544,8 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         core: FcaeCore {
             profile: std::ptr::null(),
             log_level: FcaeEngineLog::Info,
+            library: std::ptr::null(),
+            config_ref: std::ptr::null(),
         },
     });
     FcaeStatus::Ok
@@ -1210,6 +1212,48 @@ pub unsafe extern "C" fn fcae_normalize_upstream_proxy(text: *const c_char, out:
         fill(std::slice::from_raw_parts_mut(out, cap as usize), text);
     }
     parsed.is_ok()
+}
+
+/// Validates one saved Xray/sing-box config without a runtime, so the config
+/// editor can refuse a bad paste while the user is still in the dialog.
+///
+/// `backend` is [`fcae_abi::FcaeBackend`] (`3` = Xray, `4` = sing-box). On
+/// success `out` receives the empty string and the return value is true;
+/// otherwise `out` receives the reason. An empty config is always rejected:
+/// a caller that means "no config" must not call this at all.
+///
+/// # Safety
+/// `config` must be NULL or NUL-terminated; `out` NULL or `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_core_check_profile(
+    config: *const c_char,
+    backend: i32,
+    out: *mut c_char,
+    cap: u32,
+) -> bool {
+    let checked = guard_value("fcae_core_check_profile", Err("invalid config".to_string()), || {
+        let backend = FcaeBackend::try_from(backend as u32)
+            .map_err(|_| format!("backend={backend} is invalid"))?;
+        if !config::is_core_backend(backend) {
+            return Err(format!(
+                "backend={} is not Xray or sing-box",
+                config::backend_label(backend)
+            ));
+        }
+        let text = if config.is_null() { None } else { CStr::from_ptr(config).to_str().ok() };
+        let text = text.ok_or_else(|| "the config is not valid UTF-8".to_string())?;
+        // The library's own check, so what the editor accepts and what the
+        // session later loads can never disagree.
+        fcae_runtime::core_library::check_config(backend, text)?;
+        Ok(String::new())
+    });
+    if !out.is_null() && cap > 0 {
+        let text = match &checked {
+            Ok(text) | Err(text) => text,
+        };
+        fill(std::slice::from_raw_parts_mut(out, cap as usize), text);
+    }
+    checked.is_ok()
 }
 
 /// Psiphon's currently bound SOCKS port, or zero when unavailable.

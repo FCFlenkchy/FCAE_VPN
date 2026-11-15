@@ -8,6 +8,8 @@
 //! * [`sing_xray`] — everything the Xray-core and sing-box backends share: the
 //!   outbound profile (share link or native config), listener planning,
 //!   split-routing rules, and driving the in-process core.
+//! * [`core_library`] — the user's saved Xray/sing-box configs, parsed and
+//!   validated once for the session that references them.
 //! * [`backend`] — the [`Backend`](backend::Backend) plugin trait that Aether
 //!   implements today and Psiphon will implement unchanged.
 //! * [`telemetry`] — the single shared telemetry cell + log bus.
@@ -28,6 +30,7 @@
 
 pub mod backend;
 pub mod config;
+pub mod core_library;
 pub mod cronet;
 pub mod sing_xray;
 pub mod deps;

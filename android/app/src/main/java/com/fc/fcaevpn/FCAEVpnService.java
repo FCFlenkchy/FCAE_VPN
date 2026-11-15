@@ -1246,6 +1246,14 @@ public class FCAEVpnService extends VpnService {
         final boolean fragmentSni   = intent.getBooleanExtra("fragmentSni", false);
         final String upstreamProxy = orEmpty(intent.getStringExtra("upstreamProxy")).trim();
         final int[] chainTransports = NativeEngine.sessionChainTransports(intent);
+        // Saved Xray/sing-box configs: the library document that the
+        // protocol-list positions above point into, and the entry the main
+        // protocol runs.
+        final String coreConfigs = orEmpty(intent.getStringExtra("coreConfigs"));
+        // A config that was removed since this session was recorded must degrade
+        // to a built-in transport, not fail the whole start.
+        final String coreConfigId = NativeEngine.sanitizeCoreConfigRef(
+            coreConfigs, intent.getStringExtra("coreConfigId"));
         final String firefoxAccountId = orEmpty(intent.getStringExtra("firefoxAccountId"));
         final String firefoxLocation = orEmpty(intent.getStringExtra("firefoxLocation"));
         final String firefoxServer = orEmpty(intent.getStringExtra("firefoxServer"));
@@ -1263,7 +1271,12 @@ public class FCAEVpnService extends VpnService {
         final String torLines  = intent.getStringExtra("torBridgeLines");
         final String torLinesV = (torLines == null) ? "" : torLines;
         final int engineLog    = intent.getIntExtra("engineLog", 3);
-        final int backend      = intent.getIntExtra("backend", 0);
+        // Xray/sing-box without the saved config they run has no profile at all,
+        // so a session recorded against a config that no longer exists falls back
+        // to the default transport instead of failing to start.
+        final int backendRaw   = intent.getIntExtra("backend", 0);
+        final int backend      = (coreConfigId.isEmpty() && (backendRaw == 3 || backendRaw == 4))
+            ? 0 : backendRaw;
         // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
         // MainActivity sends 0 when the field still holds the default.
         final int torSocksPort = intent.getIntExtra("torSocksPort", 0);
@@ -1365,6 +1378,7 @@ public class FCAEVpnService extends VpnService {
                     disableSct, disableSessionTicket, disableExtensionPermutation, fragmentSni,
                     upstreamProxy,
                     chainTransports,
+                    coreConfigs, coreConfigId,
                     firefoxAccountId, firefoxLocation, firefoxServer, firefoxTransport
                 );
                 if (ok && psiphonInRoute) {
@@ -2027,6 +2041,8 @@ public class FCAEVpnService extends VpnService {
         putInt(e, i, "engineLog", 3);
         putInt(e, i, "backend", 0);
         e.putString("chainTransports", NativeEngine.encodeChainTransports(NativeEngine.sessionChainTransports(i)));
+        putStr(e, i, "coreConfigs");
+        putStr(e, i, "coreConfigId");
         putStr(e, i, "firefoxAccountId");
         putStr(e, i, "firefoxLocation");
         putStr(e, i, "firefoxServer");
@@ -2126,6 +2142,8 @@ public class FCAEVpnService extends VpnService {
             copyInt(p, i, "chainExit1", 2);
             copyInt(p, i, "chainExit2", 0);
         }
+        copyStr(p, i, "coreConfigs");
+        copyStr(p, i, "coreConfigId");
         copyStr(p, i, "firefoxAccountId");
         copyStr(p, i, "firefoxLocation");
         copyStr(p, i, "firefoxServer");

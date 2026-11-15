@@ -420,10 +420,24 @@ static uint64_t fnv_value(uint64_t h, const T& v) {
     return fnv_bytes(h, &v, sizeof(T));
 }
 
+/// The saved core configs and the one the main protocol runs: an edit has to
+/// repaint and has to reach the config the engine reads.
+static uint64_t fnv_core_configs(uint64_t h) {
+    h = fnv_value(h, g_app.core_selected);
+    h = fnv_value(h, (int)g_app.core_configs.size());
+    for (const AppState::CoreConfigEntry& entry : g_app.core_configs) {
+        h = fnv_cstr(h, entry.name.c_str());
+        h = fnv_value(h, entry.backend);
+        h = fnv_cstr(h, entry.text.c_str());
+    }
+    return h;
+}
+
 static uint64_t config_signature() {
     uint64_t h = 1469598103934665603ull;
     h = fnv_value(h, g_app.chain_transports.size());
     for (int transport : g_app.chain_transports) h = fnv_value(h, transport);
+    h = fnv_core_configs(h);
     h = fnv_value(h, g_app.protocol);
     h = fnv_value(h, g_app.backend);
     h = fnv_cstr(h, g_app.firefox_account_id);
@@ -553,6 +567,7 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.backend);
     h = fnv_value(h, (int)g_app.chain_transports.size());
     for (int transport : g_app.chain_transports) h = fnv_value(h, transport);
+    h = fnv_core_configs(h);
     h = fnv_cstr(h, g_app.firefox_account_id);
     h = fnv_cstr(h, g_app.firefox_location);
     h = fnv_cstr(h, g_app.firefox_server);
@@ -1097,6 +1112,17 @@ static std::string resolve_config_path_for_load() {
     return primary;
 }
 
+/// Upper bound on saved core configs, mirroring fcae-runtime's library limit:
+/// a menu longer than this is not a menu.
+static constexpr int kMaxCoreConfigs = 64;
+/// Largest single saved config, mirroring fcae-runtime's library limit.
+static constexpr size_t kMaxCoreConfigText = 128 * 1024;
+
+// Defined next to the protocol list, below: the config loader prunes chain
+// positions against it before the UI helpers are in scope.
+static int transport_count();
+static bool transport_is_core(int transport);
+
 // atoi wraps out-of-range and negative values; a config line saying
 // socks_port=-1 would otherwise bind port 65535. Keep the previous value
 // instead of trusting garbage.
@@ -1111,6 +1137,44 @@ static std::string encode_config_text(const char* text) {
     for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
         result.push_back(hex[*p >> 4]);
         result.push_back(hex[*p & 15]);
+    }
+    return result;
+}
+
+/// A saved core config is one line of a line-based file, so its newlines are
+/// escaped rather than hex-encoded: a native config JSON is mostly newlines and
+/// indentation, and doubling every byte of it would only cost disk.
+static std::string core_text_encode(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    for (char c : text) {
+        switch (c) {
+            case '\\': result += "\\\\"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            default: result.push_back(c); break;
+        }
+    }
+    return result;
+}
+
+static std::string core_text_decode(const std::string& encoded) {
+    std::string result;
+    result.reserve(encoded.size());
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        if (encoded[i] != '\\' || i + 1 >= encoded.size()) {
+            result.push_back(encoded[i]);
+            continue;
+        }
+        switch (encoded[++i]) {
+            case 'n': result.push_back('\n'); break;
+            case 'r': result.push_back('\r'); break;
+            case '\\': result.push_back('\\'); break;
+            default:
+                result.push_back('\\');
+                result.push_back(encoded[i]);
+                break;
+        }
     }
     return result;
 }
@@ -1262,6 +1326,27 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.routes_inline, sizeof(g_app.routes_inline), "%s", val.c_str());
     else if (key == "routes_inline_hex")
         decode_config_text(val, g_app.routes_inline, sizeof(g_app.routes_inline));
+    else if (key == "core_selected") g_app.core_selected = atoi(val.c_str());
+    else if (key.rfind("core_config", 0) == 0) {
+        // core_config<index>_<field>. The count key is not needed: an entry is
+        // created by the fields that describe it, so a short or reordered file
+        // still loads every field it does carry.
+        const char* cursor = key.c_str() + strlen("core_config");
+        char* end = nullptr;
+        const long index = strtol(cursor, &end, 10);
+        if (!end || end == cursor || index < 0 || index >= kMaxCoreConfigs) return;
+        if (g_app.core_configs.size() < (size_t)index + 1)
+            g_app.core_configs.resize((size_t)index + 1);
+        AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)index];
+        // A line longer than the largest config the engine accepts is a corrupt
+        // file, not a config to keep in memory.
+        if (strcmp(end, "_name") == 0 && val.size() <= 48) entry.name = val;
+        else if (strcmp(end, "_backend") == 0) entry.backend = atoi(val.c_str()) == 1 ? 1 : 0;
+        else if (strcmp(end, "_text") == 0) {
+            std::string text = core_text_decode(val);
+            if (text.size() <= kMaxCoreConfigText) entry.text = std::move(text);
+        }
+    }
 }
 
 static bool s_config_needs_retry = false;
@@ -1281,6 +1366,13 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "protocol=%d\n", g_app.protocol);
     fprintf(f, "backend=%d\n", g_app.backend);
     fprintf(f, "chain_transports=%s\n", join_chain_transports(g_app.chain_transports).c_str());
+    fprintf(f, "core_selected=%d\n", g_app.core_selected);
+    for (size_t i = 0; i < g_app.core_configs.size(); ++i) {
+        const AppState::CoreConfigEntry& entry = g_app.core_configs[i];
+        fprintf(f, "core_config%zu_name=%s\n", i, entry.name.c_str());
+        fprintf(f, "core_config%zu_backend=%d\n", i, entry.backend);
+        fprintf(f, "core_config%zu_text=%s\n", i, core_text_encode(entry.text).c_str());
+    }
     fprintf(f, "firefox_account_id=%s\n", g_app.firefox_account_id);
     fprintf(f, "firefox_location=%s\n", g_app.firefox_location);
     fprintf(f, "firefox_server=%s\n", g_app.firefox_server);
@@ -1434,7 +1526,14 @@ static bool load_config_from(const std::string& path) {
     FILE* f = open_cfg(path, "rb");
     if (!f) { s_config_load_failed = file_exists(path); return false; }
 
-    static char line[8192];
+    // A saved core config is one line and can be far longer than a page, so a
+    // line is read to its newline: a split one would be parsed as two keys, and
+    // the second half would be discarded as malformed.
+    static std::vector<char> chunk(8192);
+    std::string line;
+    // The file is the source of truth for the saved core configs, exactly as it
+    // is for every other setting.
+    g_app.core_configs.clear();
     s_loaded_chain_transports = false;
     s_loaded_socks_port = false;
     s_loaded_http_port = false;
@@ -1450,18 +1549,31 @@ static bool load_config_from(const std::string& path) {
     s_loaded_legacy_firefox_tun_http = false;
     s_loaded_legacy_chain_count = -1;
     int applied = 0;
-    while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
+    bool continued = false;
+    while (fgets(chunk.data(), (int)chunk.size(), f)) {
+        const size_t got = strlen(chunk.data());
+        if (!continued) line.clear();
+        line.append(chunk.data(), got);
+        const bool complete = got > 0 && chunk[got - 1] == '\n';
+        if (!complete && !feof(f)) {
+            continued = true;
+            if (chunk.size() < (1u << 21)) chunk.resize(chunk.size() * 2);
+            continue;
+        }
+        continued = false;
+        size_t len = line.size();
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' ||
                            line[len - 1] == ' ' || line[len - 1] == '\t')) {
-            line[--len] = '\0';
+            --len;
         }
-        if (len == 0 || line[0] == '#' || line[0] == ';') continue;
+        line.resize(len);
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
 
-        char* eq = strchr(line, '=');
+        char* body = line.data();
+        char* eq = strchr(body, '=');
         if (!eq) continue;
         *eq = '\0';
-        const char* key = line;
+        const char* key = body;
         const char* val = eq + 1;
         while (*key == ' ' || *key == '\t') key++;
         char* kend = (char*)key + strlen(key);
@@ -1504,10 +1616,24 @@ static bool load_config_from(const std::string& path) {
         if (g_app.chain_transports.empty() && g_app.backend != 1) g_app.chain_transports.push_back(5);
         g_app.tor_mode = 0;
     }
+    // A saved config only counts when it has a name and a body: the per-field
+    // keys of a half-written file must not become anonymous protocol entries.
+    g_app.core_configs.erase(
+        std::remove_if(g_app.core_configs.begin(), g_app.core_configs.end(),
+                       [](const AppState::CoreConfigEntry& entry) {
+                           return entry.name.empty() || entry.text.empty();
+                       }),
+        g_app.core_configs.end());
+    // Every reference to a saved config is a position, so a config that did not
+    // survive above takes its references with it.
+    if (g_app.core_selected < 0 || g_app.core_selected >= (int)g_app.core_configs.size()) {
+        g_app.core_selected = -1;
+        if (g_app.backend >= 3) g_app.backend = 0;
+    }
+    const int positions = transport_count();
     g_app.chain_transports.erase(
-        std::remove_if(g_app.chain_transports.begin(), g_app.chain_transports.end(), [](int transport) {
-            return transport < 0 || transport > 10;
-        }),
+        std::remove_if(g_app.chain_transports.begin(), g_app.chain_transports.end(),
+                       [positions](int transport) { return transport < 0 || transport >= positions; }),
         g_app.chain_transports.end());
     g_app.add_log(4, ("[ui] config loaded (" + std::to_string(applied) + " keys): " + path).c_str());
     return true;
@@ -2914,7 +3040,7 @@ static void render_firefox_captcha_popup() {
     ImGui::EndPopup();
 }
 
-static const char* const kTransportNames[] = {
+static const char* const kTransportNames[kCoreTransportBase] = {
     "MASQUE (HTTP/3)",
     "MASQUE (HTTP/2)",
     "WireGuard",
@@ -2928,7 +3054,37 @@ static const char* const kTransportNames[] = {
     "Firefox IP Protection",
 };
 
+/// The protocol list as the user sees it: the built-in transports followed by
+/// one entry per saved core config, named after it so a chained route reads the
+/// way it was written. `labels` owns the storage the pointers refer to.
+static void transport_labels(std::vector<std::string>& labels, std::vector<const char*>& pointers) {
+    labels.clear();
+    labels.reserve((size_t)kCoreTransportBase + g_app.core_configs.size());
+    for (const char* name : kTransportNames) labels.emplace_back(name);
+    for (size_t i = 0; i < g_app.core_configs.size(); ++i) {
+        const std::string& name = g_app.core_configs[i].name;
+        labels.push_back(name.empty() ? "Saved config " + std::to_string(i + 1) : name);
+    }
+    pointers.clear();
+    pointers.reserve(labels.size());
+    for (const std::string& label : labels) pointers.push_back(label.c_str());
+}
+
+static int transport_count() {
+    return kCoreTransportBase + (int)g_app.core_configs.size();
+}
+
+static bool transport_is_core(int transport) {
+    return transport >= kCoreTransportBase;
+}
+
 static int current_transport() {
+    // A saved config is the main protocol exactly when core_selected names one.
+    if (g_app.backend >= 3) {
+        if (g_app.core_selected >= 0 && g_app.core_selected < (int)g_app.core_configs.size())
+            return kCoreTransportBase + g_app.core_selected;
+        return 0;
+    }
     if (g_app.backend == 2) return 10;
     if (g_app.backend == 1) return 5;
     if (g_app.protocol == 6) return g_app.h2_enabled ? 9 : 8;
@@ -2938,13 +3094,29 @@ static int current_transport() {
     return g_app.protocol == 1 ? 2 : 3;
 }
 
+/// The FcaeBackend an app-level id ends at. Saved configs answer with their own
+/// core, which is why they chain like a built-in hop.
 static int transport_carrier(int transport) {
+    if (const AppState::CoreConfigEntry* entry = g_app.core_config_at(transport))
+        return entry->backend == 1 ? 4 : 3;
     if (transport == 5) return 1;
     if (transport == 10) return 2;
     return 0;
 }
 
 static void apply_transport(int transport) {
+    if (transport_is_core(transport)) {
+        const int index = transport - kCoreTransportBase;
+        if (index >= 0 && index < (int)g_app.core_configs.size()) {
+            g_app.core_selected = index;
+            g_app.backend = g_app.core_configs[(size_t)index].backend == 1 ? 4 : 3;
+            // A saved config has no transport of its own: the profile carries it.
+            g_app.protocol = 3;
+            return;
+        }
+        transport = 0;
+    }
+    g_app.core_selected = -1;
     g_app.backend = transport_carrier(transport);
     switch (transport) {
         case 0: g_app.protocol = 0; g_app.h2_enabled = false; break;
@@ -2977,6 +3149,199 @@ static void open_protocol_editor() {
     s_chain_editor_popup_open = true;
 }
 
+// ---- Saved Xray / sing-box configs ----------------------------------------
+//
+// The editor writes AppState::core_configs. The engine only ever sees the
+// resulting library document (FcaeCore::library), and a protocol-list position
+// >= kCoreTransportBase names an entry by position, so a saved config is
+// pickable as the main protocol and as a chain hop with no extra plumbing.
+
+static bool s_core_configs_popup_open = false;
+// Row the editor below the list is bound to; -1 = nothing selected.
+static int s_core_edit = -1;
+// -1 forces a reload from the entry (the selection changed), otherwise the
+// buffers are the source of truth while the user types.
+static int s_core_buf_for = -1;
+static char s_core_name_buf[64] = {};
+static int s_core_backend_buf = 0;
+static std::vector<char> s_core_text_buf;
+static char s_core_status[256] = {};
+static bool s_core_status_error = false;
+
+static void open_core_configs() {
+    s_core_configs_popup_open = true;
+    s_core_buf_for = -1;
+    s_core_status[0] = 0;
+}
+
+/// Keep every reference into `core_configs` pointing at the same config after
+/// one was removed. A chain exit whose config is gone is dropped rather than
+/// silently re-pointed at a different one.
+static void core_configs_forget(int removed) {
+    if (g_app.core_selected == removed) {
+        g_app.core_selected = -1;
+        if (g_app.backend >= 3) g_app.backend = 0;
+    } else if (g_app.core_selected > removed) {
+        g_app.core_selected--;
+    }
+    std::vector<int> rebuilt;
+    rebuilt.reserve(g_app.chain_transports.size());
+    for (int transport : g_app.chain_transports) {
+        if (!transport_is_core(transport)) {
+            rebuilt.push_back(transport);
+            continue;
+        }
+        const int index = transport - kCoreTransportBase;
+        if (index == removed) continue;
+        rebuilt.push_back(kCoreTransportBase + (index > removed ? index - 1 : index));
+    }
+    g_app.chain_transports.swap(rebuilt);
+    if (s_core_edit == removed) {
+        s_core_edit = -1;
+        s_core_buf_for = -1;
+    } else if (s_core_edit > removed) {
+        s_core_edit--;
+        s_core_buf_for = -1;
+    }
+}
+
+/// Validate the editor's buffers. Names must be unique because a saved config
+/// can be referenced by name as well as by position, and a duplicate would make
+/// that ambiguous.
+static void core_config_check(int row) {
+    s_core_status_error = true;
+    if (row < 0 || row >= (int)g_app.core_configs.size()) {
+        s_core_status[0] = 0;
+        return;
+    }
+    const std::string name = s_core_name_buf;
+    if (name.empty()) {
+        snprintf(s_core_status, sizeof(s_core_status), "Give the config a name.");
+        return;
+    }
+    if (name.size() > 48) {
+        snprintf(s_core_status, sizeof(s_core_status), "Names are limited to 48 characters.");
+        return;
+    }
+    for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
+        if (i == row) continue;
+        const std::string& other = g_app.core_configs[(size_t)i].name;
+        const bool same = other.size() == name.size()
+            && std::equal(other.begin(), other.end(), name.begin(), [](char a, char b) {
+                   return std::tolower((unsigned char)a) == std::tolower((unsigned char)b);
+               });
+        if (same) {
+            snprintf(s_core_status, sizeof(s_core_status),
+                     "Another config is already called \"%s\".", other.c_str());
+            return;
+        }
+    }
+    if (s_core_text_buf.empty() || s_core_text_buf[0] == 0) {
+        snprintf(s_core_status, sizeof(s_core_status),
+                 "Paste a share link or the core's own config JSON.");
+        return;
+    }
+    char reason[224] = {};
+    const int32_t backend = s_core_backend_buf == 1 ? FCAE_BACKEND_SINGBOX : FCAE_BACKEND_XRAY;
+    if (!fcae_core_check_profile(s_core_text_buf.data(), backend, reason, sizeof(reason))) {
+        snprintf(s_core_status, sizeof(s_core_status), "%s", reason);
+        return;
+    }
+    s_core_status_error = false;
+    snprintf(s_core_status, sizeof(s_core_status), "Valid %s config.",
+             s_core_backend_buf == 1 ? "sing-box" : "Xray");
+}
+
+static void render_core_configs() {
+    if (s_core_configs_popup_open) {
+        ImGui::OpenPopup("Xray / sing-box configs");
+        s_core_configs_popup_open = false;
+    }
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(modal_size(760.0f, 660.0f), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal("Xray / sing-box configs", nullptr, ImGuiWindowFlags_NoResize)) return;
+
+    ImGui::TextWrapped(
+        "Each saved config becomes an entry in the protocol list, so it can be the main "
+        "protocol or a chained exit. A saved config runs the core it is assigned to.");
+    ImGui::Spacing();
+    ImGui::BeginChild("##core_list", ImVec2(0, 138), ImGuiChildFlags_Borders);
+    int remove_row = -1;
+    for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
+        const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
+        ImGui::PushID(i);
+        const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
+        if (ImGui::Selectable(label.c_str(), s_core_edit == i)) {
+            s_core_edit = i;
+            s_core_buf_for = -1;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", entry.backend == 1 ? "sing-box" : "Xray");
+        ImGui::SameLine(std::max(0.0f, ImGui::GetContentRegionAvail().x - 90.0f));
+        if (ImGui::SmallButton("Remove")) remove_row = i;
+        ImGui::PopID();
+    }
+    if (g_app.core_configs.empty()) ImGui::TextDisabled("No saved configs yet.");
+    ImGui::EndChild();
+
+    if (ImGui::Button("+ Add config") && (int)g_app.core_configs.size() < kMaxCoreConfigs) {
+        AppState::CoreConfigEntry entry;
+        entry.name = "Config " + std::to_string(g_app.core_configs.size() + 1);
+        g_app.core_configs.push_back(std::move(entry));
+        s_core_edit = (int)g_app.core_configs.size() - 1;
+        s_core_buf_for = -1;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d/%d", (int)g_app.core_configs.size(), kMaxCoreConfigs);
+    ImGui::Separator();
+
+    if (s_core_edit >= 0 && s_core_edit < (int)g_app.core_configs.size()) {
+        if (s_core_buf_for != s_core_edit) {
+            const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)s_core_edit];
+            snprintf(s_core_name_buf, sizeof(s_core_name_buf), "%s", entry.name.c_str());
+            s_core_backend_buf = entry.backend;
+            // One spare byte for the terminator past the largest accepted config.
+            if (s_core_text_buf.size() < (size_t)kMaxCoreConfigText + 1)
+                s_core_text_buf.assign((size_t)kMaxCoreConfigText + 1, '\0');
+            snprintf(s_core_text_buf.data(), s_core_text_buf.size(), "%s", entry.text.c_str());
+            s_core_buf_for = s_core_edit;
+            core_config_check(s_core_edit);
+        }
+        bool changed = false;
+        ImGui::PushItemWidth(240);
+        changed |= ImGui::InputText("Name", s_core_name_buf, sizeof(s_core_name_buf));
+        ImGui::SameLine();
+        const char* backends[] = {"Xray", "sing-box"};
+        changed |= ImGui::Combo("Core", &s_core_backend_buf, backends, 2);
+        ImGui::PopItemWidth();
+        ImGui::TextUnformatted("Config (a share link or the core's own JSON)");
+        float editor_height = ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeightWithSpacing()
+            - ImGui::GetFrameHeightWithSpacing() - 8.0f;
+        if (editor_height < 120.0f) editor_height = 120.0f;
+        changed |= ImGui::InputTextMultiline("##core_text", s_core_text_buf.data(),
+                                             s_core_text_buf.size(), ImVec2(-FLT_MIN, editor_height));
+        if (changed) {
+            AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)s_core_edit];
+            entry.name = s_core_name_buf;
+            entry.backend = s_core_backend_buf == 1 ? 1 : 0;
+            entry.text = s_core_text_buf.data();
+            core_config_check(s_core_edit);
+        }
+        ImGui::TextColored(s_core_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
+                                               : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
+                           "%s", s_core_status);
+    } else {
+        ImGui::TextDisabled("Select a saved config to edit it, or add one.");
+    }
+
+    if (remove_row >= 0) {
+        g_app.core_configs.erase(g_app.core_configs.begin() + remove_row);
+        core_configs_forget(remove_row);
+    }
+    if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 static void render_protocol_editor() {
     if (s_chain_editor_popup_open) {
         ImGui::OpenPopup("##protocol-editor");
@@ -2993,8 +3358,12 @@ static void render_protocol_editor() {
     const float footer_height = ImGui::GetFrameHeightWithSpacing() * (compact_footer ? 2.0f : 1.0f) + 8.0f;
     ImGui::BeginChild("##protocol-scroll", ImVec2(0, -footer_height),
                       ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
-    for (int i = 0; i < (int)IM_ARRAYSIZE(kTransportNames); ++i) {
-        changed |= ImGui::RadioButton(kTransportNames[i], &s_protocol_draft, i);
+    std::vector<std::string> labels;
+    std::vector<const char*> names;
+    transport_labels(labels, names);
+    if (s_protocol_draft < 0 || s_protocol_draft >= (int)names.size()) s_protocol_draft = 0;
+    for (int i = 0; i < (int)names.size(); ++i) {
+        changed |= ImGui::RadioButton(names[(size_t)i], &s_protocol_draft, i);
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::Text("Additional exits (optional)");
@@ -3004,7 +3373,8 @@ static void render_protocol_editor() {
         ImGui::Text("Exit %d", (int)i + 1);
         const float remove_width = ImGui::CalcTextSize("Remove").x + 2.0f * ImGui::GetStyle().FramePadding.x;
         ImGui::SetNextItemWidth(std::max(1.0f, ImGui::GetContentRegionAvail().x - remove_width - ImGui::GetStyle().ItemSpacing.x));
-        changed |= ImGui::Combo("##transport", &s_chain_draft[i], kTransportNames, IM_ARRAYSIZE(kTransportNames));
+        if (s_chain_draft[i] < 0 || s_chain_draft[i] >= (int)names.size()) s_chain_draft[i] = 0;
+        changed |= ImGui::Combo("##transport", &s_chain_draft[i], names.data(), (int)names.size());
         ImGui::SameLine();
         if (ImGui::Button("Remove")) remove_index = (int)i;
         ImGui::PopID();
@@ -3445,7 +3815,8 @@ void render_ui() {
                 const bool firefox_carrier = !g_app.chain_transports.empty() &&
                     (g_app.backend == 2 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end() - 1, 10) != g_app.chain_transports.end() - 1);
                 bool uses_aether = g_app.backend == 0 && g_app.protocol != 4;
-                for (int t : g_app.chain_transports) if (t != 4 && t != 5 && t != 10) uses_aether = true;
+                for (int t : g_app.chain_transports)
+                    if (t != 4 && t != 5 && t != 10 && !transport_is_core(t)) uses_aether = true;
                 const char* disabled = uses_tor && !g_app.tor_socks_enabled ? "Tor SOCKS5" :
                     psi_carrier && !g_app.psiphon_socks_enabled ? "Psiphon SOCKS5" :
                     firefox_carrier && !g_app.firefox_socks_enabled ? "Firefox SOCKS5" :
@@ -3567,6 +3938,13 @@ void render_ui() {
                     std::string tls_alps, tls_trust_anchors, tls_server_padding;
                     std::string psi_json, psi_embedded, psi_dir, upstream;
                     std::string root, firefox_account, firefox_location, firefox_server;
+                    // The saved-configs document and the chain hops that
+                    // reference it are rebuilt on every to_config(), so the
+                    // worker gets its own copy: the UI thread can open the
+                    // config editor while a start is in flight.
+                    std::string core_library, core_ref;
+                    std::vector<std::string> chain_refs;
+                    std::vector<FcaeChainHop> chain_hops;
                     FcaeConfig c{};
                 };
                 // Use unique_ptr with a custom deleter that handles the
@@ -3677,6 +4055,22 @@ void render_ui() {
                 o->c.upstream_proxy               = o->upstream.empty() ? nullptr : o->upstream.c_str();
                 o->c.psiphon.embedded_server_list =
                     o->psi_embedded.empty() ? nullptr : o->psi_embedded.c_str();
+                o->core_library = g_app.core_library_built;
+                o->core_ref = g_app.core_ref_built;
+                o->chain_refs = g_app.chain_core_refs_built;
+                o->chain_hops = g_app.chain_hops_built;
+                o->c.core.library = o->core_library.empty() ? nullptr : o->core_library.c_str();
+                o->c.core.config_ref = o->core_ref.empty() ? nullptr : o->core_ref.c_str();
+                {
+                    // Re-point each saved-config hop at the snapshot's own copy
+                    // of its reference, in the order they were built.
+                    size_t ref = 0;
+                    for (FcaeChainHop& hop : o->chain_hops) {
+                        hop.config_ref = hop.config_ref && ref < o->chain_refs.size()
+                            ? o->chain_refs[ref++].c_str() : nullptr;
+                    }
+                }
+                o->c.chain.hops = o->chain_hops.empty() ? nullptr : o->chain_hops.data();
                 auto* raw = o.release(); // transfer ownership to the thread
                 std::thread([raw] {
                     // Wrap in a unique_ptr again so the custom deleter
@@ -4210,7 +4604,15 @@ void render_ui() {
             const int final_backend = !g_app.chain_transports.empty() ? transport_carrier(g_app.chain_transports.back())
                 : ((telem.backend != FCAE_BACKEND_PSIPHON && g_app.tor_mode == 3) ? FCAE_BACKEND_PSIPHON : telem.backend);
             const char* final_name = final_backend == FCAE_BACKEND_FIREFOX ? "Firefox"
-                : final_backend == FCAE_BACKEND_PSIPHON ? "Psiphon" : "Aether";
+                : final_backend == FCAE_BACKEND_PSIPHON ? "Psiphon"
+                : final_backend == FCAE_BACKEND_SINGBOX ? "sing-box"
+                : final_backend == FCAE_BACKEND_XRAY ? "Xray" : "Aether";
+            // A saved config is named by the user, so show that name.
+            const AppState::CoreConfigEntry* final_core =
+                g_app.chain_transports.empty() ? g_app.core_config_at(
+                    g_app.core_selected >= 0 ? kCoreTransportBase + g_app.core_selected : -1)
+                : g_app.core_config_at(g_app.chain_transports.back());
+            if (final_core && !final_core->name.empty()) final_name = final_core->name.c_str();
             if (final_backend != FCAE_BACKEND_PSIPHON) {
                 if (g_app.protocol != 4 && g_app.listener_socks_enabled())
                     endpoint(final_name, "SOCKS5",
@@ -4250,6 +4652,8 @@ void render_ui() {
             if (ImGui::Button("Protocol")) open_protocol_editor();
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Firefox settings")) open_firefox_settings();
+            if (!narrow) ImGui::SameLine();
+            if (ImGui::Button("Xray / sing-box configs")) open_core_configs();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "APP SETTINGS");
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
@@ -4796,6 +5200,7 @@ void render_ui() {
 
     render_protocol_editor();
     s_firefox_captcha_embedded = false;
+    render_core_configs();
     render_firefox_settings();
     render_firefox_add_account();
     render_firefox_code_prompt();

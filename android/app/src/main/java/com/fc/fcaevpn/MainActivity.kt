@@ -1326,6 +1326,7 @@ class MainActivity : AppCompatActivity() {
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
         findViewById<MaterialButton>(R.id.btnProtocolSettings).setOnClickListener { showProtocolSettings() }
         findViewById<MaterialButton>(R.id.btnFirefoxSettings).setOnClickListener { showFirefoxSettings() }
+        findViewById<MaterialButton>(R.id.btnCoreConfigs).setOnClickListener { showCoreConfigs() }
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)
         spinnerIpVersion = findViewById(R.id.spinnerIpVersion)
@@ -1539,23 +1540,8 @@ class MainActivity : AppCompatActivity() {
                 (view as android.widget.EditText).isCursorVisible = hasFocus
             }
         }
-        spinnerProtocol.adapter = ArrayAdapter(
-            this, R.layout.spinner_dark_item,
-            // H2 is folded into the MASQUE entries. Positions map to core
-            // protocol + h2Enabled via the helpers below; the FFI keeps taking
-            // the same fields.
-            // 4 = Tor and 5 = Psiphon are peers of the WARP transports from
-            // the user's point of view ("how do I get out?"), even though
-            // internally Tor is an engine egress and Psiphon is a separate
-            // backend. The helpers below translate a position into the
-            // (backend, protocol, torMode) triple the FFI wants.
-            listOf(
-                "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
-                "Tor", "Psiphon", "MASQUE-in-MASQUE (HTTP/3)", "MASQUE-in-MASQUE (HTTP/2)",
-                "WARP-in-MASQUE (HTTP/3)", "WARP-in-MASQUE (HTTP/2)",
-                "Firefox IP Protection",
-            ),
-        )
+        // Built-in transports, then one entry per saved Xray/sing-box config.
+        spinnerProtocol.adapter = ArrayAdapter(this, R.layout.spinner_dark_item, protocolChoices())
         val modeAdapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("Proxy (SOCKS/HTTP)", "TUN (system VPN)"),
@@ -1753,6 +1739,10 @@ class MainActivity : AppCompatActivity() {
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
+
+        // Drop chain exits whose saved config is gone, and show the selected
+        // protocol's name on the button before the first frame.
+        refreshProtocolChoices()
 
         installSettingsAutosave()
         onBackPressedDispatcher.addCallback(this, backPressedCallback)
@@ -2475,8 +2465,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun selectedChain(): List<Int> {
+        // A position at or above the base names a saved config, and the engine
+        // refuses the session over one that is not in the library it was handed.
+        val coreCount = coreConfigEntries().size
         if (prefs.contains("chainTransports")) {
-            return NativeEngine.parseChainTransports(prefs.getString("chainTransports", "")).toList()
+            return NativeEngine.parseChainTransports(prefs.getString("chainTransports", ""))
+                .filter { it < CORE_TRANSPORT_BASE || it - CORE_TRANSPORT_BASE < coreCount }
         }
         val count = prefs.getInt("chainCount", 0).coerceIn(0, 3)
         return (0 until count).map { index ->
@@ -2522,18 +2516,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateProtocolButton() {
         if (!::spinnerProtocol.isInitialized) return
-        findViewById<MaterialButton>(R.id.btnProtocolSettings).text = "Protocol"
+        // A saved config is named by the user, and that name is how it is
+        // identified everywhere else, so show it here too.
+        val spinner = spinnerProtocol.adapter
+        val position = spinnerProtocol.selectedItemPosition
+        val label = if (spinner != null && position in 0 until spinner.count)
+            spinner.getItem(position)?.toString() else null
+        findViewById<MaterialButton>(R.id.btnProtocolSettings).text =
+            if (label.isNullOrBlank()) "Protocol" else "Protocol: $label"
     }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).roundToInt()
 
     private fun showProtocolSettings() {
-        val protocolChoices = (0 until spinnerProtocol.adapter.count).map {
+        // Snapshot: the dialog edits a draft, and the adapter is rebuilt when a
+        // saved config is added or removed.
+        val choices = (0 until spinnerProtocol.adapter.count).map {
             spinnerProtocol.adapter.getItem(it).toString()
         }
-        if (protocolChoices.isEmpty()) return
-        var draftProtocol = spinnerProtocol.selectedItemPosition.coerceIn(0, protocolChoices.lastIndex)
+        if (choices.isEmpty()) return
+        var draftProtocol = spinnerProtocol.selectedItemPosition.coerceIn(0, choices.lastIndex)
         val draft = selectedChain().toMutableList()
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2543,9 +2546,10 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(4), 0, dp(8))
         }
-        protocolChoices.forEachIndexed { index, label ->
+        choices.forEachIndexed { index, label ->
             protocols.addView(android.widget.RadioButton(this).apply {
-                id = index
+                // id 0 is View.NO_ID, which a RadioGroup cannot track.
+                id = index + 1
                 text = label
                 setTextColor(Color.parseColor("#FFE0E4EE"))
                 buttonTintList = ColorStateList.valueOf(Color.parseColor("#FF60A5FA"))
@@ -2553,7 +2557,7 @@ class MainActivity : AppCompatActivity() {
             })
         }
         box.addView(protocols)
-        protocols.check(draftProtocol)
+        protocols.check(draftProtocol + 1)
 
         box.addView(TextView(this).apply {
             text = "Additional exits (optional)"
@@ -2565,6 +2569,7 @@ class MainActivity : AppCompatActivity() {
 
         fun persistProtocol() {
             spinnerProtocol.setSelection(draftProtocol)
+            persistSelectedCoreConfig(draftProtocol)
             prefs.edit()
                 .putString("chainTransports", NativeEngine.encodeChainTransports(draft.toIntArray()))
                 .remove("chainCount").remove("chainExit0").remove("chainExit1").remove("chainExit2")
@@ -2586,10 +2591,10 @@ class MainActivity : AppCompatActivity() {
                     gravity = android.view.Gravity.CENTER_VERTICAL
                 }
                 val spinner = Spinner(this).apply {
-                    adapter = ArrayAdapter(this@MainActivity, R.layout.spinner_dark_item, protocolChoices).apply {
+                    adapter = ArrayAdapter(this@MainActivity, R.layout.spinner_dark_item, choices).apply {
                         setDropDownViewResource(R.layout.spinner_dark_item)
                     }
-                    setSelection(transport.coerceIn(0, protocolChoices.lastIndex))
+                    setSelection(transport.coerceIn(0, choices.lastIndex))
                 }
                 spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                     override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
@@ -2613,8 +2618,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         protocols.setOnCheckedChangeListener { _, checkedId ->
-            if (checkedId in protocolChoices.indices && draftProtocol != checkedId) {
-                draftProtocol = checkedId
+            val position = checkedId - 1
+            if (position in choices.indices && draftProtocol != position) {
+                draftProtocol = position
                 persistProtocol()
             }
         }
@@ -2624,6 +2630,354 @@ class MainActivity : AppCompatActivity() {
             renderRows()
         }
         renderRows()
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Close", null)
+            .create()
+        dialog.setOnShowListener { styleDialogButtons(dialog) }
+        dialog.show()
+    }
+
+    // ---- Saved Xray / sing-box configs -----------------------------------
+    //
+    // The whole list is one JSON document in prefs, and the same document is
+    // handed to the engine ("coreConfigs"), where a position is what a protocol
+    // list entry and a chain exit point at. `backend` is 0 = Xray, 1 = sing-box.
+
+    /** A saved Xray/sing-box config. */
+    private data class CoreConfig(val name: String, val backend: Int, val config: String) {
+        val backendLabel: String get() = if (backend == 1) "sing-box" else "Xray"
+    }
+
+    /** Every saved config, in protocol-list order. */
+    private fun coreConfigEntries(): List<CoreConfig> {
+        val raw = prefs.getString("coreConfigs", "").orEmpty()
+        if (raw.isBlank()) return emptyList()
+        return try {
+            val array = org.json.JSONArray(raw)
+            (0 until array.length()).mapNotNull { index ->
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                val name = item.optString("name").trim()
+                val config = item.optString("config").trim()
+                if (name.isEmpty() || config.isEmpty()) return@mapNotNull null
+                val backend = if (item.optString("backend").equals("sing-box", true)) 1 else 0
+                CoreConfig(name, backend, config)
+            }
+        } catch (_: org.json.JSONException) {
+            emptyList()
+        }
+    }
+
+    /** The list as the one JSON document prefs and the engine both carry. */
+    private fun coreConfigDocument(entries: List<CoreConfig>): String {
+        val array = org.json.JSONArray()
+        for (entry in entries) {
+            array.put(
+                org.json.JSONObject()
+                    .put("name", entry.name)
+                    .put("backend", if (entry.backend == 1) "sing-box" else "xray")
+                    .put("config", entry.config)
+            )
+        }
+        return array.toString()
+    }
+
+    /** Store the list, then rebuild the protocol list so the names show up. */
+    private fun saveCoreConfigs(entries: List<CoreConfig>) {
+        // A protocol position is a position in this list, so the selected
+        // protocol and every saved chain exit are remapped by name before the
+        // list they index is replaced: removing one config must not silently
+        // re-point them at whichever config took its place.
+        val previous = coreConfigEntries()
+        val selectedBefore = selectedCoreConfig()?.name
+        fun remap(position: Int): Int {
+            if (position < CORE_TRANSPORT_BASE) return position
+            val name = previous.getOrNull(position - CORE_TRANSPORT_BASE)?.name ?: return -1
+            val index = entries.indexOfFirst { it.name.equals(name, true) }
+            return if (index >= 0) CORE_TRANSPORT_BASE + index else -1
+        }
+        fun remapIndex(index: Int): Int {
+            val name = previous.getOrNull(index)?.name ?: return -1
+            return entries.indexOfFirst { it.name.equals(name, true) }
+        }
+        val chain = selectedChain().map { remap(it) }.filter { it >= 0 }
+        val selected = remapIndex(prefs.getInt("coreSelected", -1))
+        val editor = prefs.edit()
+            .putString("coreConfigs", coreConfigDocument(entries))
+            .putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
+            .remove("chainCount").remove("chainExit0").remove("chainExit1").remove("chainExit2")
+        if (selected >= 0) editor.putInt("coreSelected", selected) else editor.remove("coreSelected")
+        editor.apply()
+        refreshProtocolChoices(selectedBefore)
+        scheduleSettingsSave()
+    }
+
+    /** Why [config] cannot be used for [backend] (3 = Xray, 4 = sing-box), or "". */
+    private fun checkCoreConfig(config: String, backend: Int): String = try {
+        NativeEngine.nativeCheckCoreConfig(config, backend)
+    } catch (t: Throwable) {
+        t.toString()
+    }
+
+    /**
+     * The protocol list: the built-in transports, then one entry per saved
+     * config, so a saved config can be the main protocol or a chained exit
+     * exactly like a built-in one.
+     *
+     * Positions 0-10 keep their historical meaning; see
+     * [backendForProtocolPosition] and [coreProtocolFromSelection] for the
+     * (backend, protocol) mapping.
+     */
+    private fun protocolChoices(): List<String> =
+        BUILTIN_PROTOCOL_LABELS + coreConfigEntries().map { it.name }
+
+    /**
+     * Rebuild the protocol list after the saved configs changed, keeping the
+     * user on the same position and dropping chain exits that no longer exist.
+     */
+    private fun refreshProtocolChoices(previousSelection: String? = null) {
+        if (!::spinnerProtocol.isInitialized) return
+        val position = spinnerProtocol.selectedItemPosition
+        val labels = protocolChoices()
+        spinnerProtocol.adapter = ArrayAdapter(this, R.layout.spinner_dark_item, labels)
+        // A saved config is tracked by the name the user gave it, so editing the
+        // list around it keeps the same config selected. A built-in transport is
+        // tracked by position, which its own edits never move.
+        val byName = if (previousSelection != null)
+            labels.indexOfFirst { it.equals(previousSelection, true) } else -1
+        val selected = when {
+            byName >= CORE_TRANSPORT_BASE -> byName
+            // The config the protocol ran is gone; the first transport is the
+            // only honest choice left.
+            previousSelection != null -> 0
+            else -> position.coerceIn(0, labels.lastIndex)
+        }
+        spinnerProtocol.setSelection(selected)
+        persistSelectedCoreConfig(selected)
+        val chain = selectedChain().filter { it in labels.indices }
+        prefs.edit()
+            .putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
+            .apply()
+        applyTorLock()
+        updateProtocolButton()
+    }
+
+    /** The saved config the main protocol runs, or null for a built-in one. */
+    private fun selectedCoreConfig(): CoreConfig? {
+        if (!::spinnerProtocol.isInitialized) return null
+        val position = spinnerProtocol.selectedItemPosition
+        if (position < CORE_TRANSPORT_BASE) return null
+        return coreConfigEntries().getOrNull(position - CORE_TRANSPORT_BASE)
+    }
+
+    /** Stored alongside the protocol so a saved config's position survives a restart. */
+    private fun persistSelectedCoreConfig(position: Int) {
+        val editor = prefs.edit()
+        if (position >= CORE_TRANSPORT_BASE) editor.putInt("coreSelected", position - CORE_TRANSPORT_BASE)
+        else editor.remove("coreSelected")
+        editor.apply()
+    }
+
+    /** "#<index>" for the engine, or "" when the main protocol is built-in. */
+    private fun selectedCoreConfigRef(): String {
+        if (!::spinnerProtocol.isInitialized) return ""
+        val position = spinnerProtocol.selectedItemPosition
+        if (position < CORE_TRANSPORT_BASE) return ""
+        return "#" + (position - CORE_TRANSPORT_BASE)
+    }
+
+    /**
+     * The saved-config editor. Changes apply to prefs and to the protocol list
+     * immediately: the engine reads the library when a session starts, so
+     * nothing has to be re-saved before connecting.
+     */
+    private fun showCoreConfigs() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+        box.addView(TextView(this).apply {
+            text = "Saved configs appear in the protocol list, so each one can be the main " +
+                "protocol or a chained exit."
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            textSize = 13f
+        })
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(list)
+
+        var entries = coreConfigEntries()
+        // The two are mutually recursive (the list edits an entry, the editor
+        // redraws the list), and a local function may only call one declared
+        // before it.
+        lateinit var renderList: () -> Unit
+
+        fun editEntry(index: Int) {
+            val existing = entries.getOrNull(index)
+            val editor = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(12), dp(20), dp(8))
+            }
+            val name = addDialogInput(editor, "Name", existing?.name.orEmpty())
+            editor.addView(TextView(this).apply {
+                text = "Core"
+                setTextColor(Color.parseColor("#FF9AA3B5"))
+                setPadding(0, dp(12), 0, dp(3))
+            })
+            val backendLabels = arrayOf("Xray", "sing-box")
+            val backendGroup = android.widget.RadioGroup(this).apply { orientation = LinearLayout.HORIZONTAL }
+            backendLabels.forEachIndexed { choice, label ->
+                backendGroup.addView(android.widget.RadioButton(this).apply {
+                    // Same reason as the protocol list: 0 is View.NO_ID.
+                    id = choice + 1
+                    text = label
+                    setTextColor(Color.parseColor("#FFE0E4EE"))
+                    buttonTintList = ColorStateList.valueOf(Color.parseColor("#FF60A5FA"))
+                    textSize = 14f
+                })
+            }
+            backendGroup.check((existing?.backend ?: 0).coerceIn(0, 1) + 1)
+            editor.addView(backendGroup)
+
+            editor.addView(TextView(this).apply {
+                text = "Share link or the core's own config JSON"
+                setTextColor(Color.parseColor("#FF9AA3B5"))
+                setPadding(0, dp(12), 0, dp(3))
+            })
+            val config = android.widget.EditText(this).apply {
+                setText(existing?.config.orEmpty())
+                textSize = 13f
+                gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                setTextColor(Color.parseColor("#FFE8ECF4"))
+                setHintTextColor(Color.parseColor("#FF6B7280"))
+                setBackgroundColor(Color.parseColor("#FF1E1E2C"))
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                minLines = 6
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                    android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            }
+            editor.addView(config, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(180)))
+            val status = TextView(this).apply {
+                setTextColor(Color.parseColor("#FF9AA3B5"))
+                textSize = 12f
+                setPadding(0, dp(6), 0, 0)
+            }
+            editor.addView(status)
+
+            fun backendIndex(): Int = (backendGroup.checkedRadioButtonId - 1).coerceIn(0, 1)
+            fun backendValue(): Int = if (backendIndex() == 1) 4 else 3
+            fun fail(message: String): Boolean {
+                status.setTextColor(Color.parseColor("#FFF87171"))
+                status.text = message
+                return false
+            }
+            fun validate(): Boolean {
+                val nameText = name.text.toString().trim()
+                if (nameText.isEmpty()) return fail("Give the config a name.")
+                // The engine measures the name in bytes and rejects a control
+                // character, and it rejects the whole library over one bad
+                // entry: validate with the same yardstick here.
+                if (nameText.toByteArray(Charsets.UTF_8).size > 48) {
+                    return fail("Names are limited to 48 bytes.")
+                }
+                if (nameText.any { it.isISOControl() }) {
+                    return fail("Names cannot contain control characters.")
+                }
+                if (entries.withIndex().any { it.index != index && it.value.name.equals(nameText, true) }) {
+                    return fail("Another config is already called \"$nameText\".")
+                }
+                val text = config.text.toString().trim()
+                if (text.isEmpty()) return fail("Paste a share link or a config JSON.")
+                if (text.toByteArray(Charsets.UTF_8).size > NativeEngine.MAX_CORE_CONFIG_BYTES) {
+                    return fail("Configs are limited to ${NativeEngine.MAX_CORE_CONFIG_BYTES / 1024} KiB.")
+                }
+                val reason = checkCoreConfig(text, backendValue())
+                if (reason.isNotEmpty()) return fail(reason)
+                // The whole list is one document: it is what the engine parses
+                // and what an Intent carries, so it is measured as it will be
+                // stored. A library that saves is then a library that starts.
+                val candidate = CoreConfig(nameText, backendIndex(), text)
+                val prospective = entries.toMutableList()
+                    .also { if (index in it.indices) it[index] = candidate else it.add(candidate) }
+                if (coreConfigDocument(prospective).toByteArray(Charsets.UTF_8).size >
+                    NativeEngine.MAX_CORE_DOCUMENT_BYTES) {
+                    return fail("Saved configs are limited to " +
+                        "${NativeEngine.MAX_CORE_DOCUMENT_BYTES / 1024} KiB in total.")
+                }
+                status.setTextColor(Color.parseColor("#FF34D399"))
+                status.text = "Valid ${backendLabels[backendIndex()]} config."
+                return true
+            }
+
+            val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle(if (existing == null) "Add config" else "Edit config")
+                .setView(ScrollView(this).apply { addView(editor) })
+                .setPositiveButton("Save", null)
+                .setNegativeButton("Cancel", null)
+                .create()
+            dialog.setOnShowListener {
+                styleDialogButtons(dialog)
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    if (!validate()) return@setOnClickListener
+                    val updated = CoreConfig(
+                        name.text.toString().trim(),
+                        backendIndex(),
+                        config.text.toString().trim(),
+                    )
+                    val next = entries.toMutableList()
+                    if (index in next.indices) next[index] = updated else next.add(updated)
+                    entries = next
+                    saveCoreConfigs(entries)
+                    renderList()
+                    dialog.dismiss()
+                }
+            }
+            dialog.show()
+        }
+
+        renderList = {
+            list.removeAllViews()
+            if (entries.isEmpty()) {
+                list.addView(TextView(this).apply {
+                    text = "No saved configs yet."
+                    setTextColor(Color.parseColor("#FF9AA3B5"))
+                    setPadding(0, dp(12), 0, dp(4))
+                })
+            }
+            entries.forEachIndexed { index, entry ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(6), 0, 0)
+                }
+                row.addView(TextView(this).apply {
+                    text = "${entry.name}  (${entry.backendLabel})"
+                    setTextColor(Color.parseColor("#FFE0E4EE"))
+                    textSize = 14f
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                addDialogButton(row, "Edit") { editEntry(index) }
+                addDialogButton(row, "Remove") {
+                    entries = entries.toMutableList().also { it.removeAt(index) }
+                    saveCoreConfigs(entries)
+                    renderList()
+                }
+                list.addView(row)
+            }
+        }
+
+        addDialogButton(box, "+ Add config") {
+            if (entries.size >= NativeEngine.MAX_CORE_CONFIGS) {
+                Toast.makeText(this, "That is the most saved configs this build keeps.",
+                    Toast.LENGTH_SHORT).show()
+            } else {
+                editEntry(entries.size)
+            }
+        }
+        renderList()
 
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setView(ScrollView(this).apply { addView(box) })
@@ -3841,6 +4195,11 @@ class MainActivity : AppCompatActivity() {
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
             putInt("t2sLog", t2sLogValue())
             putInt("backend", backendFromSelection())
+            // The saved config a core protocol runs, by its position in the
+            // saved list: (protocol, backend) cannot express which one it is.
+            val coreSelection = spinnerProtocol.selectedItemPosition - CORE_TRANSPORT_BASE
+            if (coreSelection in coreConfigEntries().indices) putInt("coreSelected", coreSelection)
+            else remove("coreSelected")
             putString("torSocksPort", editTorSocksPort.text.toString().trim())
             putString("psiphonRegion", selectedPsiphonRegion())
             putInt("psiphonTransport", selectedPsiphonTransportIndex())
@@ -3931,8 +4290,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadSettings() {
+        // A saved core config is identified by its position in the saved list,
+        // which the protocol/backend pair cannot express, so it has its own key.
+        val coreSelected = prefs.getInt("coreSelected", -1)
         spinnerProtocol.setSelection(
-            selectionPositionFromPrefs(
+            if (coreSelected in 0 until coreConfigEntries().size) CORE_TRANSPORT_BASE + coreSelected
+            else selectionPositionFromPrefs(
                 prefs.getInt("protocol", 0),
                 prefs.getBoolean("h2", true),
                 prefs.getInt("backend", 0),
@@ -4113,7 +4476,8 @@ class MainActivity : AppCompatActivity() {
             1 in route && !switchPsiphonSocks.isChecked && !switchPsiphonHttp.isChecked -> "Psiphon SOCKS5 or HTTP"
             isFinalPsiphon() && isTunModeSelected() && !switchPsiphonSocks.isChecked -> "Psiphon SOCKS5"
             finalListenerIsFirefox() && !firefoxSocksEnabled && isTunModeSelected() -> "Firefox SOCKS5"
-            transports.any { it != 4 && it != 5 && it != 10 } && !switchSocks.isChecked -> "Aether SOCKS5"
+            transports.any { it < CORE_TRANSPORT_BASE && it != 4 && it != 5 && it != 10 } &&
+                !switchSocks.isChecked -> "Aether SOCKS5"
             else -> null
         }
         if (disabled != null) {
@@ -4406,6 +4770,8 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("upstreamProxy", upstreamProxyUrl())
         val chain = selectedChain()
         i.putExtra("chainTransports", chain.toIntArray())
+        i.putExtra("coreConfigs", prefs.getString("coreConfigs", "").orEmpty())
+        i.putExtra("coreConfigId", selectedCoreConfigRef())
         i.putExtra("firefoxAccountId", prefs.getString("firefoxAccountId", "").orEmpty())
         i.putExtra("firefoxLocation", prefs.getString("firefoxLocation", "").orEmpty())
         i.putExtra("firefoxServer", prefs.getString("firefoxServer", "").orEmpty())
@@ -4598,6 +4964,8 @@ class MainActivity : AppCompatActivity() {
                     fragmentSni = fragmentSni,
                     upstreamProxy = upstreamProxy,
                     chainTransports = chain.toIntArray(),
+                    coreConfigs = prefs.getString("coreConfigs", "").orEmpty(),
+                    coreConfigId = selectedCoreConfigRef(),
                     firefoxAccountId = firefoxAccountId,
                     firefoxLocation = firefoxLocation,
                     firefoxServer = firefoxServer,
@@ -5585,7 +5953,14 @@ class MainActivity : AppCompatActivity() {
     // Spinner: 0 = MASQUE (HTTP/3), 1 = MASQUE (HTTP/2), 2 = WireGuard,
     // 3 = WARP-in-WARP, 8/9 = WARP-in-MASQUE (HTTP/3 / HTTP/2) -> the core's
     // protocol (0=masque, 1=wg, 2=gool, 6=warp-in-masque) + h2.
-    private fun coreProtocolFromSelection(): Int = when (spinnerProtocol.selectedItemPosition) {
+    private fun coreProtocolFromSelection(): Int =
+        if (spinnerProtocol.selectedItemPosition >= CORE_TRANSPORT_BASE) {
+            3 // Auto: the saved config carries the transport
+        } else {
+            coreProtocolFromBuiltin()
+        }
+
+    private fun coreProtocolFromBuiltin(): Int = when (spinnerProtocol.selectedItemPosition) {
         2 -> 1    // WireGuard
         3 -> 2    // WARP-in-WARP
         6, 7 -> 5 // MASQUE-in-MASQUE
@@ -5620,9 +5995,13 @@ class MainActivity : AppCompatActivity() {
      * and the supervisor requests the Psiphon exit through the foreground owner.
      * Its _reserved[0] flag now follows the same routing as desktop.
      */
-    private fun backendForProtocolPosition(position: Int): Int = when (position) {
-        5 -> 1
-        10 -> 2
+    private fun backendForProtocolPosition(position: Int): Int = when {
+        position == 5 -> 1
+        position == 10 -> 2
+        // A saved config decides its own core; the engine reads it out of the
+        // library, so this only has to point at the entry.
+        position >= CORE_TRANSPORT_BASE ->
+            3 + (coreConfigEntries().getOrNull(position - CORE_TRANSPORT_BASE)?.backend ?: 0)
         else -> 0
     }
 
@@ -5786,7 +6165,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun h2FromSelection(): Boolean = spinnerProtocol.selectedItemPosition in listOf(1, 7, 9)
+    private fun h2FromSelection(): Boolean =
+        spinnerProtocol.selectedItemPosition < CORE_TRANSPORT_BASE &&
+            spinnerProtocol.selectedItemPosition in listOf(1, 7, 9)
 
     /** Old saved prefs keep protocol (0-2) + h2 (bool); map back to the
      *  spinner position so existing configs load unchanged.
@@ -5795,6 +6176,10 @@ class MainActivity : AppCompatActivity() {
      *  (core 3, via the backend) sit at the end of the list. */
     private fun selectionPositionFromPrefs(protocol: Int, h2: Boolean, backend: Int = 0): Int =
         when {
+            // A core backend is always a saved config, which its own key
+            // restores; without one, the plain MASQUE default is the useful
+            // fallback (protocol 3 = Auto means nothing to a built-in).
+            backend >= 3 -> if (protocol == 0 && h2) 1 else 0
             backend == 2 -> 10         // Firefox IP Protection
             backend == 1 -> 5          // Psiphon
             protocol == 6 -> if (h2) 9 else 8
@@ -5851,6 +6236,24 @@ class MainActivity : AppCompatActivity() {
         private const val TOR_SOCKS_ENGINE_DEFAULT = 1821
         private const val FIREFOX_SOCKS_PORT = 1825
         private const val FIREFOX_HTTP_PORT = 1826
+
+        /**
+         * The built-in transports, in protocol-list order. H2 is folded into
+         * the MASQUE entries; the helpers in the activity map a position to the
+         * (backend, protocol, h2) triple the engine takes. 4 = Tor and 5 =
+         * Psiphon are peers of the WARP transports from the user's point of
+         * view ("how do I get out?"), even though Tor is an engine egress and
+         * Psiphon is a separate backend. Saved core configs follow these.
+         */
+        private val BUILTIN_PROTOCOL_LABELS = listOf(
+            "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
+            "Tor", "Psiphon", "MASQUE-in-MASQUE (HTTP/3)", "MASQUE-in-MASQUE (HTTP/2)",
+            "WARP-in-MASQUE (HTTP/3)", "WARP-in-MASQUE (HTTP/2)",
+            "Firefox IP Protection",
+        )
+
+        /** First protocol-list position that names a saved core config. */
+        private const val CORE_TRANSPORT_BASE = NativeEngine.CORE_TRANSPORT_BASE
 
         private const val LINK_TELEGRAM = "https://t.me/FCAE_VPN"
         private const val LINK_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"

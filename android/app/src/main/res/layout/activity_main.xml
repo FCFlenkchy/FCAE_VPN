@@ -306,6 +306,14 @@
                 android:layout_marginTop="4dp"
                 android:text="Firefox settings" />
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnCoreConfigs"
+                style="@style/Widget.FCAEVPN.SettingsButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Xray / sing-box configs" />
+
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchAutoUpdate"
                 android:layout_width="match_parent"

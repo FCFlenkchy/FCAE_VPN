@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 24;
+pub const FCAE_ABI_VERSION: u32 = 25;
 /// Explicitly allow `http_port` to open an HTTP listener in TUN mode.
 pub const FCAE_CONFIG_TUN_HTTP: u64 = 0x8000_0000_0000_0000;
 
@@ -450,6 +450,19 @@ pub struct FcaeCore {
     pub profile: *const c_char,
     /// The core's own log verbosity (`FcaeEngineLog`). Defaults to `Info`.
     pub log_level: FcaeEngineLog,
+    /// The user's saved configs, as a JSON array of
+    /// `{"name": …, "backend": "xray"|"sing-box", "config": …}` objects — the
+    /// shape `fcae-runtime`'s core library parses and validates. ABI v25.
+    ///
+    /// The UI owns this document (it is what the "core configs" editor edits);
+    /// the library is the only place a saved config can come from, and its
+    /// positions are what `config_ref` on this struct and on every
+    /// [`FcaeChainHop`] point at.
+    pub library: *const c_char,
+    /// Which saved config the main backend runs, as a reference into
+    /// `library`: `"#<index>"` or the entry's name. NULL/empty keeps
+    /// [`FcaeCore::profile`] and the caller's `FcaeConfig::backend`. ABI v25.
+    pub config_ref: *const c_char,
 }
 
 /// One dynamically supplied exit, including the transport used by an Aether hop.
@@ -459,6 +472,11 @@ pub struct FcaeChainHop {
     pub backend: FcaeBackend,
     pub protocol: FcaeProtocol,
     pub h2_enabled: bool,
+    /// The saved config this hop runs, as a reference into
+    /// [`FcaeCore::library`]: `"#<index>"` or the entry's name. NULL keeps a
+    /// built-in hop. When set, the referenced entry decides the hop's backend
+    /// and profile, so `backend` here is only a fallback. ABI v25.
+    pub config_ref: *const c_char,
 }
 
 /// Ordered additional exits after the top-level carrier backend. `hops` supports

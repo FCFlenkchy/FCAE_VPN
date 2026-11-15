@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cctype>
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -19,6 +21,53 @@ extern "C" {
 #include "fcae.h"
 }
 
+/// The protocol list is the built-in transports followed by one entry per saved
+/// core config, so a saved config is pickable everywhere a built-in transport
+/// is (main protocol and chain hop alike).
+static constexpr int kCoreTransportBase = FCAE_CORE_TRANSPORT_BASE;
+
+/// Largest saved-configs document the engine accepts, mirroring fcae-runtime's
+/// library limit. The document is what crosses the ABI, so it is bounded as a
+/// whole and not only per config.
+static constexpr size_t kMaxCoreDocument = 256 * 1024;
+
+/// Append `text` to `out` as the body of a JSON string (without the quotes).
+static inline void core_json_escape_into(std::string& out, const std::string& text) {
+    for (unsigned char c : text) {
+        switch (c) {
+            case '"':
+                out.push_back('\\');
+                out.push_back('"');
+                break;
+            case '\\':
+                out.push_back('\\');
+                out.push_back('\\');
+                break;
+            case '\n':
+                out.push_back('\\');
+                out.push_back('n');
+                break;
+            case '\r':
+                out.push_back('\\');
+                out.push_back('r');
+                break;
+            case '\t':
+                out.push_back('\\');
+                out.push_back('t');
+                break;
+            default:
+                if (c < 0x20) {
+                    char escaped[7];
+                    std::snprintf(escaped, sizeof(escaped), "\\u%04x", static_cast<unsigned>(c));
+                    out += escaped;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+                break;
+        }
+    }
+}
+
 struct AppState {
     std::atomic<bool> running{true};
     std::atomic<int>  ffi_state{FCAE_STATE_DISCONNECTED};
@@ -33,9 +82,34 @@ struct AppState {
     int  protocol        = 0;
     // 0 = Aether, 1 = Psiphon, 2 = Firefox (FcaeBackend).
     int  backend         = 0;
-    // Ordered additional exits as transport indexes matching kTransportNames.
+    // Ordered additional exits as protocol-list positions (see
+    // transport_labels()); >= kCoreTransportBase names a saved core config.
     std::vector<int> chain_transports;
     std::vector<FcaeChainHop> chain_hops_built;
+    // A saved core config: what the "Core configs" editor writes and what the
+    // engine reads back through FcaeCore::library.
+    struct CoreConfigEntry {
+        std::string name;
+        // 0 = Xray, 1 = sing-box.
+        int backend = 0;
+        // Share link or the core's own config JSON, verbatim.
+        std::string text;
+    };
+    std::vector<CoreConfigEntry> core_configs;
+    // Position in core_configs the main protocol runs; -1 when it runs none.
+    int core_selected = -1;
+    // Built by to_config(): the library document, the main entry's reference,
+    // and one reference per saved-config chain hop. FcaeConfig points into
+    // these, so they have to outlive the call.
+    std::string core_library_built;
+    std::string core_ref_built;
+    std::vector<std::string> chain_core_refs_built;
+    // Position in core_library_built for each entry of core_configs, or -1 when
+    // the entry is not sent: the engine refuses the whole library over one bad
+    // entry, so a draft that does not validate is kept on disk and left out
+    // here. References are document positions, which is why this mapping
+    // exists at all.
+    std::vector<int> core_config_doc_index;
     // 0 = Proxy, 1 = TUN. TUN is the product default on every desktop
     // platform (and Android): full-system tunneling out of the box. The
     // device itself is still only raised AFTER the backend reports a live
@@ -275,6 +349,78 @@ struct AppState {
         return backend == 2 && tor_mode != 3;
     }
 
+    /// A saved core config by protocol-list position, or nullptr.
+    const CoreConfigEntry* core_config_at(int transport) const {
+        if (transport < kCoreTransportBase) return nullptr;
+        const size_t index = (size_t)(transport - kCoreTransportBase);
+        return index < core_configs.size() ? &core_configs[index] : nullptr;
+    }
+
+    /// Whether the engine may be handed this entry. Its parser rejects the
+    /// whole library over one bad entry (that is what makes a config that
+    /// saves a config that starts), so the check here is the same one the
+    /// editor shows the user.
+    static bool core_config_usable(const CoreConfigEntry& entry) {
+        if (entry.name.empty() || entry.text.empty()) return false;
+        const int32_t target = entry.backend == 1 ? FCAE_BACKEND_SINGBOX : FCAE_BACKEND_XRAY;
+        return fcae_core_check_profile(entry.text.c_str(), target, nullptr, 0);
+    }
+
+    /// Where the entry at `transport` ends up in the serialised library, or -1
+    /// when nothing is sent for it. Valid only after `build_core_library()`.
+    int core_doc_index(int transport) const {
+        if (transport < kCoreTransportBase) return -1;
+        const size_t index = (size_t)(transport - kCoreTransportBase);
+        return index < core_config_doc_index.size() ? core_config_doc_index[(size_t)index] : -1;
+    }
+
+    /// Serialise `core_configs` into the document the engine parses. Every
+    /// reference in the config is a position in this array, so it is built
+    /// from the same vector the positions index.
+    void build_core_library() {
+        core_library_built.clear();
+        core_config_doc_index.assign(core_configs.size(), -1);
+        if (core_configs.empty()) return;
+        core_library_built += '[';
+        int written = 0;
+        for (size_t i = 0; i < core_configs.size(); ++i) {
+            const CoreConfigEntry& entry = core_configs[i];
+            if (!core_config_usable(entry)) continue;
+            // Names are references in their own right, so the engine rejects a
+            // duplicate and would take the whole library with it. The first
+            // entry keeps the name; the editor already flags the rest.
+            bool duplicate = false;
+            for (size_t j = 0; j < i && !duplicate; ++j) {
+                const CoreConfigEntry& other = core_configs[j];
+                duplicate = core_config_usable(other) && other.name.size() == entry.name.size()
+                    && std::equal(other.name.begin(), other.name.end(), entry.name.begin(),
+                                  [](char a, char b) {
+                                      return std::tolower((unsigned char)a) == std::tolower((unsigned char)b);
+                                  });
+            }
+            if (duplicate) continue;
+            // The document as a whole is bounded, and the engine rejects an
+            // oversized one outright: leave out the entry that would cross the
+            // limit rather than fail the session over a config nobody runs.
+            const size_t mark = core_library_built.size();
+            if (written) core_library_built += ',';
+            core_library_built += "{\"name\":\"";
+            core_json_escape_into(core_library_built, entry.name);
+            core_library_built += "\",\"backend\":\"";
+            core_library_built += entry.backend == 1 ? "sing-box" : "xray";
+            core_library_built += "\",\"config\":\"";
+            core_json_escape_into(core_library_built, entry.text);
+            core_library_built += "\"}";
+            if (core_library_built.size() + 1 > kMaxCoreDocument) {
+                core_library_built.resize(mark);
+                continue;
+            }
+            core_config_doc_index[i] = written++;
+        }
+        if (written) core_library_built += ']';
+        else core_library_built.clear();
+    }
+
     uint16_t default_listener_socks_port() const {
         return final_listener_is_firefox() ? kFirefoxDefaultSocksPort : 1819;
     }
@@ -294,11 +440,58 @@ struct AppState {
         FcaeConfig c;
         fcae_config_default(&c);
 
-        c.backend          = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+        // The saved core configs, as the one document the engine validates.
+        // Positions are fixed for the whole call, which is what the "#N"
+        // references below rely on.
+        build_core_library();
+        c.core.library    = core_library_built.empty() ? nullptr : core_library_built.c_str();
+        // A core backend with nothing to run is a start that fails, so a config
+        // the engine was not sent (a draft, or one that vanished) degrades to the
+        // default transport instead of refusing the session.
+        const int main_doc = core_doc_index(kCoreTransportBase + core_selected);
+        if (backend >= 3 && main_doc < 0) {
+            add_log(2, "[ui] the selected saved config is not usable; starting the default transport");
+        }
+        core_ref_built.clear();
+        if (main_doc >= 0) {
+            core_ref_built = "#" + std::to_string(main_doc);
+            c.core.config_ref = core_ref_built.c_str();
+        }
+
+        // A saved config decides its own core, and its profile is the route.
+        if (main_doc >= 0 && backend == 3)      c.backend = FCAE_BACKEND_XRAY;
+        else if (main_doc >= 0 && backend == 4) c.backend = FCAE_BACKEND_SINGBOX;
+        else if (backend >= 3)                  c.backend = FCAE_BACKEND_AETHER;
+        else c.backend = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+
         const bool explicit_chain = !chain_transports.empty();
+        // A saved-config hop is referenced rather than encoded, so its
+        // references are built first and pointed at second: the hop list stays
+        // in carrier-to-exit order, in one pass. A position whose config is not
+        // in the document is dropped — the engine resolves every reference
+        // before it starts anything, so a dangling one refuses the whole
+        // session, and re-pointing the hop would route through a config the
+        // user did not pick.
+        chain_core_refs_built.clear();
+        for (int transport : chain_transports) {
+            const int doc = core_doc_index(transport);
+            if (doc >= 0) chain_core_refs_built.push_back("#" + std::to_string(doc));
+        }
+        size_t core_ref = 0;
         chain_hops_built.clear();
         chain_hops_built.reserve(chain_transports.size() + (!explicit_chain && backend != 1 && tor_mode == 3 ? 1 : 0));
         for (int transport : chain_transports) {
+            if (core_doc_index(transport) >= 0) {
+                FcaeChainHop core_hop{};
+                // The referenced entry decides the backend and the profile, so
+                // the fallback here stays neutral instead of claiming a core.
+                core_hop.backend = FCAE_BACKEND_AETHER;
+                core_hop.protocol = FCAE_PROTOCOL_AUTO;
+                core_hop.config_ref = chain_core_refs_built[core_ref++].c_str();
+                chain_hops_built.push_back(core_hop);
+                continue;
+            }
+            if (transport >= kCoreTransportBase) continue;
             FcaeChainHop hop{};
             hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : FCAE_BACKEND_AETHER;
             hop.h2_enabled = transport == 1 || transport == 7 || transport == 9;
@@ -314,11 +507,17 @@ struct AppState {
             chain_hops_built.push_back(hop);
         }
         if (!explicit_chain && backend != 1 && tor_mode == 3) {
-            chain_hops_built.push_back({FCAE_BACKEND_PSIPHON, FCAE_PROTOCOL_AUTO, false});
+            FcaeChainHop psiphon{};
+            psiphon.backend = FCAE_BACKEND_PSIPHON;
+            psiphon.protocol = FCAE_PROTOCOL_AUTO;
+            chain_hops_built.push_back(psiphon);
         }
         c.chain.hops = chain_hops_built.data();
         c.chain.hop_count = (uint32_t)chain_hops_built.size();
-        c.protocol         = (protocol >= 0 && protocol <= 6) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
+        // A saved config has no transport dimension of its own: the profile
+        // carries it, and a stale protocol id must not be layered on top.
+        c.protocol         = (main_doc >= 0 || backend >= 3) ? FCAE_PROTOCOL_AUTO
+                           : (protocol >= 0 && protocol <= 6) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
         // Mode is shared by every protocol/backend: once the UI selects TUN,
         // never let a Psiphon/Tor mapping silently turn it back into Proxy.
         c.mode             = mode == 1 ? FCAE_MODE_TUN : FCAE_MODE_PROXY;
