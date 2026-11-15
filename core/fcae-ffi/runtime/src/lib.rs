@@ -15,6 +15,8 @@
 //! * [`update`] — app-level update checking: release manifest fetch, decode, compare.
 //! * [`upstream`] — the user's upstream proxy and its loopback SOCKS5 relay.
 //! * [`wintun`] — the single embedded copy of `wintun.dll` the Windows TUN bridges drop on disk.
+//! * [`cronet`] — the embedded `libcronet.dll` sing-box's naive outbound loads,
+//!   and the `PATH` entry that makes it findable.
 //! * [`exit_adapter`] — the shared Psiphon loopback socks5p adapter the TUN
 //!   bridges dial instead of the raw exit endpoint.
 //! * [`privilege`] — the single admin/root probe behind `fcae_is_privileged()`.
@@ -26,6 +28,7 @@
 
 pub mod backend;
 pub mod config;
+pub mod cronet;
 pub mod sing_xray;
 pub mod deps;
 pub mod error;

@@ -9,6 +9,7 @@
 //! calls. Nothing in this crate has dependencies, so it never bloats build
 //! time.
 
+pub mod cronet;
 pub mod go;
 pub mod header;
 pub mod target;

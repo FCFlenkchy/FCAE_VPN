@@ -142,17 +142,17 @@ fn main() {
             ]
             .map(str::to_string),
         );
-        // cronet is consumed through its C ABI, and `with_purego` is what makes
-        // that binding call it at run time instead of linking it: cronet-go's
-        // cgo files then contribute no LDFLAGS, so Chromium's objects stay out
-        // of libfcae_ffi.a and out of the frontend link — the app loads
-        // libcronet.so/.dylib/.dll from its own directory instead (see the
-        // cronet notes in CMakeLists.txt). It is also the only way the naive
-        // outbound exists on Windows, whose half of the package is gated on
-        // `with_purego` alone. Android is the exception: its Go archive is a
-        // c-shared library that already carries cgo, so cronet's objects are
-        // part of the .so Android loads.
-        if !target.is_android() {
+        // `with_purego` is what makes cronet-go call cronet through its C ABI at
+        // run time instead of linking it: its cgo files then contribute no
+        // LDFLAGS, so Chromium's objects stay out of libfcae_ffi.a and out of
+        // the frontend link, and the app loads libcronet.dylib from beside
+        // itself (see the cronet notes in CMakeLists.txt). Windows has always
+        // built that way -- its half of the package is gated on this tag alone
+        // -- and macOS needs it because cronet's fourth exception personality
+        // routine does not fit a Mach-O image. Linux wants cronet in the one
+        // file it ships, so there it stays linked, as does Android, whose Go
+        // archive is a c-shared library that already carries cgo.
+        if target.is_windows() || target.is_apple() {
             archive.tags.push("with_purego".into());
         }
     }

@@ -1001,7 +1001,13 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     // a second or two, so it runs on the blocking pool: a long Go call must not
     // stall a Tokio worker the rest of the session shares.
     let ffi = D::FFI;
-    let started = tokio::task::spawn_blocking(move || call_start(ffi, body))
+    let started = tokio::task::spawn_blocking(move || {
+        // Unpacks the embedded cronet DLL where sing-box's loader can find it,
+        // if this build embedded one. It has to happen before the core starts:
+        // the Go side caches its first load attempt, failures included.
+        crate::cronet::prepare();
+        call_start(ffi, body)
+    })
         .await
         .map_err(|error| {
             CoreError::Internal(format!("the {} start task failed: {error}", D::DISPLAY))
