@@ -704,10 +704,14 @@ async fn run_session(
             debug_assert!(!tun_bridge.is_running(), "proxy mode must never leave a TUN device up");
         }
 
-        // Publish the already-measured Firefox CONNECT before Connected so
-        // the first UI snapshot does not need to wait for the counter pump.
+        // Publish the already-measured latency before Connected so the first UI
+        // snapshot carries it instead of a blank that fills a tick later. A
+        // saved Xray or sing-box config reaches this point with its round trip
+        // already measured — its start does not return until one has come back
+        // through the tunnel — and the Firefox bridge measures its CONNECT while
+        // it dials.
         let chained = !config.chain.is_empty();
-        if config.exit_backend() == FcaeBackend::Firefox {
+        if exit_measures_rtt(config.exit_backend()) {
             let mut counters = handles[0].counters();
             if chained {
                 counters.rtt_ms = handles.last().map_or(0, |exit| exit.counters().rtt_ms);

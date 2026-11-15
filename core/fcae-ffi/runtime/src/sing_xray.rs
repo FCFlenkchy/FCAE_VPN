@@ -2184,6 +2184,7 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     let rtt_probe = RttProbe::plan(profile, config.upstream_proxy.clone(), &endpoints);
     let running = Running {
         ffi,
+        display: D::DISPLAY,
         endpoints,
         stopping: AtomicBool::new(false),
         traffic: Mutex::new(Traffic::default()),
@@ -2191,11 +2192,23 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
         rtt_stop: Arc::new(AtomicBool::new(false)),
         rtt_probe,
     };
-    // The measurement starts with the core, not with the first telemetry read:
-    // a session shows its latency as soon as it is up, the way the Firefox
-    // bridge records one on its first tunnel open.
-    running.spawn_rtt();
+    // Readiness first: the probe asks the core's own listener for the round
+    // trip, and a session that never became ready has nothing to measure and no
+    // thread to retire.
     running.await_ready().await?;
+    // Then the tunnel itself. The listener answering says the core is up, not
+    // that it carries anything, so the session keeps saying "connecting" until
+    // one real answer has come back through it — the state the UI paints green
+    // means what it says.
+    cx.report(
+        FcaeState::Connecting,
+        format!("Verifying the {} tunnel…", D::DISPLAY),
+    );
+    if let Err(error) = running.spawn_rtt() {
+        halt(running.ffi).await;
+        return Err(error);
+    }
+    running.await_tunnel().await?;
     Ok(running)
 }
 
@@ -2233,6 +2246,9 @@ async fn halt(ffi: CoreFfi) {
 /// is, because it is the only one that can report a timeout.
 pub struct Running {
     ffi: CoreFfi,
+    /// What this core calls itself in the text a user reads. `Running` is not
+    /// generic over the dialect, and the messages below are shared by both.
+    display: &'static str,
     endpoints: Endpoints,
     stopping: AtomicBool,
     /// Sample bookkeeping behind [`BackendHandle::counters`].
@@ -2312,21 +2328,71 @@ impl Running {
     /// The loop is the handle's own: it wakes every [`POLL`] to watch the stop
     /// flag, so a session that goes down retires it in a quarter second instead
     /// of leaving a thread behind for the life of the process.
-    fn spawn_rtt(&self) {
-        let Some(probe) = self.rtt_probe.clone() else { return };
+    fn spawn_rtt(&self) -> CoreResult<()> {
+        let Some(probe) = self.rtt_probe.clone() else {
+            return Ok(());
+        };
         let rtt_ms = Arc::clone(&self.rtt_ms);
         let stop = Arc::clone(&self.rtt_stop);
-        let spawned = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("fcae-core-rtt".into())
-            .spawn(move || measure_until_known(&probe, &rtt_ms, &stop));
-        if spawned.is_err() {
-            log::warn!("[core] could not start the latency measurement thread");
+            .spawn(move || measure_until_known(&probe, &rtt_ms, &stop))
+            .map(drop)
+            .map_err(|error| {
+                CoreError::StartFailed(format!(
+                    "cannot start the latency measurement for {}: {error}",
+                    self.display
+                ))
+            })
+    }
+
+    /// Wait for the first round trip through the tunnel.
+    ///
+    /// The core answers on its listener well before its tunnel has carried
+    /// anything — a config with the wrong credentials starts exactly like a
+    /// working one — so this is where a session is told apart from a core that
+    /// is merely running. A session that gets no answer inside
+    /// [`TUNNEL_VERIFY_TIMEOUT`] is refused here instead of being published as
+    /// connected and left to fail on the user's first request.
+    async fn await_tunnel(&self) -> CoreResult<()> {
+        let Some(probe) = self.rtt_probe.as_ref() else {
+            // Nothing is measurable, so nothing can be verified: failing a
+            // session over a check this app never promised to make would refuse
+            // a config that may well work.
+            return Ok(());
+        };
+        let deadline = tokio::time::Instant::now() + TUNNEL_VERIFY_TIMEOUT;
+        loop {
+            if self.rtt_ms.load(Ordering::Acquire) != 0 {
+                return Ok(());
+            }
+            if !self.alive() {
+                halt(self.ffi).await;
+                return Err(CoreError::StartFailed(format!(
+                    "{} exited before its tunnel carried anything",
+                    self.display
+                )));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                halt(self.ffi).await;
+                let through = probe
+                    .listener()
+                    .map(|listener| format!(" through {listener}"))
+                    .unwrap_or_default();
+                return Err(CoreError::StartFailed(format!(
+                    "the {} tunnel carried nothing: no answer came back{through} within {}s",
+                    self.display,
+                    TUNNEL_VERIFY_TIMEOUT.as_secs()
+                )));
+            }
+            tokio::time::sleep(POLL).await;
         }
     }
 }
 
 /// Measure the session's latency until one lands, then stop.
 fn measure_until_known(probe: &RttProbe, rtt_ms: &AtomicU32, stop: &AtomicBool) {
+    let mut failed: u32 = 0;
     loop {
         if stop.load(Ordering::Acquire) || rtt_ms.load(Ordering::Acquire) != 0 {
             return;
@@ -2338,16 +2404,17 @@ fn measure_until_known(probe: &RttProbe, rtt_ms: &AtomicU32, stop: &AtomicBool) 
             let _ = rtt_ms.compare_exchange(0, measured, Ordering::AcqRel, Ordering::Acquire);
             return;
         }
-        if !sleep_until_next_tick(stop, rtt_ms) {
+        failed = failed.saturating_add(1);
+        if !sleep_until_next_tick(stop, rtt_ms, retry_delay(failed)) {
             return;
         }
     }
 }
 
-/// Wait out one [`RTT_INTERVAL`], waking every [`POLL`] so the session's stop is
-/// honored promptly. False when the caller should give up.
-fn sleep_until_next_tick(stop: &AtomicBool, rtt_ms: &AtomicU32) -> bool {
-    let mut left = RTT_INTERVAL;
+/// Wait out `wait`, waking every [`POLL`] so the session's stop is honored
+/// promptly. False when the caller should give up.
+fn sleep_until_next_tick(stop: &AtomicBool, rtt_ms: &AtomicU32, wait: Duration) -> bool {
+    let mut left = wait;
     while !left.is_zero() {
         // Checked before the step as well as after it, so a session that is
         // already down costs no nap at all.
@@ -2361,15 +2428,40 @@ fn sleep_until_next_tick(stop: &AtomicBool, rtt_ms: &AtomicU32) -> bool {
     true
 }
 
-/// How often a session without a latency sample tries again: the same five
-/// seconds the Firefox transport waits between its keepalive pings.
+/// The Firefox transport's keepalive period, which is what a session falls back
+/// to once its first few measurements have already failed.
 const RTT_INTERVAL: Duration = Duration::from_secs(5);
 
-/// What the through-the-tunnel probe fetches: an empty 204 on a host that
-/// answers everywhere, so the measurement is of the route, not of the target.
-const RTT_HOST: &str = "www.gstatic.com";
+/// How long a session gets to prove it carries traffic, counted from the moment
+/// its core answers on its listener. Only the far side is being waited for: one
+/// request has to come back through the tunnel in this window.
+const TUNNEL_VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What the through-the-tunnel probe fetches, in the order it tries them: an
+/// empty answer that a captive network cannot fake and that is cheap to serve,
+/// so what is measured is the route and not the target. More than one entry
+/// because a single host may be blocked in the network the tunnel runs in, and
+/// a blocked target is not a broken tunnel.
+const RTT_TARGETS: [(&str, &str); 3] = [
+    ("www.gstatic.com", "/generate_204"),
+    ("cp.cloudflare.com", "/generate_204"),
+    ("connectivitycheck.gstatic.com", "/generate_204"),
+];
 const RTT_PORT: u16 = 80;
-const RTT_PATH: &str = "/generate_204";
+
+/// Delay before the next measurement, by how many have already failed.
+///
+/// The first attempts are close together because a session is usually still
+/// settling when its start hands over — waiting the full keepalive period there
+/// would charge a warming tunnel five seconds it does not need. After that the
+/// spacing is the Firefox transport's own five seconds.
+fn retry_delay(failed: u32) -> Duration {
+    match failed {
+        0 | 1 => Duration::from_secs(1),
+        2 => Duration::from_secs(2),
+        _ => RTT_INTERVAL,
+    }
+}
 
 /// How long a handshake may take: the SYN, or the CONNECT a fronting hop has to
 /// dial and answer. It is a network round trip over a mobile link, not the
@@ -2395,7 +2487,7 @@ struct RttTarget {
 
 impl RttTarget {
     /// The remote to handshake with, or `None` when no TCP handshake can reach
-    /// this outbound — the case [`RttProbe::Through`] covers.
+    /// this outbound — the case [`RttSample::Through`] covers.
     ///
     /// mKCP rides UDP, and hysteria2 and tuic are QUIC end to end, so a SYN to
     /// their server says nothing about the path the tunnel takes. A native
@@ -2411,9 +2503,17 @@ impl RttTarget {
     }
 }
 
-/// How a session measures its latency, decided once when it starts.
+/// A session's own listener, which is where the tunnel can be exercised from
+/// inside: what it answers there travelled the whole path and came back.
+#[derive(Clone, Copy)]
+struct Through {
+    listener: SocketAddr,
+    socks: bool,
+}
+
+/// The measurement that becomes the number.
 #[derive(Clone)]
-enum RttProbe {
+enum RttSample {
     /// Time the handshake the session's last leg makes with the server the
     /// config names: a SYN when the outbound dials directly, the hop's CONNECT
     /// when it is chained. No application request leaves the host.
@@ -2422,7 +2522,23 @@ enum RttProbe {
     /// outbounds a TCP handshake cannot describe: hysteria2 and tuic are QUIC
     /// end to end, mKCP rides UDP, and a native config has no single remote at
     /// all.
-    Through { listener: SocketAddr, socks: bool },
+    Through(Through),
+}
+
+/// How a session measures its latency, decided once when it starts.
+#[derive(Clone)]
+struct RttProbe {
+    /// What the published number is.
+    sample: RttSample,
+    /// What has to answer through the tunnel before that number is published.
+    ///
+    /// A handshake only proves the far port accepts a connection: a config with
+    /// the wrong password answers it as quickly as a working one, so the number
+    /// would read as a healthy latency for a tunnel that carries nothing. When
+    /// the session opened a listener, one real request has to come back through
+    /// it first, and the handshake is only timed once it has. A `Through`
+    /// sample needs no separate proof — it is that request.
+    verify: Option<Through>,
 }
 
 impl RttProbe {
@@ -2433,30 +2549,57 @@ impl RttProbe {
         upstream: Option<UpstreamProxy>,
         endpoints: &Endpoints,
     ) -> Option<Self> {
-        if let Some(target) = RttTarget::new(profile, upstream) {
-            return Some(Self::Handshake(target));
-        }
         // SOCKS5 first: TUN mode always has one, so it is the listener a
         // session is most likely to answer on.
-        if let Some(socks) = endpoints.socks {
-            return Some(Self::Through { listener: socks, socks: true });
+        let through = endpoints
+            .socks
+            .map(|listener| Through { listener, socks: true })
+            .or_else(|| {
+                endpoints
+                    .http
+                    .map(|listener| Through { listener, socks: false })
+            });
+        if let Some(target) = RttTarget::new(profile, upstream) {
+            return Some(Self {
+                sample: RttSample::Handshake(target),
+                verify: through,
+            });
         }
-        endpoints.http.map(|http| Self::Through { listener: http, socks: false })
+        // No TCP handshake describes this outbound, so the round trip through
+        // the listener is the measurement itself; without a listener there is
+        // nothing to measure and nothing is invented.
+        let through = through?;
+        Some(Self {
+            sample: RttSample::Through(through),
+            verify: None,
+        })
     }
 
     /// One measurement, in milliseconds.
     fn measure(&self) -> Option<u32> {
-        match self {
-            Self::Handshake(target) => handshake(target),
-            Self::Through { listener, socks } => through_tunnel(*listener, *socks),
+        if let Some(verify) = &self.verify {
+            tunnel_reaches(verify)?;
+        }
+        match &self.sample {
+            RttSample::Handshake(target) => handshake(target),
+            RttSample::Through(through) => through_tunnel(through),
+        }
+    }
+
+    /// The listener the proof goes through, when there is one.
+    fn listener(&self) -> Option<SocketAddr> {
+        match (&self.sample, &self.verify) {
+            (RttSample::Through(through), _) => Some(through.listener),
+            (RttSample::Handshake(_), verify) => verify.as_ref().map(|through| through.listener),
         }
     }
 
     /// What a log line calls this measurement.
     fn label(&self) -> &'static str {
-        match self {
-            Self::Handshake(_) => "handshake with the server",
-            Self::Through { .. } => "request through the tunnel",
+        match (&self.sample, self.verify.is_some()) {
+            (RttSample::Handshake(_), true) => "handshake with the server, proven end to end",
+            (RttSample::Handshake(_), false) => "handshake with the server",
+            (RttSample::Through(_), _) => "request through the tunnel",
         }
     }
 }
@@ -2521,40 +2664,38 @@ fn handshake_via(proxy: &UpstreamProxy, target: &RttTarget) -> Option<u32> {
     Some(millis_ceil(started.elapsed()))
 }
 
-/// Time a request answered through the core's own listener.
+/// Open one session to `host` through the core's own listener.
 ///
-/// The proxy's acknowledgement is not the measurement, for the same reason the
+/// The proxy's acknowledgement is not a measurement, for the same reason the
 /// handshake exists at all: Xray-core answers a SOCKS5 CONNECT as soon as it has
-/// parsed the request, before it has dialled anything, so timing the
-/// acknowledgement reads a loopback round trip. The probe asks twice — the first
-/// request is what makes the tunnel real, the second rides the connection it
-/// opened — and keeps the warm window.
-fn through_tunnel(listener: SocketAddr, socks: bool) -> Option<u32> {
+/// parsed the request, before it has dialled anything, so the acknowledgement
+/// only proves a loopback round trip.
+fn connect_through(through: &Through, host: &str) -> Option<std::net::TcpStream> {
     use std::io::{Read, Write};
 
-    let mut stream = std::net::TcpStream::connect_timeout(&listener, PROBE_TIMEOUT).ok()?;
+    let mut stream = std::net::TcpStream::connect_timeout(&through.listener, PROBE_TIMEOUT).ok()?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
     // The request is one short write; Nagle would fold it into a delayed ACK and
     // charge the measurement for it.
     let _ = stream.set_nodelay(true);
 
-    if socks {
+    if through.socks {
         stream.write_all(&[0x05, 0x01, 0x00]).ok()?;
         let mut choice = [0u8; 2];
         stream.read_exact(&mut choice).ok()?;
         if choice != [0x05, 0x00] {
             return None;
         }
-        let host = RTT_HOST.as_bytes();
-        let mut request = Vec::with_capacity(7 + host.len());
-        request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host.len() as u8]);
-        request.extend_from_slice(host);
+        let name = host.as_bytes();
+        let mut request = Vec::with_capacity(7 + name.len());
+        request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, name.len() as u8]);
+        request.extend_from_slice(name);
         request.extend_from_slice(&RTT_PORT.to_be_bytes());
         stream.write_all(&request).ok()?;
         socks_reply(&mut stream)?;
     } else {
-        let authority = format!("{RTT_HOST}:{RTT_PORT}");
+        let authority = format!("{host}:{RTT_PORT}");
         let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
         stream.write_all(request.as_bytes()).ok()?;
         let mut status = [0u8; 12];
@@ -2566,18 +2707,35 @@ fn through_tunnel(listener: SocketAddr, socks: bool) -> Option<u32> {
         window.copy_from_slice(&status[8..12]);
         skip_headers(&mut stream, window)?;
     }
+    Some(stream)
+}
 
-    let cold = exchange(&mut stream)?;
-    Some(millis_ceil(exchange(&mut stream).unwrap_or(cold)))
+/// Whether one real request comes back through the tunnel, with no clock.
+fn tunnel_reaches(through: &Through) -> Option<()> {
+    RTT_TARGETS.iter().find_map(|&(host, path)| {
+        let mut stream = connect_through(through, host)?;
+        exchange(&mut stream, host, path).map(|_| ())
+    })
+}
+
+/// Time a request answered through the core's own listener, in milliseconds.
+fn through_tunnel(through: &Through) -> Option<u32> {
+    RTT_TARGETS.iter().find_map(|&(host, path)| {
+        let mut stream = connect_through(through, host)?;
+        let cold = exchange(&mut stream, host, path)?;
+        // The second request rides the connection the first one opened, so the
+        // window is the round trip itself and not the tunnel's handshake.
+        Some(millis_ceil(exchange(&mut stream, host, path).unwrap_or(cold)))
+    })
 }
 
 /// Send one probe request and time it to the first byte of the answer, then read
 /// to the end of that answer's header block so the connection can carry the next
 /// one.
-fn exchange(stream: &mut std::net::TcpStream) -> Option<Duration> {
+fn exchange(stream: &mut std::net::TcpStream, host: &str, path: &str) -> Option<Duration> {
     use std::io::{Read, Write};
 
-    let request = format!("GET {RTT_PATH} HTTP/1.1\r\nHost: {RTT_HOST}\r\n\r\n");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n");
     let started = Instant::now();
     stream.write_all(request.as_bytes()).ok()?;
     let mut first = [0u8; 1];
@@ -3965,9 +4123,16 @@ mod tests {
         };
         let profile = CoreProfile::parse("hysteria2://pass@example.com:443#q").expect("parses");
         match RttProbe::plan(&profile, None, &endpoints) {
-            Some(RttProbe::Through { listener: planned, socks }) => {
-                assert_eq!(planned, listener);
-                assert!(socks);
+            Some(probe) => {
+                let RttSample::Through(through) = probe.sample else {
+                    panic!("a QUIC outbound must be measured through the tunnel");
+                };
+                assert_eq!(through.listener, listener);
+                assert!(through.socks);
+                // The round trip is the measurement, so there is nothing extra
+                // to prove.
+                assert!(probe.verify.is_none());
+                assert_eq!(probe.listener(), Some(listener));
             }
             _ => panic!("a QUIC outbound must be measured through the tunnel"),
         }
@@ -3986,8 +4151,8 @@ mod tests {
         )
         .expect("parses");
         assert!(matches!(
-            RttProbe::plan(&native, None, &endpoints),
-            Some(RttProbe::Through { .. })
+            RttProbe::plan(&native, None, &endpoints).map(|probe| probe.sample),
+            Some(RttSample::Through(_))
         ));
     }
 
@@ -4023,8 +4188,96 @@ mod tests {
                 stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").expect("answer");
             }
         });
-        let measured = through_tunnel(listener, true).expect("measured");
+        let through = Through {
+            listener,
+            socks: true,
+        };
+        let measured = through_tunnel(&through).expect("measured");
         assert!(measured < 100, "the warm request was {measured}ms");
+    }
+
+    #[test]
+    fn a_tcp_outbound_has_to_prove_the_tunnel_before_its_handshake_is_published() {
+        let listener = std::net::SocketAddr::from(([127, 0, 0, 1], 1080));
+        let endpoints = Endpoints {
+            socks: Some(listener),
+            http: None,
+            peer_ip: None,
+            udp: true,
+            psiphon_dns: false,
+        };
+        let profile =
+            CoreProfile::parse(&format!("vless://{UUID}@example.com:443#tcp")).expect("parses");
+        match RttProbe::plan(&profile, None, &endpoints) {
+            Some(probe) => {
+                assert!(matches!(probe.sample, RttSample::Handshake(_)));
+                let through = probe.verify.expect("the handshake is proven first");
+                assert_eq!(through.listener, listener);
+                assert!(through.socks);
+                assert_eq!(probe.listener(), Some(listener));
+            }
+            None => panic!("a TCP outbound times its handshake, proven through the listener"),
+        }
+        // No listener means nothing to prove through: the plan stays the bare
+        // handshake rather than claiming a proof it cannot make.
+        let bare = Endpoints {
+            socks: None,
+            http: None,
+            peer_ip: None,
+            udp: true,
+            psiphon_dns: false,
+        };
+        match RttProbe::plan(&profile, None, &bare) {
+            Some(probe) => {
+                assert!(matches!(probe.sample, RttSample::Handshake(_)));
+                assert!(probe.verify.is_none());
+                // Nothing could be verified, so nothing is named in a refusal.
+                assert_eq!(probe.listener(), None);
+            }
+            None => panic!("without a listener the handshake stands alone"),
+        }
+    }
+
+    #[test]
+    fn a_tunnel_that_carries_nothing_yields_no_measurement() {
+        // The listener accepts the greeting and the CONNECT — as Xray does
+        // before it has dialled anything — and then has nothing to answer with.
+        let dead = serve(|mut stream| {
+            let mut greeting = [0u8; 3];
+            let _ = stream.read_exact(&mut greeting);
+            let _ = stream.write_all(&[0x05, 0x00]);
+            let mut head = [0u8; 5];
+            if stream.read_exact(&mut head).is_ok() {
+                let mut rest = vec![0u8; head[4] as usize + 2];
+                let _ = stream.read_exact(&mut rest);
+                let _ = stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+            }
+            // Closing without an answer is what a refused dial looks like here.
+        });
+        let through = Through {
+            listener: dead,
+            socks: true,
+        };
+        assert_eq!(tunnel_reaches(&through), None);
+        assert_eq!(through_tunnel(&through), None);
+    }
+
+    #[test]
+    fn a_failed_measurement_retries_sooner_at_first() {
+        // A session is usually still settling when its start hands over, so the
+        // first retries are close together; after that it is the keepalive tick.
+        assert_eq!(retry_delay(1), Duration::from_secs(1));
+        assert_eq!(retry_delay(2), Duration::from_secs(2));
+        assert_eq!(retry_delay(3), RTT_INTERVAL);
+        assert_eq!(retry_delay(60), RTT_INTERVAL);
+        // A wait that is already satisfied, or whose session is gone, costs no
+        // nap at all.
+        let stopped = AtomicBool::new(true);
+        let unknown = AtomicU32::new(0);
+        assert!(!sleep_until_next_tick(&stopped, &unknown, RTT_INTERVAL));
+        let running = AtomicBool::new(false);
+        let known = AtomicU32::new(20);
+        assert!(!sleep_until_next_tick(&running, &known, RTT_INTERVAL));
     }
 
     #[test]
