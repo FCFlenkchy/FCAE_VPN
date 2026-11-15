@@ -1025,7 +1025,9 @@ impl Query {
             if end < start {
                 return Err(format!("port range {item:?} runs backwards"));
             }
-            total = total.saturating_add(end - start + 1);
+            // Summed in the accumulator's own width: one range is at most a
+            // u16's worth of ports, but the limit is on the sum.
+            total = total.saturating_add(u32::from(end) - u32::from(start) + 1);
             ranges.push(format!("{start}:{end}"));
         }
         if total > MAX_HOP_PORTS {
