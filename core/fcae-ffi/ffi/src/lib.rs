@@ -1244,7 +1244,7 @@ pub unsafe extern "C" fn fcae_core_check_profile(
         let text = text.ok_or_else(|| "the config is not valid UTF-8".to_string())?;
         // The library's own check, so what the editor accepts and what the
         // session later loads can never disagree.
-        fcae_runtime::core_library::check_config(backend, text)?;
+        fcae_runtime::saved_configs::check_config(backend, text)?;
         Ok(String::new())
     });
     if !out.is_null() && cap > 0 {

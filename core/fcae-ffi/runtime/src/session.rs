@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn routing_label_uses_the_names_the_user_gave_saved_configs() {
-        let entry = |name: &str, backend: FcaeBackend| crate::core_library::CoreEntry {
+        let entry = |name: &str, backend: FcaeBackend| crate::saved_configs::SavedConfig {
             name: name.into(),
             backend,
             profile: crate::sing_xray::CoreProfile::parse("socks5://127.0.0.1:1080").unwrap(),

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use fcae_abi::*;
 
-use crate::core_library::{CoreEntry, CoreLibrary};
+use crate::saved_configs::{SavedConfig, SavedConfigs};
 use crate::sing_xray::CoreProfile;
 use crate::error::{CoreError, Result};
 use crate::upstream::UpstreamProxy;
@@ -183,9 +183,9 @@ pub struct CoreConfig {
     pub log_level: FcaeEngineLog,
     /// The user's saved configs. A route names one of these by position or
     /// name; nothing else can introduce a profile.
-    pub library: CoreLibrary,
+    pub library: SavedConfigs,
     /// The saved config the main backend runs, when it runs one.
-    pub selection: Option<CoreEntry>,
+    pub selection: Option<SavedConfig>,
 }
 
 impl Default for CoreConfig {
@@ -193,7 +193,7 @@ impl Default for CoreConfig {
         Self {
             profile: None,
             log_level: FcaeEngineLog::Info,
-            library: CoreLibrary::default(),
+            library: SavedConfigs::default(),
             selection: None,
         }
     }
@@ -366,10 +366,10 @@ pub struct ChainHop {
     pub backend: FcaeBackend,
     pub protocol: FcaeProtocol,
     pub h2_enabled: bool,
-    /// The saved config this hop runs, resolved from the library. A core hop
+    /// The saved config this hop runs, resolved from the list. A core hop
     /// without one falls back to the session's `core.profile`, which is what a
     /// pre-library caller (ABI v24) necessarily meant.
-    pub core: Option<CoreEntry>,
+    pub core: Option<SavedConfig>,
 }
 
 impl ChainHop {
@@ -681,29 +681,29 @@ unsafe fn parse_aether(raw: &FcaeAether) -> Result<AetherOptions> {
 /// Parse the saved configs a session may point at, and resolve the one the main
 /// backend runs.
 ///
-/// The library is parsed before anything else can use it: a malformed document
+/// The list is parsed before anything else can use it: a malformed document
 /// or a dangling reference is worth reporting even on a route that never dials
 /// a core, because the editor that wrote it will write it again.
 ///
 /// # Safety
 /// `raw` must be a valid `FcaeCore` whose string fields are NULL or valid
 /// NUL-terminated strings that outlive this call.
-unsafe fn parse_core_library(raw: &FcaeCore) -> Result<(CoreLibrary, Option<CoreEntry>)> {
-    let library = match cstr_opt(raw.library) {
-        Some(text) => CoreLibrary::parse(&text)
+unsafe fn parse_saved_configs(raw: &FcaeCore) -> Result<(SavedConfigs, Option<SavedConfig>)> {
+    let saved = match cstr_opt(raw.library) {
+        Some(text) => SavedConfigs::parse(&text)
             .map_err(|error| CoreError::InvalidConfig(format!("core.library: {error}")))?,
-        None => CoreLibrary::default(),
+        None => SavedConfigs::default(),
     };
     let selection = match cstr_opt(raw.config_ref) {
         Some(reference) => {
-            let entry = library
+            let entry = saved
                 .resolve(&reference)
                 .map_err(|error| CoreError::InvalidConfig(format!("core.config_ref: {error}")))?;
             Some(entry.clone())
         }
         None => None,
     };
-    Ok((library, selection))
+    Ok((saved, selection))
 }
 
 /// Parse and validate the external-core options.
@@ -714,14 +714,14 @@ unsafe fn parse_core_library(raw: &FcaeCore) -> Result<(CoreLibrary, Option<Core
 unsafe fn parse_core(
     raw: &FcaeCore,
     required: bool,
-    library: CoreLibrary,
-    selection: Option<CoreEntry>,
+    saved: SavedConfigs,
+    selection: Option<SavedConfig>,
 ) -> Result<CoreConfig> {
     let log_level = FcaeEngineLog::try_from(raw.log_level as u32).map_err(|_| {
         CoreError::InvalidConfig(format!("core.log_level={} is invalid", raw.log_level as u32))
     })?;
 
-    // A selected saved config is the profile: it was validated when the library
+    // A selected saved config is the profile: it was validated when the list
     // was parsed, and it is the entry the user picked out of the protocol list.
     let mut profile = selection.as_ref().map(|entry| entry.profile.clone());
     if profile.is_none() {
@@ -753,7 +753,7 @@ unsafe fn parse_core(
     Ok(CoreConfig {
         profile,
         log_level,
-        library,
+        library: saved,
         selection,
     })
 }
@@ -818,7 +818,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // backend for every check below: it is the only thing that knows whether it
     // is an Xray or a sing-box profile, and a UI that sends both a config
     // reference and a stale backend id must not end up running the wrong core.
-    let (library, main_core) = parse_core_library(&raw.core)?;
+    let (saved, main_core) = parse_saved_configs(&raw.core)?;
     let (backend, protocol) = match &main_core {
         Some(entry) => (entry.backend, FcaeProtocol::Auto),
         None => (backend, protocol),
@@ -1004,7 +1004,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
                 .map_err(|_| CoreError::InvalidConfig("chain contains an unknown protocol".into()))?;
             let mut hop = ChainHop::new(backend, protocol, exit.h2_enabled);
             if let Some(reference) = cstr_opt(exit.config_ref) {
-                let entry = library.resolve(&reference).map_err(|error| {
+                let entry = saved.resolve(&reference).map_err(|error| {
                     CoreError::InvalidConfig(format!("chain hop {}: {error}", index + 1))
                 })?;
                 // A saved config knows which core reads it and has no protocol
@@ -1084,7 +1084,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             .chain
             .iter()
             .any(|hop| is_core_backend(hop.backend) && hop.core.is_none());
-    cfg.core = parse_core(&raw.core, core_in_path, library, main_core)?;
+    cfg.core = parse_core(&raw.core, core_in_path, saved, main_core)?;
 
     // Tor
     let t = &raw.tor;
@@ -1911,7 +1911,15 @@ mod tests {
         assert_eq!(offset_of!(FcaeConfig, aether), base + 48);
         let proxy = base + 48 + size_of::<FcaeAether>();
         assert_eq!(offset_of!(FcaeConfig, upstream_proxy), proxy);
-        assert_eq!(size_of::<FcaeConfig>(), proxy + size_of::<*const c_char>());
+        // Appended after the proxy, in this order: ABI v13 (firefox), v14
+        // (chain), v24 (core). Each starts where the previous field ends.
+        let firefox = proxy + size_of::<*const c_char>();
+        assert_eq!(offset_of!(FcaeConfig, firefox), firefox);
+        let chain = firefox + size_of::<FcaeFirefox>();
+        assert_eq!(offset_of!(FcaeConfig, chain), chain);
+        let core = chain + size_of::<FcaeChain>();
+        assert_eq!(offset_of!(FcaeConfig, core), core);
+        assert_eq!(size_of::<FcaeConfig>(), core + size_of::<FcaeCore>());
     }
 
     #[test]

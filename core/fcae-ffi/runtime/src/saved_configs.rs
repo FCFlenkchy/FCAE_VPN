@@ -3,12 +3,12 @@
 //! Both cores are built in and driven in-process, so a "config" here is the
 //! profile the bridge turns into the core's own config: a share link or a
 //! complete native JSON object, tagged with the core that understands it and
-//! named by the user. The library is what the UI's config editor writes and
-//! what the session reads back, so it lives in the runtime rather than in a
-//! bridge: a bridge would have to re-validate what the UI just accepted, and
-//! two validators drift apart.
+//! named by the user. What the UI's config editor writes and the session reads
+//! back is the *list* of them, so this module lives in the runtime rather than
+//! in a bridge: a bridge would have to re-validate what the UI just accepted,
+//! and two validators drift apart.
 //!
-//! A library is one JSON document, which keeps the ABI to a single string:
+//! The list is one JSON document, which keeps the ABI to a single string:
 //!
 //! ```json
 //! [
@@ -19,12 +19,16 @@
 //!
 //! Entries are referenced by position (`"#0"`) or by name, because that is
 //! what the UIs already have: a protocol-list position and a label.
+//!
+//! Parsing a profile and knowing which core reads it is [`crate::sing_xray`]'s
+//! job; this module owns the list around those profiles — the limits, the
+//! unique names, and the references that point into it.
 
 use fcae_abi::FcaeBackend;
 use serde_json::Value;
 
 use crate::config::backend_label;
-use crate::sing_xray::CoreProfile;
+use crate::sing_xray::{native_dialect, CoreProfile};
 
 /// Upper bound on saved configs. A menu longer than this is not a menu.
 pub const MAX_ENTRIES: usize = 64;
@@ -34,14 +38,14 @@ pub const MAX_NAME: usize = 48;
 /// certificates stays well below this; anything larger is a file the user
 /// meant to point the core at, which neither core supports here.
 pub const MAX_CONFIG: usize = 128 * 1024;
-/// Largest accepted library document, in bytes. It has to survive a Binder
+/// Largest accepted saved-configs document, in bytes. It has to survive a Binder
 /// transaction on Android, where the whole parcel is ~1 MiB.
 pub const MAX_DOCUMENT: usize = 256 * 1024;
 
 /// One saved config: a name the user picked, the core that reads it, and the
 /// profile itself, already parsed and validated.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CoreEntry {
+pub struct SavedConfig {
     pub name: String,
     pub backend: FcaeBackend,
     pub profile: CoreProfile,
@@ -49,12 +53,12 @@ pub struct CoreEntry {
 
 /// The saved configs, in the order the UI lists them.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct CoreLibrary {
-    entries: Vec<CoreEntry>,
+pub struct SavedConfigs {
+    entries: Vec<SavedConfig>,
 }
 
-impl CoreLibrary {
-    pub fn entries(&self) -> &[CoreEntry] {
+impl SavedConfigs {
+    pub fn entries(&self) -> &[SavedConfig] {
         &self.entries
     }
 
@@ -66,13 +70,13 @@ impl CoreLibrary {
         self.entries.len()
     }
 
-    pub fn get(&self, index: usize) -> Option<&CoreEntry> {
+    pub fn get(&self, index: usize) -> Option<&SavedConfig> {
         self.entries.get(index)
     }
 
-    /// Parse and validate a library document.
+    /// Parse and validate the saved-configs document.
     ///
-    /// An empty or all-whitespace document is an empty library: a session that
+    /// An empty or all-whitespace document is no saved configs: a session that
     /// uses no core must not have to send `[]`, and a UI that has never opened
     /// its config editor must not have to send anything at all.
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -97,7 +101,7 @@ impl CoreLibrary {
                 list.len()
             ));
         }
-        let mut entries: Vec<CoreEntry> = Vec::with_capacity(list.len());
+        let mut entries: Vec<SavedConfig> = Vec::with_capacity(list.len());
         for (index, item) in list.iter().enumerate() {
             let entry =
                 parse_entry(item).map_err(|error| format!("saved config #{}: {error}", index + 1))?;
@@ -125,7 +129,7 @@ impl CoreLibrary {
     /// Accepts `#<index>` (the position in the document, which is what an int
     /// list of protocol positions already carries) or the entry's name,
     /// matched case-insensitively.
-    pub fn resolve(&self, reference: &str) -> Result<&CoreEntry, String> {
+    pub fn resolve(&self, reference: &str) -> Result<&SavedConfig, String> {
         let reference = reference.trim();
         if let Some(index) = reference.strip_prefix('#') {
             let index: usize = index
@@ -158,7 +162,7 @@ impl CoreLibrary {
     }
 }
 
-/// Validate one saved config exactly the way the library does, and return the
+/// Validate one saved config exactly the way the list does, and return the
 /// profile the core will run.
 ///
 /// The config editors reach this through `fcae_core_check_profile`, so the
@@ -176,9 +180,8 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
         ));
     }
     let profile = CoreProfile::parse(text)?;
-    // A native config says which core wrote it: Xray outbounds carry a
-    // "protocol", sing-box outbounds a "type". Storing one under the other tag
-    // is a mistake the core could only report as a parse failure at start.
+    // A native config names its own dialect; storing one under the other tag is
+    // a mistake the core could only report as a parse failure at start.
     if let Some(dialect) = native_dialect(text) {
         if dialect != backend {
             return Err(format!(
@@ -191,7 +194,7 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
     Ok(profile)
 }
 
-fn parse_entry(value: &Value) -> Result<CoreEntry, String> {
+fn parse_entry(value: &Value) -> Result<SavedConfig, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "each saved config must be a JSON object".to_string())?;
@@ -245,32 +248,11 @@ fn parse_entry(value: &Value) -> Result<CoreEntry, String> {
     let profile =
         check_config(backend, &text).map_err(|error| format!("name {name:?}: {error}"))?;
 
-    Ok(CoreEntry {
+    Ok(SavedConfig {
         name: name.to_string(),
         backend,
         profile,
     })
-}
-
-/// The core a native config was written for, when its outbounds make it
-/// unambiguous. Share links are understood by both cores, and an empty or
-/// missing `outbounds` says nothing, so both of those answer `None`.
-fn native_dialect(text: &str) -> Option<FcaeBackend> {
-    let value: Value = serde_json::from_str(text).ok()?;
-    let outbounds = value.get("outbounds")?.as_array()?;
-    let (mut xray, mut sing_box) = (false, false);
-    for outbound in outbounds {
-        let Some(object) = outbound.as_object() else {
-            continue;
-        };
-        xray |= object.contains_key("protocol");
-        sing_box |= object.contains_key("type");
-    }
-    match (xray, sing_box) {
-        (true, false) => Some(FcaeBackend::Xray),
-        (false, true) => Some(FcaeBackend::SingBox),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -278,44 +260,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_documents_are_an_empty_library() {
-        assert!(CoreLibrary::parse("").unwrap().is_empty());
-        assert!(CoreLibrary::parse("  \n\t ").unwrap().is_empty());
+    fn empty_documents_are_no_saved_configs() {
+        assert!(SavedConfigs::parse("").unwrap().is_empty());
+        assert!(SavedConfigs::parse("  \n\t ").unwrap().is_empty());
     }
 
     #[test]
     fn links_and_native_configs_both_parse() {
-        let library = CoreLibrary::parse(
+        let saved = SavedConfigs::parse(
             r##"[
                 {"name": "Home", "backend": "sing-box", "config": "socks5://127.0.0.1:1080"},
                 {"name": "Backup", "backend": "xray", "config": {"outbounds": []}}
             ]"##,
         )
         .unwrap();
-        assert_eq!(library.len(), 2);
-        assert_eq!(library.get(0).unwrap().backend, FcaeBackend::SingBox);
-        assert_eq!(library.get(1).unwrap().backend, FcaeBackend::Xray);
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved.get(0).unwrap().backend, FcaeBackend::SingBox);
+        assert_eq!(saved.get(1).unwrap().backend, FcaeBackend::Xray);
         assert!(matches!(
-            library.get(1).unwrap().profile,
+            saved.get(1).unwrap().profile,
             CoreProfile::Native(_)
         ));
     }
 
     #[test]
     fn references_resolve_by_position_and_by_name() {
-        let library = CoreLibrary::parse(
+        let saved = SavedConfigs::parse(
             r##"[{"name": "Home", "backend": "xray", "config": "socks5://127.0.0.1:1080"}]"##,
         )
         .unwrap();
-        assert_eq!(library.resolve("#0").unwrap().name, "Home");
-        assert_eq!(library.resolve(" home ").unwrap().name, "Home");
-        assert!(library.resolve("#1").is_err());
-        assert!(library.resolve("Work").is_err());
+        assert_eq!(saved.resolve("#0").unwrap().name, "Home");
+        assert_eq!(saved.resolve(" home ").unwrap().name, "Home");
+        assert!(saved.resolve("#1").is_err());
+        assert!(saved.resolve("Work").is_err());
     }
 
     #[test]
     fn duplicate_names_are_rejected() {
-        let error = CoreLibrary::parse(
+        let error = SavedConfigs::parse(
             r##"[
                 {"name": "Home", "backend": "xray", "config": "socks5://127.0.0.1:1080"},
                 {"name": "home", "backend": "sing-box", "config": "socks5://127.0.0.1:1081"}
@@ -327,7 +309,7 @@ mod tests {
 
     #[test]
     fn a_bad_entry_names_itself() {
-        let error = CoreLibrary::parse(
+        let error = SavedConfigs::parse(
             r##"[{"name": "Broken", "backend": "xray", "config": "not a link"}]"##,
         )
         .unwrap_err();
@@ -336,7 +318,7 @@ mod tests {
 
     #[test]
     fn a_native_config_under_the_wrong_tag_is_rejected() {
-        let error = CoreLibrary::parse(
+        let error = SavedConfigs::parse(
             r##"[{"name": "Mine", "backend": "xray", "config":
                 {"outbounds": [{"type": "vmess", "tag": "proxy"}]}}]"##,
         )
@@ -346,7 +328,7 @@ mod tests {
 
     #[test]
     fn unknown_backends_are_rejected() {
-        let error = CoreLibrary::parse(
+        let error = SavedConfigs::parse(
             r##"[{"name": "X", "backend": "v2ray", "config": "socks5://127.0.0.1:1080"}]"##,
         )
         .unwrap_err();

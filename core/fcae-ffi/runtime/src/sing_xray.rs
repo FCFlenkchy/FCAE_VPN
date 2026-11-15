@@ -18,7 +18,9 @@
 //! * [`Plan`] and [`plan_listeners`] — what the session asks of the core,
 //! * [`Rules`] — the app's split-routing rules, validated,
 //! * [`Dialect`] + [`start`] — the only per-core seam: the config dialect and
-//!   the C entry points the core's shim exports from the shared archive.
+//!   the C entry points the core's shim exports from the shared archive,
+//! * [`native_dialect`] — which core a native config was written for, which is
+//!   what [`crate::saved_configs`] tags a saved config with.
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
@@ -29,7 +31,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use fcae_abi::{FcaeEngineLog, FcaeState};
+use fcae_abi::{FcaeBackend, FcaeEngineLog, FcaeState};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -169,6 +171,31 @@ impl CoreProfile {
             CoreProfile::Link(outbound) => Some((outbound.server.as_str(), outbound.port)),
             CoreProfile::Native(_) => None,
         }
+    }
+}
+
+/// The core a native config was written for, when its outbounds make it
+/// unambiguous.
+///
+/// The two dialects differ in one place that matters here: an Xray outbound
+/// carries a `protocol`, a sing-box outbound a `type`. Share links are
+/// understood by both cores, and an empty or missing `outbounds` says nothing,
+/// so both of those answer `None`.
+pub fn native_dialect(text: &str) -> Option<FcaeBackend> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let outbounds = value.get("outbounds")?.as_array()?;
+    let (mut xray, mut sing_box) = (false, false);
+    for outbound in outbounds {
+        let Some(object) = outbound.as_object() else {
+            continue;
+        };
+        xray |= object.contains_key("protocol");
+        sing_box |= object.contains_key("type");
+    }
+    match (xray, sing_box) {
+        (true, false) => Some(FcaeBackend::Xray),
+        (false, true) => Some(FcaeBackend::SingBox),
+        _ => None,
     }
 }
 

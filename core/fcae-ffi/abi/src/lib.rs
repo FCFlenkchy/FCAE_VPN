@@ -24,6 +24,13 @@ pub const FCAE_ABI_VERSION: u32 = 25;
 /// Explicitly allow `http_port` to open an HTTP listener in TUN mode.
 pub const FCAE_CONFIG_TUN_HTTP: u64 = 0x8000_0000_0000_0000;
 
+/// First protocol-list position that names a saved Xray/sing-box config (its
+/// position in [`FcaeCore::library`]) instead of one of the built-in
+/// transports. Below it, positions follow the built-in transport order. Both
+/// UIs and the runtime share this, so a saved config is pickable everywhere a
+/// built-in transport is. ABI v25.
+pub const FCAE_CORE_TRANSPORT_BASE: u32 = 11;
+
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
 pub const FCAE_TUN_ENGINE_TUN2SOCKS: u64 = 0;
@@ -452,12 +459,13 @@ pub struct FcaeCore {
     pub log_level: FcaeEngineLog,
     /// The user's saved configs, as a JSON array of
     /// `{"name": …, "backend": "xray"|"sing-box", "config": …}` objects — the
-    /// shape `fcae-runtime`'s core library parses and validates. ABI v25.
+    /// shape `fcae-runtime`'s `saved_configs` module parses and validates.
+    /// ABI v25.
     ///
     /// The UI owns this document (it is what the "core configs" editor edits);
-    /// the library is the only place a saved config can come from, and its
-    /// positions are what `config_ref` on this struct and on every
-    /// [`FcaeChainHop`] point at.
+    /// it is the only place a saved config can come from, and its positions
+    /// are what `config_ref` on this struct and on every [`FcaeChainHop`]
+    /// point at.
     pub library: *const c_char,
     /// Which saved config the main backend runs, as a reference into
     /// `library`: `"#<index>"` or the entry's name. NULL/empty keeps
