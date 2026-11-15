@@ -1155,24 +1155,23 @@ func startFD(k *engine.Key) error {
 // no packet can enter or leave any more, and what remains is reclamation.
 const stackStopGrace = 2 * time.Second
 
-// heapOnce keeps the heap policy out of the start path's repeated work.
+// heapOnce keeps the heap policy out of repeated work.
 //
 // The values are the mobile ones -- collect at 1.5x the live heap and keep the
 // process under a soft limit -- but both setter calls have a side effect when
 // they are re-applied: a soft limit below the current heap starts a collection
-// immediately, and that collection runs on the thread that is bringing the
-// tunnel up, right before gVisor builds its stack and buffer pools. Once is
-// enough: the runtime keeps both settings until they are changed.
+// immediately. Once is enough: the runtime keeps both settings until they are
+// changed.
 var heapOnce sync.Once
 
-// heapGCPercent makes the runtime collect at 1.5x the live heap: gVisor's
+// heapGCPercent makes the runtime collect at 1.5x the live heap: the engines'
 // per-packet allocations are short-lived, so a lower percentage would collect
-// constantly on the data plane and a higher one would let the stack's garbage
-// pile up until a stop has to reclaim it.
+// constantly on the data plane and a higher one would let their garbage pile up
+// until a stop has to reclaim it.
 const heapGCPercent = 50
 
 // heapSoftLimit is the runtime's soft memory limit. It has to sit above what a
-// live stack costs -- gVisor's buffer pools, the reassembly queues and the
+// live data plane costs -- gVisor's buffer pools, the reassembly queues and the
 // channel endpoints run to tens of MiB on a busy tunnel -- because a limit below
 // the live heap turns every allocation into a trigger for a full collection,
 // which is paid on the goroutine that is moving packets. 192 MiB still keeps a
@@ -1181,11 +1180,130 @@ const heapGCPercent = 50
 // tunnel's throughput.
 const heapSoftLimit = 192 << 20
 
+// The heap policy belongs to the shared runtime, not to one engine.
+//
+// This package is one Go program: tun2socks, Xray-core, sing-box and Psiphon
+// hand every allocation to the same heap, and a session may run any of them
+// without ever starting the tun2socks engine (proxy mode does exactly that).
+// Applying the policy from `t2s_start` therefore left every non-TUN session on
+// the runtime defaults -- twice the garbage between collections and no soft
+// limit at all -- which is the wrong way round: those are the sessions a phone
+// runs longest. It is applied once here, at package init, where the heap is
+// still empty and neither setter has a collection to trigger.
+func init() {
+	applyHeapPolicy()
+}
+
 func applyHeapPolicy() {
 	heapOnce.Do(func() {
 		debug.SetGCPercent(heapGCPercent)
 		debug.SetMemoryLimit(heapSoftLimit)
 	})
+}
+
+// The engines a session can run, as a set: the idle scrub below is per process,
+// so it has to know whether anything still needs the heap it watches.
+const (
+	engineTun2Socks uint32 = 1 << iota
+	engineXray
+	engineSingBox
+	enginePsiphon
+)
+
+var engineMask atomic.Uint32
+
+// engineStarted records a run and arms the scrub on the first one.
+func engineStarted(engine uint32) {
+	if engineMask.Or(engine) == 0 {
+		startIdleGuard()
+	}
+}
+
+// engineStopped clears a run and, when it was the last one, retires the scrub
+// and hands back what the teardown just freed.
+func engineStopped(engine uint32) {
+	if engineMask.And(^engine) != 0 {
+		return
+	}
+	stopIdleGuard()
+	scrubHeap()
+}
+
+// scrubGuard owns the one idle-scrub goroutine.
+//
+// The mask is re-read under the lock in both directions so the two calls cannot
+// leave a scrub running with nothing to watch, or a running engine without one:
+// whoever takes the lock last sees the other side's mask write.
+var scrubGuard struct {
+	mu      sync.Mutex
+	running bool
+	stop    chan struct{}
+}
+
+func startIdleGuard() {
+	scrubGuard.mu.Lock()
+	defer scrubGuard.mu.Unlock()
+	if scrubGuard.running || engineMask.Load() == 0 {
+		return
+	}
+	stop := make(chan struct{})
+	scrubGuard.running, scrubGuard.stop = true, stop
+	go runIdleGuard(stop)
+}
+
+func stopIdleGuard() {
+	scrubGuard.mu.Lock()
+	defer scrubGuard.mu.Unlock()
+	if !scrubGuard.running || engineMask.Load() != 0 {
+		return
+	}
+	close(scrubGuard.stop)
+	scrubGuard.running, scrubGuard.stop = false, nil
+}
+
+// The idle scrub: what a burst of traffic cost stays resident after it ends.
+//
+// A connected tunnel that has nothing to carry is exactly when the runtime's
+// pages are pure waste -- nothing is going to touch them until the user sends
+// something, and on a phone the whole process competes for RAM with the UI. The
+// runtime's scavenger does return idle pages, but only as background work it
+// spreads over minutes, and with a soft limit in place it has no pressure to
+// hurry. This watches the runtime's allocation rate instead of any one engine's
+// state, so a live tunnel is never interrupted: below the slack the heap is
+// quiet, and a quiet heap is scrubbed once it has something worth returning.
+const (
+	idleScrubTick       = 30 * time.Second
+	idleScrubQuiet      = 2
+	idleScrubAllocSlack = 1 << 20
+)
+
+func runIdleGuard(stop <-chan struct{}) {
+	ticker := time.NewTicker(idleScrubTick)
+	defer ticker.Stop()
+	var lastTotal uint64
+	quiet := 0
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+		var stats runtime.MemStats
+		runtime.ReadMemStats(&stats)
+		allocated := stats.TotalAlloc - lastTotal
+		lastTotal = stats.TotalAlloc
+		if allocated > idleScrubAllocSlack {
+			quiet = 0
+			continue
+		}
+		if quiet++; quiet < idleScrubQuiet {
+			continue
+		}
+		quiet = 0
+		// The threshold check and the once-only guard live in scrubHeap, so a
+		// stop and an idle tick cannot stack two collections on one heap.
+		scrubHeap()
+	}
 }
 
 // retiring is the previous engine run's teardown when it outlived its grace.
@@ -1195,6 +1313,29 @@ var retiring <-chan struct{}
 
 // freeingMemory guards the one background collection a stop may start.
 var freeingMemory atomic.Bool
+
+// scrubHeap hands back what a teardown just freed.
+//
+// A forced GC plus scavenge is synchronous work that has nothing to do with the
+// engine being down, so it never runs on the thread the disconnect is waiting
+// on; a reconnect loop must not pile one collection up per attempt, which is
+// what the flag is for; and a runtime already holding nothing worth returning
+// -- a session that failed before any engine started -- skips it entirely
+// instead of paying a full collection on every retry.
+func scrubHeap() {
+	if !freeingMemory.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer freeingMemory.Store(false)
+		var stats runtime.MemStats
+		runtime.ReadMemStats(&stats)
+		if stats.HeapIdle-stats.HeapReleased < scrubMinReclaimable {
+			return
+		}
+		debug.FreeOSMemory()
+	}()
+}
 
 // scrubMinReclaimable is how much idle-but-unreturned heap makes the post-stop
 // scrub worth its stop-the-world pause. FreeOSMemory returns exactly this, so a
@@ -1350,8 +1491,6 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char,
 		return -3
 	}
 
-	applyHeapPolicy()
-
 	key := &engine.Key{
 		Device:   C.GoString(device),
 		Proxy:    C.GoString(proxy),
@@ -1417,6 +1556,7 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char,
 	installNonFatalLogger(key.LogLevel)
 
 	running = true
+	engineStarted(engineTun2Socks)
 	emit(logInfo, "[bridge] tun2socks running in-process: %s <-> %s", key.Device, key.Proxy)
 	return 0
 }
@@ -1439,24 +1579,10 @@ func t2s_stop() C.int {
 
 	emit(logInfo, "[bridge] tun2socks stopped")
 
-	// The stack's heap is garbage as soon as it is closed and on a phone the
-	// pages are worth returning, but a forced GC plus scavenge is synchronous
-	// work that has nothing to do with the tunnel being down. Keep it off the
-	// thread the Disconnect is waiting on, never let a reconnect loop pile one
-	// collection up per attempt, and skip it outright when the runtime is
-	// already holding nothing worth handing back -- a session that failed before
-	// a stack existed would otherwise pay a full collection on every retry.
-	if freeingMemory.CompareAndSwap(false, true) {
-		go func() {
-			defer freeingMemory.Store(false)
-			var stats runtime.MemStats
-			runtime.ReadMemStats(&stats)
-			if stats.HeapIdle-stats.HeapReleased < scrubMinReclaimable {
-				return
-			}
-			debug.FreeOSMemory()
-		}()
-	}
+	// The stack's heap is garbage as soon as it is closed, and on a phone the
+	// pages are worth returning -- but only once nothing else is using the
+	// heap, which is what the engine set tracks.
+	engineStopped(engineTun2Socks)
 	return 0
 }
 

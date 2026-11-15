@@ -47,7 +47,7 @@ use tokio::time::timeout;
 use crate::backend::{BackendContext, BackendHandle, Counters, Endpoints};
 use crate::config::{RoutingConfig, SessionConfig};
 use crate::error::{CoreError, Result as CoreResult};
-use crate::upstream::UpstreamProxy;
+use crate::upstream::{ProxyKind, UpstreamProxy};
 
 /// How long a core gets to accept its first connection.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1970,11 +1970,14 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
 
     let running = Running {
         ffi,
+        rtt_target: RttTarget::new(profile, config.upstream_proxy.clone()),
         endpoints,
         stopping: AtomicBool::new(false),
         traffic: Mutex::new(Traffic::default()),
         rtt_ms: Arc::new(AtomicU32::new(0)),
-        rtt_started: AtomicBool::new(false),
+        rtt_started: Arc::new(AtomicBool::new(false)),
+        rtt_attempts: AtomicU32::new(0),
+        rtt_next: Mutex::new(None),
     };
     running.await_ready().await?;
     Ok(running)
@@ -2020,9 +2023,15 @@ pub struct Running {
     traffic: Mutex<Traffic>,
     /// Tunnel round trip in milliseconds; 0 until a probe succeeds.
     rtt_ms: Arc<AtomicU32>,
-    /// One probe per session: set before the probe thread starts, cleared only
-    /// if it could not be spawned.
-    rtt_started: AtomicBool,
+    /// Held while a probe is in flight, and for good once one has answered.
+    rtt_started: Arc<AtomicBool>,
+    /// Probes started so far; indexes [`RTT_RETRY`].
+    rtt_attempts: AtomicU32,
+    /// Earliest time the next probe may start.
+    rtt_next: Mutex<Option<Instant>>,
+    /// The remote to handshake with, or `None` for an outbound no TCP handshake
+    /// can reach.
+    rtt_target: Option<RttTarget>,
 }
 
 impl Running {
@@ -2080,37 +2089,54 @@ impl Running {
         (reported == 1).then(|| (uplink.max(0) as u64, downlink.max(0) as u64))
     }
 
-    /// Measure the tunnel round trip, once per session.
+    /// Measure the session's handshake with its remote.
     ///
     /// Neither core reports latency without a config section this app does not
-    /// own (Xray's observatory, sing-box's `urltest` group), so it is measured
-    /// the way the Psiphon bridge measures it: one connect through the core's
-    /// own listener, timed until the core answers. The probe runs on its own
-    /// thread so a stalled tunnel can never delay a telemetry sample.
+    /// own — Xray wants an `observatory`, sing-box a `urltest` group, and both
+    /// measure by fetching a URL — so it is measured here instead: the round
+    /// trip the session's last leg spends reaching the server the config names.
+    /// A direct outbound gets a SYN to the server; a chained one gets the
+    /// CONNECT the hop above issues, because that is the path its traffic takes.
+    /// No application request is sent: the SYN, or the hop's CONNECT, is the
+    /// whole exchange, and no third party is contacted.
+    ///
+    /// Outbounds no TCP handshake can reach — QUIC end to end — have no reading
+    /// ([`RttTarget`]), and none is invented for them.
+    ///
+    /// A probe that fails is retried on [`RTT_RETRY`]'s spacing: holding the
+    /// "already probed" flag across a failure was a one-shot that left a session
+    /// whose first probe landed before the tunnel settled with no latency at all
+    /// until it was restarted.
     fn measure_rtt(&self) {
+        let Some(target) = self.rtt_target.as_ref() else { return };
         if self.rtt_ms.load(Ordering::Acquire) != 0
             || self.rtt_started.swap(true, Ordering::AcqRel)
         {
             return;
         }
-        // A SOCKS listener answers a CONNECT only after the outbound dial
-        // completes, and so does the HTTP proxy; either is a full tunnel round
-        // trip. SOCKS wins because TUN mode always has one.
-        let target = match (self.endpoints.socks, self.endpoints.http) {
-            (Some(socks), _) => (socks, true),
-            (None, Some(http)) => (http, false),
-            (None, None) => {
+        let attempt = self.rtt_attempts.fetch_add(1, Ordering::AcqRel) as usize;
+        {
+            let mut next = self.rtt_next.lock();
+            if next.as_ref().is_some_and(|at| Instant::now() < *at) {
                 self.rtt_started.store(false, Ordering::Release);
                 return;
             }
-        };
+            let seconds = RTT_RETRY[attempt.min(RTT_RETRY.len() - 1)];
+            *next = Some(Instant::now() + Duration::from_secs(seconds));
+        }
         let rtt_ms = Arc::clone(&self.rtt_ms);
+        let started = Arc::clone(&self.rtt_started);
+        let target = target.clone();
         let spawned = std::thread::Builder::new()
             .name("fcae-core-rtt".into())
-            .spawn(move || {
-                if let Some(measured) = rtt_once(target.0, target.1) {
+            .spawn(move || match handshake(&target) {
+                Some(measured) => {
+                    log::debug!("[core] handshake to {} took {measured}ms", target.server);
                     rtt_ms.store(measured, Ordering::Release);
                 }
+                // Cleared, not held: the next sample retries on the spacing
+                // above.
+                None => started.store(false, Ordering::Release),
             });
         if spawned.is_err() {
             self.rtt_started.store(false, Ordering::Release);
@@ -2118,63 +2144,260 @@ impl Running {
     }
 }
 
-/// Host name and port the latency probe connects to: a plain HTTP port on a
-/// host that answers everywhere, so the probe measures the tunnel and not the
-/// target.
-const RTT_HOST: &str = "www.gstatic.com";
-const RTT_PORT: u16 = 80;
+/// Seconds between probe attempts, from the end of the previous one. The first
+/// few cover a tunnel that is still warming up when the session reports its
+/// first sample; the rest keep a route that heals later in the session
+/// measurable without spending a thread on a dead one every second.
+const RTT_RETRY: [u64; 9] = [0, 2, 5, 15, 30, 60, 120, 300, 600];
 
-/// One tunnelled connect, timed from request to answer.
+/// How long a handshake may take: the SYN, or the CONNECT a fronting hop has to
+/// dial and answer. It is a network round trip over a mobile link, not the
+/// loopback greeting [`PROBE_TIMEOUT`] covers, so it gets room of its own.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Longest header block a proxy's CONNECT answer may take before it is not one.
+const HEAD_LIMIT: usize = 4096;
+
+/// The remote a session handshakes with, and what fronts it.
 ///
-/// The target is named, never resolved locally: the core resolves it, so a
-/// blocked local resolver cannot fake or fail a latency reading.
-fn rtt_once(address: SocketAddr, socks: bool) -> Option<u32> {
-    use std::io::{Read, Write};
+/// `server` stays as the config spells it: a hostname is handed to the hop that
+/// fronts this one, which resolves it exactly as the core would, and only a
+/// direct outbound resolves it here.
+#[derive(Clone)]
+struct RttTarget {
+    server: String,
+    port: u16,
+    /// The proxy this core dials through: the hop above it in a chain, or the
+    /// user's own upstream proxy.
+    via: Option<UpstreamProxy>,
+}
 
-    let mut stream = std::net::TcpStream::connect_timeout(&address, PROBE_TIMEOUT).ok()?;
-    stream.set_read_timeout(Some(PROBE_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(PROBE_TIMEOUT)).ok()?;
-    let started = if socks {
-        // The greeting never leaves the host, so it is not part of the round
-        // trip.
-        stream.write_all(&[0x05, 0x01, 0x00]).ok()?;
-        let mut greeting = [0u8; 2];
-        stream.read_exact(&mut greeting).ok()?;
-        if greeting != [0x05, 0x00] {
-            return None;
-        }
-        let host = RTT_HOST.as_bytes();
-        let mut request = Vec::with_capacity(7 + host.len());
-        request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host.len() as u8]);
-        request.extend_from_slice(host);
-        request.extend_from_slice(&RTT_PORT.to_be_bytes());
-        let started = Instant::now();
-        stream.write_all(&request).ok()?;
-        // VER, REP, RSV, ATYP: the address that follows is not needed.
-        let mut reply = [0u8; 4];
-        stream.read_exact(&mut reply).ok()?;
-        if reply[0] != 0x05 || reply[1] != 0x00 {
-            return None;
-        }
-        started
-    } else {
-        let request = format!(
-            "CONNECT {RTT_HOST}:{RTT_PORT} HTTP/1.1\r\nHost: {RTT_HOST}:{RTT_PORT}\r\n\r\n"
-        );
-        let started = Instant::now();
-        stream.write_all(request.as_bytes()).ok()?;
-        let mut status = [0u8; 12];
-        stream.read_exact(&mut status).ok()?;
-        // A status line, and a 2xx/3xx answer: an error page is not a tunnel
-        // round trip.
-        if !status.starts_with(b"HTTP/1.") || status[8] != b' ' || !matches!(status[9], b'2' | b'3')
+impl RttTarget {
+    /// The remote to handshake with, or `None` when no TCP handshake can reach
+    /// this outbound.
+    ///
+    /// mKCP rides UDP, and hysteria2 and tuic are QUIC end to end, so a SYN to
+    /// their server says nothing about the path the tunnel takes. A native
+    /// config has no single remote at all: it brings its own outbounds.
+    fn new(profile: &CoreProfile, via: Option<UpstreamProxy>) -> Option<Self> {
+        let CoreProfile::Link(outbound) = profile else { return None };
+        if matches!(outbound.protocol, Protocol::Hysteria2 { .. } | Protocol::Tuic { .. })
+            || matches!(outbound.transport, Transport::Kcp { .. })
         {
             return None;
         }
-        started
+        Some(Self { server: outbound.server.clone(), port: outbound.port, via })
+    }
+}
+
+/// Time one handshake with the target's remote, in milliseconds.
+fn handshake(target: &RttTarget) -> Option<u32> {
+    match &target.via {
+        None => handshake_direct(&target.server, target.port),
+        Some(proxy) => handshake_via(proxy, target),
+    }
+}
+
+/// Our own SYN to the server. The handshake is the measurement; nothing is sent
+/// after it, and the connection is closed as soon as it is answered.
+fn handshake_direct(server: &str, port: u16) -> Option<u32> {
+    use std::net::ToSocketAddrs;
+
+    // Resolution is not part of a round trip, so every candidate is resolved
+    // before the clock starts; each attempt is then timed on its own, so a
+    // first family that goes nowhere cannot inflate the answer that worked.
+    let addresses: Vec<std::net::SocketAddr> = (server, port).to_socket_addrs().ok()?.collect();
+    for address in addresses {
+        let started = Instant::now();
+        if std::net::TcpStream::connect_timeout(&address, HANDSHAKE_TIMEOUT).is_ok() {
+            return Some(millis_ceil(started.elapsed()));
+        }
+    }
+    None
+}
+
+/// The handshake the hop above performs: the proxy is asked to connect, and the
+/// time that takes — its own dial to the server, plus the server's answer
+/// travelling back — is the round trip to the remote.
+fn handshake_via(proxy: &UpstreamProxy, target: &RttTarget) -> Option<u32> {
+    use std::io::{Read, Write};
+
+    // Includes the hop's own connection: on a loopback hop it costs nothing,
+    // and on the user's proxy it is a leg their traffic really takes.
+    let started = Instant::now();
+    let mut stream = open(proxy)?;
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
+    match proxy.kind {
+        ProxyKind::Socks5 => {
+            socks_negotiate(&mut stream, proxy)?;
+            stream.write_all(&socks_connect_request(&target.server, target.port)).ok()?;
+            // A reply code other than success means the hop could not reach the
+            // server, so there is no round trip to report.
+            socks_reply(&mut stream)?;
+        }
+        ProxyKind::Http => {
+            stream.write_all(http_connect_request(proxy, target).as_bytes()).ok()?;
+            let mut status = [0u8; 12];
+            stream.read_exact(&mut status).ok()?;
+            // A 2xx is the proxy's own confirmation that the server answered.
+            if !status.starts_with(b"HTTP/1.") || status[8] != b' ' || status[9] != b'2' {
+                return None;
+            }
+            skip_headers(&mut stream, [0; 4])?;
+        }
+    }
+    Some(millis_ceil(started.elapsed()))
+}
+
+/// Connect to a proxy. Untimed on its own; [`handshake_via`] owns the clock.
+fn open(proxy: &UpstreamProxy) -> Option<std::net::TcpStream> {
+    use std::net::ToSocketAddrs;
+
+    for address in (proxy.host.as_str(), proxy.port).to_socket_addrs().ok()? {
+        if let Ok(stream) = std::net::TcpStream::connect_timeout(&address, HANDSHAKE_TIMEOUT) {
+            return Some(stream);
+        }
+    }
+    None
+}
+
+/// SOCKS5 method negotiation, plus RFC 1929 when the proxy asks for credentials.
+fn socks_negotiate(stream: &mut std::net::TcpStream, proxy: &UpstreamProxy) -> Option<()> {
+    use std::io::{Read, Write};
+
+    let credentials = proxy.user.is_some() && proxy.password.is_some();
+    let methods: &[u8] = if credentials { &[0x00, 0x02] } else { &[0x00] };
+    let mut greeting = Vec::with_capacity(2 + methods.len());
+    greeting.push(0x05);
+    greeting.push(methods.len() as u8);
+    greeting.extend_from_slice(methods);
+    stream.write_all(&greeting).ok()?;
+    let mut choice = [0u8; 2];
+    stream.read_exact(&mut choice).ok()?;
+    match choice {
+        [0x05, 0x00] => Some(()),
+        [0x05, 0x02] => {
+            let user = proxy.user.as_deref().unwrap_or("").as_bytes();
+            let password = proxy.password.as_deref().unwrap_or("").as_bytes();
+            let mut auth = Vec::with_capacity(3 + user.len() + password.len());
+            auth.push(0x01);
+            auth.push(user.len().min(u8::MAX as usize) as u8);
+            auth.extend_from_slice(&user[..user.len().min(u8::MAX as usize)]);
+            auth.push(password.len().min(u8::MAX as usize) as u8);
+            auth.extend_from_slice(&password[..password.len().min(u8::MAX as usize)]);
+            stream.write_all(&auth).ok()?;
+            let mut reply = [0u8; 2];
+            stream.read_exact(&mut reply).ok()?;
+            (reply == [0x01, 0x00]).then_some(())
+        }
+        _ => None,
+    }
+}
+
+/// A SOCKS5 CONNECT for the remote, addressed the way the core addresses it: an
+/// IP literal as itself, a hostname as a name the proxy resolves.
+fn socks_connect_request(server: &str, port: u16) -> Vec<u8> {
+    let mut request = Vec::with_capacity(22);
+    request.extend_from_slice(&[0x05, 0x01, 0x00]);
+    match server.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            request.push(0x01);
+            request.extend_from_slice(&ip.octets());
+        }
+        Ok(IpAddr::V6(ip)) => {
+            request.push(0x04);
+            request.extend_from_slice(&ip.octets());
+        }
+        Err(_) => {
+            let host = server.as_bytes();
+            let length = host.len().min(u8::MAX as usize);
+            request.push(0x03);
+            request.push(length as u8);
+            request.extend_from_slice(&host[..length]);
+        }
+    }
+    request.extend_from_slice(&port.to_be_bytes());
+    request
+}
+
+/// A proxied CONNECT for the remote, with the proxy's credentials when it has
+/// any.
+fn http_connect_request(proxy: &UpstreamProxy, target: &RttTarget) -> String {
+    let authority = if target.server.contains(':') {
+        format!("[{}]:{}", target.server, target.port)
+    } else {
+        format!("{}:{}", target.server, target.port)
     };
-    let elapsed = started.elapsed().as_millis();
-    Some(elapsed.clamp(1, u32::MAX as u128) as u32)
+    let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
+    if let Some(user) = proxy.user.as_deref() {
+        let password = proxy.password.as_deref().unwrap_or("");
+        request.push_str("Proxy-Authorization: Basic ");
+        request.push_str(&crate::upstream::base64(format!("{user}:{password}").as_bytes()));
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request
+}
+
+/// Read a SOCKS5 reply in full: version, status, address type, the bound
+/// address and its port.
+///
+/// The address is consumed even though nothing needs it, because a caller that
+/// went on to use the connection would otherwise read the tail of the reply as
+/// if it were payload.
+fn socks_reply(stream: &mut std::net::TcpStream) -> Option<()> {
+    use std::io::Read;
+
+    let mut head = [0u8; 4];
+    stream.read_exact(&mut head).ok()?;
+    if head[0] != 0x05 || head[1] != 0x00 {
+        return None;
+    }
+    let mut left = match head[3] {
+        0x01 => 4 + 2,
+        0x04 => 16 + 2,
+        0x03 => {
+            let mut length = [0u8; 1];
+            stream.read_exact(&mut length).ok()?;
+            length[0] as usize + 2
+        }
+        _ => return None,
+    };
+    let mut skip = [0u8; 18];
+    while left > 0 {
+        let take = left.min(skip.len());
+        stream.read_exact(&mut skip[..take]).ok()?;
+        left -= take;
+    }
+    Some(())
+}
+
+/// Read through the blank line that ends an HTTP header block.
+///
+/// `window` is the last four bytes already consumed, oldest first: a header
+/// block can end inside what the caller has read, and re-reading it is not
+/// possible.
+fn skip_headers(stream: &mut std::net::TcpStream, mut window: [u8; 4]) -> Option<()> {
+    use std::io::Read;
+
+    let mut byte = [0u8; 1];
+    for _ in 0..HEAD_LIMIT {
+        if &window == b"\r\n\r\n" {
+            return Some(());
+        }
+        stream.read_exact(&mut byte).ok()?;
+        window.rotate_left(1);
+        window[3] = byte[0];
+    }
+    None
+}
+
+/// Milliseconds, rounded up and never zero: the value is also what the UI reads
+/// as "measured", and 0 means it has nothing to show.
+fn millis_ceil(elapsed: Duration) -> u32 {
+    let millis = elapsed.as_micros().div_ceil(1000);
+    millis.clamp(1, u32::MAX as u128) as u32
 }
 
 /// Bytes-per-second between two samples `elapsed_ms` apart, computed in
@@ -2904,5 +3127,283 @@ mod tests {
         let resumed = traffic.counters(Some((4_500, 2_000)), start + Duration::from_secs(2), 0);
         assert_eq!((resumed.total_tx, resumed.total_rx), (4_500, 2_000));
         assert_eq!(resumed.tx_bytes_sec, 500);
+    }
+
+    /// A connected pair whose peer writes `bytes` and hangs up.
+    fn loopback(bytes: &'static [u8]) -> std::net::TcpStream {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("accept");
+            let _ = peer.write_all(bytes);
+        });
+        std::net::TcpStream::connect(address).expect("connect")
+    }
+
+    #[test]
+    fn a_socks_reply_is_read_past_its_bound_address() {
+        use std::io::Read as _;
+
+        // A bound IPv4 address, then the answer: the helper must stop at the
+        // answer, not inside the address it does not need.
+        let mut stream = loopback(&[
+            0x05, 0x00, 0x00, 0x01, 10, 0, 0, 1, 0x1f, 0x90, b'H', b'T',
+        ]);
+        assert_eq!(socks_reply(&mut stream), Some(()));
+        let mut next = [0u8; 2];
+        stream.read_exact(&mut next).expect("payload");
+        assert_eq!(&next, b"HT");
+
+        // A domain-shaped address carries a length byte of its own.
+        let mut stream = loopback(&[
+            0x05, 0x00, 0x00, 0x03, 9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x1f,
+            0x90, b'H',
+        ]);
+        assert_eq!(socks_reply(&mut stream), Some(()));
+        let mut next = [0u8; 1];
+        stream.read_exact(&mut next).expect("payload");
+        assert_eq!(&next, b"H");
+    }
+
+    #[test]
+    fn a_refused_socks_reply_is_not_a_measurement() {
+        // REP 0x05 is "connection refused": the tunnel never came up, so there
+        // is nothing to time.
+        let mut stream = loopback(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(socks_reply(&mut stream), None);
+    }
+
+    #[test]
+    fn a_connect_answer_is_read_to_the_end_of_its_headers() {
+        use std::io::Read as _;
+
+        // The tail of the status line, a header, the blank line, then the
+        // tunnelled answer.
+        let mut stream = loopback(b" 200 Connection established\r\nVia: proxy\r\n\r\nHT");
+        skip_headers(&mut stream, [0; 4]).expect("headers end");
+        let mut next = [0u8; 2];
+        stream.read_exact(&mut next).expect("payload");
+        assert_eq!(&next, b"HT");
+    }
+
+    /// A listener on loopback that hands every connection to `serve`.
+    fn serve(serve: impl FnOnce(std::net::TcpStream) + Send + 'static) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            serve(stream);
+        });
+        address
+    }
+
+    fn proxy(kind: ProxyKind, address: std::net::SocketAddr) -> UpstreamProxy {
+        UpstreamProxy {
+            kind,
+            host: address.ip().to_string(),
+            port: address.port(),
+            user: None,
+            password: None,
+        }
+    }
+
+    #[test]
+    fn a_direct_handshake_times_the_remote_itself() {
+        use std::io::Read as _;
+
+        // The server says nothing; the reading is the handshake, so an accept
+        // with no answer at all is still a measurement.
+        let address = serve(|mut stream| {
+            let mut buffer = [0u8; 1];
+            let _ = stream.read(&mut buffer);
+        });
+        let target = RttTarget {
+            server: address.ip().to_string(),
+            port: address.port(),
+            via: None,
+        };
+        let measured = handshake(&target).expect("measured");
+        assert!(measured >= 1, "a handshake reads as at least a millisecond");
+    }
+
+    #[test]
+    fn a_handshake_nobody_answers_is_not_a_measurement() {
+        // A port with nothing behind it: the tunnel is not up, so there is no
+        // round trip to report and the sample retries instead.
+        let address = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("address")
+        };
+        let target = RttTarget {
+            server: address.ip().to_string(),
+            port: address.port(),
+            via: None,
+        };
+        assert_eq!(handshake(&target), None);
+    }
+
+    #[test]
+    fn a_chained_session_handshakes_through_the_hop_above() {
+        use std::io::{Read as _, Write as _};
+
+        // A hop that answers its CONNECT only after a delay, the way a proxy
+        // that has to dial the server does. The reading must include that wait,
+        // and the request must name the server as a name for the hop to resolve.
+        let address = serve(|mut stream| {
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).expect("greeting");
+            stream.write_all(&[0x05, 0x00]).expect("greeting reply");
+            let mut head = [0u8; 5];
+            stream.read_exact(&mut head).expect("connect head");
+            assert_eq!(head[3], 0x03, "the server is handed over as a name");
+            let mut rest = vec![0u8; head[4] as usize + 2];
+            stream.read_exact(&mut rest).expect("host and port");
+            std::thread::sleep(Duration::from_millis(150));
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 10, 0, 0, 1, 0x1f, 0x90])
+                .expect("connect reply");
+        });
+        let target = RttTarget {
+            server: "example.com".into(),
+            port: 443,
+            via: Some(proxy(ProxyKind::Socks5, address)),
+        };
+        let measured = handshake(&target).expect("measured");
+        assert!(measured >= 100, "the hop's dial was not timed: {measured}ms");
+    }
+
+    #[test]
+    fn a_hop_that_cannot_reach_the_server_reports_nothing() {
+        use std::io::{Read as _, Write as _};
+
+        // SOCKS5 reply 0x05 is "connection refused": the hop tried and failed,
+        // so the number would be the hop's, not the server's.
+        let address = serve(|mut stream| {
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).expect("greeting");
+            stream.write_all(&[0x05, 0x00]).expect("greeting reply");
+            let mut rest = [0u8; 7];
+            stream.read_exact(&mut rest).expect("connect");
+            stream
+                .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .expect("connect reply");
+        });
+        let target = RttTarget {
+            server: "example.com".into(),
+            port: 443,
+            via: Some(proxy(ProxyKind::Socks5, address)),
+        };
+        assert_eq!(handshake(&target), None);
+    }
+
+    #[test]
+    fn a_proxy_that_wants_credentials_gets_them() {
+        use std::io::{Read as _, Write as _};
+
+        // RFC 1929: the offer lists "no auth" and "username/password", the proxy
+        // picks the latter, and only the right password gets a CONNECT through.
+        let address = serve(|mut stream| {
+            let mut greeting = [0u8; 4];
+            stream.read_exact(&mut greeting).expect("greeting");
+            assert_eq!(greeting, [0x05, 0x02, 0x00, 0x02]);
+            stream.write_all(&[0x05, 0x02]).expect("method reply");
+            let mut head = [0u8; 2];
+            stream.read_exact(&mut head).expect("auth head");
+            let mut user = vec![0u8; head[1] as usize];
+            stream.read_exact(&mut user).expect("user");
+            let mut length = [0u8; 1];
+            stream.read_exact(&mut length).expect("password length");
+            let mut password = vec![0u8; length[0] as usize];
+            stream.read_exact(&mut password).expect("password");
+            let accepted = user == b"alice" && password == b"secret";
+            stream
+                .write_all(&[0x01, if accepted { 0x00 } else { 0x01 }])
+                .expect("auth reply");
+            if !accepted {
+                return;
+            }
+            let mut request = [0u8; 7];
+            stream.read_exact(&mut request).expect("connect");
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .expect("connect reply");
+        });
+        let with = |password: &str| RttTarget {
+            server: "example.com".into(),
+            port: 443,
+            via: Some(UpstreamProxy {
+                user: Some("alice".into()),
+                password: Some(password.into()),
+                ..proxy(ProxyKind::Socks5, address)
+            }),
+        };
+        assert!(handshake(&with("secret")).is_some());
+        assert_eq!(handshake(&with("wrong")), None);
+    }
+
+    #[test]
+    fn an_http_proxy_handshakes_with_connect_and_its_credentials() {
+        use std::io::{Read as _, Write as _};
+
+        let address = serve(|mut stream| {
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).expect("request");
+                head.push(byte[0]);
+            }
+            let text = String::from_utf8(head).expect("utf-8");
+            assert!(text.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"));
+            // "alice:secret" in Basic.
+            assert!(text.contains("Proxy-Authorization: Basic YWxpY2U6c2VjcmV0\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .expect("answer");
+        });
+        let target = RttTarget {
+            server: "example.com".into(),
+            port: 443,
+            via: Some(UpstreamProxy {
+                user: Some("alice".into()),
+                password: Some("secret".into()),
+                ..proxy(ProxyKind::Http, address)
+            }),
+        };
+        assert!(handshake(&target).is_some());
+    }
+
+    #[test]
+    fn an_outbound_no_tcp_handshake_reaches_has_no_target() {
+        // QUIC end to end, and mKCP over UDP: a SYN to those servers would
+        // measure a path the tunnel never takes.
+        for link in [
+            "hysteria2://pass@example.com:443?sni=example.com#q",
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pass@example.com:443#q",
+        ] {
+            let profile = CoreProfile::parse(link).expect("profile parses");
+            assert!(RttTarget::new(&profile, None).is_none(), "{link}");
+        }
+        // The TCP dialects all get one, chained or not.
+        for link in [
+            format!("vless://{UUID}@example.com:443?type=tcp#direct"),
+            format!("vless://{UUID}@example.com:443?type=kcp#udp"),
+        ] {
+            let profile = CoreProfile::parse(&link).expect("profile parses");
+            let target = RttTarget::new(&profile, None);
+            assert_eq!(target.is_some(), !link.ends_with("#udp"), "{link}");
+        }
+    }
+
+    #[test]
+    fn a_round_trip_is_never_reported_as_nothing() {
+        // The value doubles as "measured": a sub-millisecond answer rounds up
+        // to 1 instead of reading as unknown, and 1.4 ms is 2 ms, not 1.
+        assert_eq!(millis_ceil(Duration::ZERO), 1);
+        assert_eq!(millis_ceil(Duration::from_micros(1)), 1);
+        assert_eq!(millis_ceil(Duration::from_micros(1_400)), 2);
+        assert_eq!(millis_ceil(Duration::from_millis(63)), 63);
+        assert_eq!(millis_ceil(Duration::from_millis(1)), 1);
     }
 }

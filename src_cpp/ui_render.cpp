@@ -3318,20 +3318,22 @@ static void core_config_check(int row) {
         return;
     }
     // Every session dialect dials its listener through SOCKS5 — TUN mode, a
-    // chained hop, the Psiphon egress — so a config that declares none can never
-    // start, and saying so here is cheaper than saying it after a failed connect.
+    // chained hop, the Psiphon egress — but that is a fact about running the
+    // config, not about it being one. An HTTP-only config is valid and stays
+    // saved; the status says what it cannot do instead of failing the row.
     uint32_t socks_port = 0;
     uint32_t http_port = 0;
     const uint32_t kinds = fcae_core_listeners(s_core_text_buf.data(), backend, &socks_port, &http_port);
+    const char* core = s_core_backend_buf == 1 ? "sing-box" : "Xray";
     if ((kinds & FCAE_CORE_LISTENER_SOCKS) == 0) {
+        s_core_status_error = false;
         snprintf(s_core_status, sizeof(s_core_status),
-                 "This config declares no SOCKS5 inbound; %s needs one to serve the session.",
-                 s_core_backend_buf == 1 ? "sing-box" : "Xray");
+                 "Valid %s config. It declares no SOCKS5 inbound, so TUN mode and a chained "
+                 "hop cannot run it.", core);
         return;
     }
     s_core_status_error = false;
-    snprintf(s_core_status, sizeof(s_core_status), "Valid %s config.",
-             s_core_backend_buf == 1 ? "sing-box" : "Xray");
+    snprintf(s_core_status, sizeof(s_core_status), "Valid %s config.", core);
 }
 
 /// What a core backend's listener can answer on while it runs the session: the
@@ -3360,26 +3362,28 @@ static void core_listener_block(int backend) {
     const bool serves_socks = (kinds & FCAE_CORE_LISTENER_SOCKS) != 0;
     const bool serves_http = (kinds & FCAE_CORE_LISTENER_HTTP) != 0;
 
+    // Both pairs stay live whatever the library holds. The switch is a stored
+    // preference and the port is a stored value either way, so greying them out
+    // because no config declares that inbound only stops the user from setting
+    // them before saving the config that needs them; what a listener can answer
+    // on is decided at start time, and the note below says what the saved
+    // configs declare today.
     ImGui::Spacing();
     ImGui::TextDisabled("%s listener", label);
     ImGui::PushItemWidth(120);
-    ImGui::BeginDisabled(!serves_socks);
     ImGui::Checkbox(backend == 1 ? "SOCKS5##singbox-socks" : "SOCKS5##xray-socks", &socks_enabled);
     ImGui::SameLine();
     ImGui::InputScalar(backend == 1 ? "port##singbox-socks-port" : "port##xray-socks-port",
                        ImGuiDataType_U16, &socks_port);
-    ImGui::EndDisabled();
-    ImGui::BeginDisabled(!serves_http);
     ImGui::Checkbox(backend == 1 ? "HTTP##singbox-http" : "HTTP##xray-http", &http_enabled);
     ImGui::SameLine();
     ImGui::InputScalar(backend == 1 ? "port##singbox-http-port" : "port##xray-http-port",
                        ImGuiDataType_U16, &http_port);
-    ImGui::EndDisabled();
     ImGui::PopItemWidth();
     if (!serves_socks)
-        ImGui::TextDisabled("No saved %s config declares a SOCKS5 inbound.", label);
+        ImGui::TextDisabled("No saved %s config declares a SOCKS5 inbound yet.", label);
     if (!serves_http)
-        ImGui::TextDisabled("No saved %s config declares an HTTP inbound, so this listener stays off.", label);
+        ImGui::TextDisabled("No saved %s config declares an HTTP inbound yet.", label);
 }
 
 static void render_core_configs() {
@@ -3392,33 +3396,40 @@ static void render_core_configs() {
     ImGui::SetNextWindowSize(modal_size(760.0f, 720.0f), ImGuiCond_Always);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize)) return;
 
-    // The library first, Xray above sing-box: it is what both cores run, and the
-    // group heading is the same one Aether and Firefox carry.
+    // The library first: one list of configs, because that is what both cores
+    // run. A row carries the name the user gave it and the core that runs it as
+    // the same `name  xray` tag the protocol list uses, so the two lists read
+    // alike instead of one of them hiding half its rows under a heading.
     ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Saved configs");
     ImGui::BeginChild("##core_list", ImVec2(0, 146), ImGuiChildFlags_Borders);
-    static const char* const kGroupLabels[] = {"Xray", "sing-box"};
     int remove_row = -1;
-    for (int group = 0; group < 2; ++group) {
-        ImGui::PushID(group);
-        ImGui::TextDisabled("%s", kGroupLabels[group]);
-        bool any = false;
-        for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
-            const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
-            if (entry.backend != group) continue;
-            any = true;
-            ImGui::PushID(i);
-            const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
-            if (ImGui::Selectable(label.c_str(), s_core_edit == i)) {
-                s_core_edit = i;
-                s_core_buf_for = -1;
-            }
-            ImGui::SameLine(std::max(0.0f, ImGui::GetContentRegionAvail().x - 90.0f));
-            if (ImGui::SmallButton("Remove")) remove_row = i;
-            ImGui::PopID();
+    for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
+        const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
+        ImGui::PushID(i);
+        const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
+        if (ImGui::Selectable(label.c_str(), s_core_edit == i)) {
+            s_core_edit = i;
+            s_core_buf_for = -1;
         }
-        if (!any) ImGui::TextDisabled("No saved %s configs.", kGroupLabels[group]);
+        // Measured while the selectable is the line's last item: it spans the
+        // row, so what is left is the whole width again.
+        const float remove_at = std::max(0.0f, ImGui::GetContentRegionAvail().x - 90.0f);
+        if (const char* tag = transport_tag(kCoreTransportBase + i)) {
+            const float tag_at = ImGui::GetStyle().FramePadding.x
+                + ImGui::CalcTextSize(label.c_str()).x + kCoreTagGap;
+            // Only where the name leaves the room: an over-long name already
+            // runs into the Remove button, and a tag drawn on top of it reads
+            // worse than the name alone.
+            if (tag_at + ImGui::CalcTextSize(tag).x < remove_at) {
+                ImGui::SameLine(tag_at);
+                ImGui::TextColored(kCoreTagColor, "%s", tag);
+            }
+        }
+        ImGui::SameLine(remove_at);
+        if (ImGui::SmallButton("Remove")) remove_row = i;
         ImGui::PopID();
     }
+    if (g_app.core_configs.empty()) ImGui::TextDisabled("No saved configs.");
     ImGui::EndChild();
 
     if (ImGui::Button("+ Add config") && (int)g_app.core_configs.size() < kMaxCoreConfigs) {

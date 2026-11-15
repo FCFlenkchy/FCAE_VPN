@@ -112,6 +112,7 @@ func xray_start(config *C.char) *C.char {
 	if manager, ok := created.GetFeature(featurestats.ManagerType()).(featurestats.Manager); ok {
 		xrayStats = manager
 	}
+	engineStarted(engineXray)
 	return nil
 }
 
@@ -125,6 +126,7 @@ func xray_stop() {
 	_ = xrayInstance.Close()
 	xrayInstance = nil
 	xrayStats = nil
+	engineStopped(engineXray)
 }
 
 //export xray_running

@@ -581,6 +581,10 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	// Claim the slot before releasing the lock, so a concurrent psi_start
 	// still loses the race even though psi.Start() below runs unlocked.
 	psiRunning = true
+	// Claimed with the slot: a start that fails below gives it back, and the
+	// heap policy the shared runtime applies is only worth guarding while one
+	// of its engines is up.
+	engineStarted(enginePsiphon)
 	embeddedList := C.GoString(embedded)
 	if embeddedList != "" {
 		re := regexp.MustCompile(`"(?:region|Region)"\s*:\s*"([A-Za-z]{2})"`)
@@ -642,6 +646,7 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 		// psi.Stop() blocks until the controller has finished.
 		psiStopController()
 
+		engineStopped(enginePsiphon)
 		psiEmit(psiLogError, "[psiphon] start failed: %v", err)
 		return -3
 	}
@@ -760,6 +765,7 @@ func psi_stop() C.int {
 	atomic.StoreUint64(&psiBytesDown, 0)
 	psiMu.Unlock()
 
+	engineStopped(enginePsiphon)
 	psiEmit(psiLogInfo, "[psiphon] controller stopped")
 	return 0
 }

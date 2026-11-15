@@ -111,6 +111,7 @@ func sb_start(config *C.char) *C.char {
 	}
 	sbInstance = created
 	sbTraffic = traffic
+	engineStarted(engineSingBox)
 	return nil
 }
 
@@ -124,6 +125,7 @@ func sb_stop() {
 	_ = sbInstance.Close()
 	sbInstance = nil
 	sbTraffic = nil
+	engineStopped(engineSingBox)
 }
 
 //export sb_running

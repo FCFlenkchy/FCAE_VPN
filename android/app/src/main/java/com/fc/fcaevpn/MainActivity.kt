@@ -1337,6 +1337,8 @@ class MainActivity : AppCompatActivity() {
         try { NativeEngine.nativeSponsorInit(java.io.File(filesDir, "sponsors").absolutePath) }
         catch (_: Throwable) {}
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
+        // The button is a picker with a fixed label: what is selected is the
+        // list's own business, and the row it opens shows it.
         findViewById<MaterialButton>(R.id.btnProtocolSettings).setOnClickListener { showProtocolSettings() }
         findViewById<MaterialButton>(R.id.btnFirefoxSettings).setOnClickListener { showFirefoxSettings() }
         findViewById<MaterialButton>(R.id.btnCoreConfigs).setOnClickListener { showCoreConfigs() }
@@ -1749,7 +1751,6 @@ class MainActivity : AppCompatActivity() {
                 // combo; Tor protocol grays the two Tor entries). Do not reset
                 // the combo — restoring protocol restores the pick.
                 applyTorLock()
-                updateProtocolButton()
                 layoutGoolInner.visibility =
                     if (position in 8..9) android.view.View.VISIBLE else android.view.View.GONE
             }
@@ -2593,19 +2594,6 @@ class MainActivity : AppCompatActivity() {
             ?: newDefault.toString()
     }
 
-    private fun updateProtocolButton() {
-        if (!::spinnerProtocol.isInitialized) return
-        // A saved config is named by the user, and that name is how it is
-        // identified everywhere else, so the button carries it alone: it is a
-        // picker, and a "Protocol:" prefix only eats the label's width.
-        val spinner = spinnerProtocol.adapter
-        val position = spinnerProtocol.selectedItemPosition
-        val label = if (spinner != null && position in 0 until spinner.count)
-            spinner.getItem(position)?.toString() else null
-        findViewById<MaterialButton>(R.id.btnProtocolSettings).text =
-            if (label.isNullOrBlank()) "Protocol" else taggedLabel(label)
-    }
-
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).roundToInt()
 
@@ -2654,7 +2642,6 @@ class MainActivity : AppCompatActivity() {
                 .putString("chainTransports", NativeEngine.encodeChainTransports(draft.toIntArray()))
                 .remove("chainCount").remove("chainExit0").remove("chainExit1").remove("chainExit2")
                 .apply()
-            updateProtocolButton()
             scheduleSettingsSave()
         }
 
@@ -2933,7 +2920,6 @@ class MainActivity : AppCompatActivity() {
             .putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
             .apply()
         applyTorLock()
-        updateProtocolButton()
     }
 
     /** The saved config the main protocol runs, or null for a built-in one. */
@@ -2967,9 +2953,9 @@ class MainActivity : AppCompatActivity() {
      */
     /**
      * Xray and sing-box settings. The saved library stays at the top — it is what
-     * both cores run — with Xray above sing-box, and each core's listeners below
-     * the list, because a listener belongs to the core that answers on it while a
-     * session's final hop only runs one of them.
+     * both cores run — as one list of configs, each tagged with the core that
+     * runs it, and the listeners below it, because a listener belongs to the core
+     * that answers on it while a session's final hop only runs one of them.
      */
     private fun showCoreConfigs() {
         val box = LinearLayout(this).apply {
@@ -3069,16 +3055,13 @@ class MainActivity : AppCompatActivity() {
                 val reason = checkCoreConfig(text, backendValue())
                 if (reason.isNotEmpty()) return fail(reason)
                 // Every session dialect dials its listener through SOCKS5 — TUN
-                // mode, a chained hop, the Psiphon egress — so a config that
-                // declares no SOCKS5 inbound can never start, and saying so here
-                // is cheaper than saying it after a failed connect.
-                val candidate = CoreConfig(nameText, backendIndex(), text)
-                if (!coreConfigServes(candidate, http = false)) {
-                    return fail(
-                        "This config declares no SOCKS5 inbound; " +
-                            "${backendLabels[backendIndex()]} needs one to serve the session."
-                    )
-                }
+                // mode, a chained hop, the Psiphon egress — but that is a fact
+                // about running a config, not about it being one. An HTTP-only
+                // config is a valid config, and refusing to save it kept it out
+                // of the library that is meant to hold it (and its HTTP
+                // listener switched off forever). It saves, and the note below
+                // says what it cannot do.
+                val socksServed = coreConfigServes(CoreConfig(nameText, backendIndex(), text), http = false)
                 // The whole list is one document: it is what the engine parses
                 // and what an Intent carries, so it is measured as it will be
                 // stored. A library that saves is then a library that starts.
@@ -3089,8 +3072,13 @@ class MainActivity : AppCompatActivity() {
                     return fail("Saved configs are limited to " +
                         "${NativeEngine.MAX_CORE_DOCUMENT_BYTES / 1024} KiB in total.")
                 }
-                status.setTextColor(Color.parseColor("#FF34D399"))
-                status.text = "Valid ${backendLabels[backendIndex()]} config."
+                status.setTextColor(Color.parseColor(if (socksServed) "#FF34D399" else "#FFFBBF24"))
+                status.text = if (socksServed) {
+                    "Valid ${backendLabels[backendIndex()]} config."
+                } else {
+                    "Valid ${backendLabels[backendIndex()]} config. It declares no SOCKS5 " +
+                        "inbound, so TUN mode and a chained hop cannot run it."
+                }
                 return true
             }
 
@@ -3123,45 +3111,38 @@ class MainActivity : AppCompatActivity() {
 
         renderList = {
             list.removeAllViews()
-            CORE_BACKEND_LABELS.forEachIndexed { backend, label ->
+            // One list of configs, not one per core: what a config is called and
+            // which core runs it is the row's own business, and the tag beside
+            // the name says which — the same `name  xray` the protocol list uses.
+            if (entries.isEmpty()) {
                 list.addView(TextView(this).apply {
-                    text = label
-                    setTextColor(Color.parseColor("#FF60A5FA"))
+                    text = "No saved configs."
+                    setTextColor(Color.parseColor("#FF6B7280"))
                     textSize = 13f
-                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                    setPadding(0, dp(10), 0, dp(2))
+                    setPadding(0, dp(2), 0, dp(2))
                 })
-                val group = entries.withIndex().filter { it.value.backend == backend }
-                if (group.isEmpty()) {
-                    list.addView(TextView(this).apply {
-                        text = "No saved $label configs."
-                        setTextColor(Color.parseColor("#FF6B7280"))
-                        textSize = 13f
-                        setPadding(0, dp(2), 0, dp(2))
-                    })
+            }
+            entries.forEachIndexed { index, entry ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(6), 0, 0)
                 }
-                group.forEach { (rowIndex, entry) ->
-                    val row = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = android.view.Gravity.CENTER_VERTICAL
-                        setPadding(0, dp(6), 0, 0)
-                    }
-                    row.addView(TextView(this).apply {
-                        text = entry.name
-                        setTextColor(Color.parseColor("#FFE0E4EE"))
-                        textSize = 14f
-                        isSingleLine = true
-                        ellipsize = android.text.TextUtils.TruncateAt.END
-                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                    addDialogButton(row, "Edit") { editEntry(rowIndex) }
-                    addDialogButton(row, "Remove") {
-                        entries = entries.toMutableList().also { it.removeAt(rowIndex) }
-                        saveCoreConfigs(entries)
-                        renderList()
-                        refreshCoreListenerRows()
-                    }
-                    list.addView(row)
+                row.addView(TextView(this).apply {
+                    text = taggedLabel("${entry.name}  ${entry.backendTag}")
+                    setTextColor(Color.parseColor("#FFE0E4EE"))
+                    textSize = 14f
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                addDialogButton(row, "Edit") { editEntry(index) }
+                addDialogButton(row, "Remove") {
+                    entries = entries.toMutableList().also { it.removeAt(index) }
+                    saveCoreConfigs(entries)
+                    renderList()
+                    refreshCoreListenerRows()
                 }
+                list.addView(row)
             }
         }
 
@@ -3217,9 +3198,11 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * One core listener: a switch and a port field, the pair the other backends
-     * have. Both stay on screen even when the saved config cannot answer on them
-     * — the row says why instead of vanishing, because a control that disappears
-     * with the current selection is a control the user cannot reason about.
+     * have. Both stay on screen and both stay live whatever the library holds —
+     * a control that greys out because no config exists yet is a control the
+     * user cannot set before saving one, and the value is stored either way.
+     * Whether a listener can actually answer is the engine's call at start time,
+     * so the row says what the saved configs declare instead of locking itself.
      *
      * Ports follow the config: a native config pins its own, so the field opens
      * where the config put it and a stored value is never overwritten. A link
@@ -3240,7 +3223,6 @@ class MainActivity : AppCompatActivity() {
         val switch = SwitchMaterial(this).apply {
             text = if (http) "$label HTTP proxy" else "$label SOCKS5 proxy"
             isChecked = stored
-            isEnabled = served
         }
         switch.setOnCheckedChangeListener { _, checked ->
             when {
@@ -3258,7 +3240,6 @@ class MainActivity : AppCompatActivity() {
         val port = addDialogInput(rows, if (http) "HTTP proxy port" else "SOCKS5 port",
             field.text.toString())
         port.inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        port.isEnabled = served
         fun validate() {
             port.error = if (port.text.toString().toIntOrNull()?.let { it in 1..65535 } == true)
                 null else "Use a port from 1 to 65535"
@@ -3270,12 +3251,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (!served) {
+            // A note, not a lock: the switch above still stores what the user
+            // picks, and the engine tells the session the truth once a config
+            // that declares this inbound is selected.
             rows.addView(TextView(this).apply {
                 text = if (finalConfig != null)
                     "\"${finalConfig.name}\" declares no ${if (http) "HTTP" else "SOCKS5"} " +
                         "inbound, so this listener stays off for it."
                 else
-                    "No saved $label config serves ${if (http) "HTTP" else "SOCKS5"}."
+                    "No saved $label config declares ${if (http) "HTTP" else "SOCKS5"} yet, " +
+                        "so this listener waits for one."
                 setTextColor(Color.parseColor("#FF6B7280"))
                 textSize = 12f
                 setPadding(0, dp(4), 0, 0)
@@ -4644,7 +4629,6 @@ class MainActivity : AppCompatActivity() {
         } else {
             spinnerTor.setSelection(savedTor.coerceIn(0, 2))
         }
-        updateProtocolButton()
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
