@@ -94,6 +94,14 @@ struct AppState {
         int backend = 0;
         // Share link or the core's own config JSON, verbatim.
         std::string text;
+        // Bitwise FCAE_CORE_LISTENER_*: what this config can answer on. Cached
+        // because reading it parses the document and the UI asks for it on
+        // every frame; refreshed when the entry changes.
+        uint32_t kinds = FCAE_CORE_LISTENER_SOCKS | FCAE_CORE_LISTENER_HTTP;
+        // The ports the config itself names for those listeners, 0 when it names
+        // none. A config that pins a port is not overruled by the app default.
+        uint16_t pinned_socks_port = 0;
+        uint16_t pinned_http_port = 0;
     };
     std::vector<CoreConfigEntry> core_configs;
     // Position in core_configs the main protocol runs; -1 when it runs none.
@@ -136,8 +144,23 @@ struct AppState {
     static constexpr uint16_t kFirefoxDefaultHttpPort = 1826;
     uint16_t firefox_socks_port = kFirefoxDefaultSocksPort;
     uint16_t firefox_http_port  = kFirefoxDefaultHttpPort;
+    // The cores get their own pairs. Aether (1819/1820), Tor (1821/1822),
+    // Psiphon (1823/1824) and Firefox (1825/1826) already hold theirs, and the
+    // engine refuses a listener that would clash with one of them.
+    static constexpr uint16_t kXrayDefaultSocksPort   = 1827;
+    static constexpr uint16_t kXrayDefaultHttpPort    = 1828;
+    static constexpr uint16_t kSingBoxDefaultSocksPort = 1829;
+    static constexpr uint16_t kSingBoxDefaultHttpPort  = 1830;
+    uint16_t xray_socks_port    = kXrayDefaultSocksPort;
+    uint16_t xray_http_port     = kXrayDefaultHttpPort;
+    uint16_t singbox_socks_port = kSingBoxDefaultSocksPort;
+    uint16_t singbox_http_port  = kSingBoxDefaultHttpPort;
     bool socks_enabled   = true;
     bool http_enabled    = false;
+    bool xray_socks_enabled    = true;
+    bool xray_http_enabled     = false;
+    bool singbox_socks_enabled = true;
+    bool singbox_http_enabled  = false;
     bool firefox_socks_enabled = true;
     bool firefox_http_enabled = false;
     bool psiphon_socks_enabled = true;
@@ -421,20 +444,120 @@ struct AppState {
         else core_library_built.clear();
     }
 
+    /// The core the session's final listener belongs to: 3 = Xray, 4 =
+    /// sing-box, 0 for every other backend. A chain's last exit decides, and
+    /// without a chain the main protocol does.
+    int final_listener_core() const {
+        int core = 0;
+        if (!chain_transports.empty()) {
+            const int transport = chain_transports.back();
+            if (transport < kCoreTransportBase) return 0;
+            const CoreConfigEntry* entry = core_config_at(transport);
+            if (!entry) return 0;
+            core = entry->backend == 1 ? 4 : 3;
+        } else if (backend >= 3) {
+            core = backend;
+        } else {
+            return 0;
+        }
+        // A config the engine cannot read is not run at all — to_config() starts
+        // the default transport instead — and the listener goes with it.
+        const CoreConfigEntry* entry = final_core_config();
+        return entry && entry->kinds ? core : 0;
+    }
+
+    bool final_listener_is_core() const { return final_listener_core() >= 3; }
+
+    /// The saved config the final hop runs, or nullptr for a built-in transport.
+    const CoreConfigEntry* final_core_config() const {
+        if (!chain_transports.empty()) return core_config_at(chain_transports.back());
+        return core_config_at(kCoreTransportBase + core_selected);
+    }
+
+    /// Read one config's capabilities out of the engine and cache them on it.
+    static void refresh_core_listeners(CoreConfigEntry& entry) {
+        uint32_t socks_port = 0;
+        uint32_t http_port = 0;
+        entry.kinds = fcae_core_listeners(
+            entry.text.c_str(),
+            entry.backend == 1 ? FCAE_BACKEND_SINGBOX : FCAE_BACKEND_XRAY,
+            &socks_port, &http_port);
+        entry.pinned_socks_port = (uint16_t)socks_port;
+        entry.pinned_http_port = (uint16_t)http_port;
+    }
+
+    /// Recompute every entry: after a load, an edit, an add or a removal.
+    void refresh_core_listeners() {
+        for (CoreConfigEntry& entry : core_configs) refresh_core_listeners(entry);
+    }
+
+    /// What the session's final listener can be answered on.
+    uint32_t final_listener_kinds() const {
+        const CoreConfigEntry* entry = final_listener_is_core() ? final_core_config() : nullptr;
+        return entry ? entry->kinds
+                     : FCAE_CORE_LISTENER_SOCKS | FCAE_CORE_LISTENER_HTTP;
+    }
+
     uint16_t default_listener_socks_port() const {
-        return final_listener_is_firefox() ? kFirefoxDefaultSocksPort : 1819;
+        switch (final_listener_core()) {
+            case 3: return kXrayDefaultSocksPort;
+            case 4: return kSingBoxDefaultSocksPort;
+            default: return final_listener_is_firefox() ? kFirefoxDefaultSocksPort : 1819;
+        }
+    }
+
+    /// A port the config pins outranks the app default, and only the default:
+    /// the engine rewrites a native config's listener to whatever the session
+    /// asks for, so a value of the user's own is never overruled.
+    uint16_t pinned_or(uint16_t configured, uint16_t fallback, bool socks) const {
+        const CoreConfigEntry* entry = final_core_config();
+        const uint16_t pinned = entry ? (socks ? entry->pinned_socks_port : entry->pinned_http_port) : 0;
+        return (configured == fallback && pinned) ? pinned : configured;
     }
 
     uint16_t listener_socks_port() const {
-        return final_listener_is_firefox() ? firefox_socks_port : socks_port;
+        switch (final_listener_core()) {
+            case 3: return pinned_or(xray_socks_port, kXrayDefaultSocksPort, true);
+            case 4: return pinned_or(singbox_socks_port, kSingBoxDefaultSocksPort, true);
+            default: return final_listener_is_firefox() ? firefox_socks_port : socks_port;
+        }
     }
 
     uint16_t listener_http_port() const {
-        return final_listener_is_firefox() ? firefox_http_port : http_port;
+        switch (final_listener_core()) {
+            case 3: return pinned_or(xray_http_port, kXrayDefaultHttpPort, false);
+            case 4: return pinned_or(singbox_http_port, kSingBoxDefaultHttpPort, false);
+            default: return final_listener_is_firefox() ? firefox_http_port : http_port;
+        }
     }
 
-    bool listener_socks_enabled() const { return final_listener_is_firefox() ? firefox_socks_enabled : socks_enabled; }
-    bool listener_http_enabled() const { return final_listener_is_firefox() ? firefox_http_enabled : http_enabled; }
+    bool listener_socks_requested() const {
+        switch (final_listener_core()) {
+            case 3: return xray_socks_enabled;
+            case 4: return singbox_socks_enabled;
+            default: return final_listener_is_firefox() ? firefox_socks_enabled : socks_enabled;
+        }
+    }
+
+    bool listener_http_requested() const {
+        switch (final_listener_core()) {
+            case 3: return xray_http_enabled;
+            case 4: return singbox_http_enabled;
+            default: return final_listener_is_firefox() ? firefox_http_enabled : http_enabled;
+        }
+    }
+
+    /// A core config that declares no inbound of a type cannot answer on it, so
+    /// the switch does not open a listener nothing serves.
+    bool listener_socks_enabled() const {
+        return listener_socks_requested()
+            && (final_listener_kinds() & FCAE_CORE_LISTENER_SOCKS) != 0;
+    }
+
+    bool listener_http_enabled() const {
+        return listener_http_requested()
+            && (final_listener_kinds() & FCAE_CORE_LISTENER_HTTP) != 0;
+    }
 
     FcaeConfig to_config() {
         FcaeConfig c;

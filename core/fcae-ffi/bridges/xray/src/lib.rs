@@ -23,6 +23,16 @@ extern "C" {
     fn xray_stop();
     fn xray_running() -> c_int;
     fn xray_string_free(value: *mut c_char);
+    fn xray_stats(uplink: *mut i64, downlink: *mut i64) -> c_int;
+    fn xray_set_log(sink: LogSink, gate: c_int);
+}
+
+/// Host log sink, implemented here and called from the core's own goroutines.
+type LogSink = Option<unsafe extern "C" fn(c_int, *const c_char)>;
+
+/// Receives the core's log lines and hands them to the app console.
+unsafe extern "C" fn log_sink(level: c_int, message: *const c_char) {
+    fcae_runtime::sing_xray::forward_log("xray", level, message);
 }
 
 pub struct XrayDialect;
@@ -34,7 +44,10 @@ impl Dialect for XrayDialect {
         stop: xray_stop,
         running: xray_running,
         string_free: xray_string_free,
+        stats: xray_stats,
+        set_log: xray_set_log,
     };
+    const LOG_SINK: unsafe extern "C" fn(c_int, *const c_char) = log_sink;
 
     fn generate(plan: &Plan<'_>) -> std::result::Result<serde_json::Value, String> {
         config::generate(plan)

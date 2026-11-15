@@ -312,7 +312,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="Xray / sing-box configs" />
+                android:text="Xray &amp; sing-box settings" />
 
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchAutoUpdate"
@@ -1579,6 +1579,48 @@
                 android:layout_width="match_parent" android:layout_height="48dp"
                 android:layout_marginTop="4dp" android:background="#FF1E1E2C"
                 android:inputType="number" android:padding="12dp" android:text="1826"
+                android:textColor="#FFE8ECF4" android:textSize="14sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="16dp" android:text="XRAY AND SING-BOX LISTENER PORTS"
+                android:textColor="#FFFF9F40" android:textSize="16sp" android:textStyle="bold" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="12dp" android:text="Xray SOCKS5 port"
+                android:textColor="#FF9AA3B5" android:textSize="13sp" />
+            <EditText android:id="@+id/editXraySocksPort"
+                android:layout_width="match_parent" android:layout_height="48dp"
+                android:layout_marginTop="4dp" android:background="#FF1E1E2C"
+                android:inputType="number" android:padding="12dp" android:text="1827"
+                android:textColor="#FFE8ECF4" android:textSize="14sp" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="12dp" android:text="Xray HTTP proxy port"
+                android:textColor="#FF9AA3B5" android:textSize="13sp" />
+            <EditText android:id="@+id/editXrayHttpPort"
+                android:layout_width="match_parent" android:layout_height="48dp"
+                android:layout_marginTop="4dp" android:background="#FF1E1E2C"
+                android:inputType="number" android:padding="12dp" android:text="1828"
+                android:textColor="#FFE8ECF4" android:textSize="14sp" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="12dp" android:text="sing-box SOCKS5 port"
+                android:textColor="#FF9AA3B5" android:textSize="13sp" />
+            <EditText android:id="@+id/editSingBoxSocksPort"
+                android:layout_width="match_parent" android:layout_height="48dp"
+                android:layout_marginTop="4dp" android:background="#FF1E1E2C"
+                android:inputType="number" android:padding="12dp" android:text="1829"
+                android:textColor="#FFE8ECF4" android:textSize="14sp" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="12dp" android:text="sing-box HTTP proxy port"
+                android:textColor="#FF9AA3B5" android:textSize="13sp" />
+            <EditText android:id="@+id/editSingBoxHttpPort"
+                android:layout_width="match_parent" android:layout_height="48dp"
+                android:layout_marginTop="4dp" android:background="#FF1E1E2C"
+                android:inputType="number" android:padding="12dp" android:text="1830"
                 android:textColor="#FFE8ECF4" android:textSize="14sp" />
             </LinearLayout>
             <TextView

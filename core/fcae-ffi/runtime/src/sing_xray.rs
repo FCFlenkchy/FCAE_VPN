@@ -14,7 +14,10 @@
 //! This module holds everything the two cores share:
 //!
 //! * share-link / native-config parsing for [`CoreProfile`] — session configuration,
-//!   parsed once with the rest of [`crate::config::SessionConfig`],
+//!   parsed once with the rest of [`crate::config::SessionConfig`]. The grammar
+//!   covers both cores' protocols, including the sing-box-only Hysteria2, TUIC
+//!   and AnyTLS; [`Protocol::xray_carries`] says which of them Xray-core can
+//!   actually run,
 //! * [`Plan`] and [`plan_listeners`] — what the session asks of the core,
 //! * [`Rules`] — the app's split-routing rules, validated,
 //! * [`Dialect`] + [`start`] — the only per-core seam: the config dialect and
@@ -25,13 +28,15 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use fcae_abi::{FcaeBackend, FcaeEngineLog, FcaeState};
+use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -106,6 +111,74 @@ pub enum Protocol {
         user: Option<String>,
         password: Option<String>,
     },
+    /// Hysteria2 — QUIC, TLS by contract, Brutal congestion control. sing-box
+    /// implements it; Xray-core has no equivalent, so [`Protocol::xray_carries`]
+    /// is false.
+    Hysteria2 {
+        password: String,
+        /// Packet obfuscation: the scheme (`salamander`) and its password.
+        obfs: Option<(String, String)>,
+        /// Bandwidth hint in Mbps, which is what Brutal shapes to.
+        up_mbps: Option<u32>,
+        down_mbps: Option<u32>,
+        /// Port hopping ranges, in sing-box's `server_ports` syntax.
+        ports: Vec<String>,
+        /// Seconds between hops.
+        hop_interval: Option<u64>,
+        /// SHA-256 of the server certificate's public key, base64 as sing-box
+        /// wants it; share links carry the digest hex-encoded.
+        pin: Option<String>,
+    },
+    /// TUIC — QUIC with its own UUID/password handshake. sing-box only.
+    Tuic {
+        uuid: String,
+        password: String,
+        congestion_control: Option<String>,
+        udp_relay_mode: Option<String>,
+        zero_rtt: bool,
+    },
+    /// AnyTLS — TLS with a padding scheme. sing-box only.
+    AnyTls {
+        password: String,
+    },
+}
+
+impl Protocol {
+    /// The name the cores and the config editor use for this protocol.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Protocol::Vless { .. } => "vless",
+            Protocol::Vmess { .. } => "vmess",
+            Protocol::Trojan { .. } => "trojan",
+            Protocol::Shadowsocks { .. } => "shadowsocks",
+            Protocol::Socks { .. } => "socks",
+            Protocol::Http { .. } => "http",
+            Protocol::Hysteria2 { .. } => "hysteria2",
+            Protocol::Tuic { .. } => "tuic",
+            Protocol::AnyTls { .. } => "anytls",
+        }
+    }
+
+    /// Whether Xray-core's config grammar can express this protocol.
+    ///
+    /// The QUIC and AnyTLS families exist only in sing-box, so a link for one
+    /// is refused for Xray here — at save time and again at start — instead of
+    /// reaching the core as a config it cannot parse.
+    pub fn xray_carries(&self) -> bool {
+        !matches!(
+            self,
+            Protocol::Hysteria2 { .. } | Protocol::Tuic { .. } | Protocol::AnyTls { .. }
+        )
+    }
+}
+
+/// Whether `backend` can carry `outbound`.
+pub fn carries(backend: FcaeBackend, outbound: &Outbound) -> bool {
+    match backend {
+        FcaeBackend::Xray => outbound.protocol.xray_carries(),
+        FcaeBackend::SingBox => true,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,9 +229,14 @@ impl CoreProfile {
             "socks" | "socks5" | "socks5h" => parse_socks(rest)?,
             "http" => parse_http(rest, false)?,
             "https" => parse_http(rest, true)?,
+            // sing-box only; the Xray bridge refuses these by name.
+            "hysteria2" | "hy2" => parse_hysteria2(rest)?,
+            "tuic" => parse_tuic(rest)?,
+            "anytls" => parse_anytls(rest)?,
             other => {
                 return Err(format!(
-                    "unsupported scheme {other:?} (vless, vmess, trojan, ss, socks5, http)"
+                    "unsupported scheme {other:?} (vless, vmess, trojan, ss, socks5, http, \
+                     hysteria2, tuic, anytls)"
                 ))
             }
         };
@@ -415,6 +493,162 @@ fn parse_http(rest: &str, tls: bool) -> Result<Outbound, String> {
 }
 
 // ---------------------------------------------------------------------------
+// sing-box share links
+// ---------------------------------------------------------------------------
+//
+// Hysteria2, TUIC and AnyTLS are sing-box's own protocols; Xray-core has no
+// equivalent. They are parsed here with the rest of the link grammar so a saved
+// config is validated once, and the Xray bridge refuses them by name.
+
+fn parse_hysteria2(rest: &str) -> Result<Outbound, String> {
+    let (body, remark) = split_fragment(rest);
+    let (authority, params) = split_query(body);
+    let query = Query::parse(params);
+    let (userinfo, target) = authority
+        .rsplit_once('@')
+        .ok_or("a hysteria2 link must be hysteria2://<password>@<host>:<port>")?;
+    let password = percent_decode(userinfo).trim().to_string();
+    if password.is_empty() {
+        return Err("a hysteria2 link needs its password".into());
+    }
+    let (server, port) = split_host_port(trim_trailing_path(target), Some(443))?;
+    let obfs = match query.string("obfs").map(|kind| kind.to_ascii_lowercase()) {
+        None => None,
+        Some(kind) if kind == "salamander" => {
+            let secret = query
+                .first(&["obfs-password", "obfs_password"])
+                .ok_or("hysteria2 obfs=salamander needs obfs-password")?;
+            Some((kind, percent_decode(secret)))
+        }
+        Some(other) => {
+            return Err(format!(
+                "hysteria2 obfs {other:?} is not supported (only salamander)"
+            ))
+        }
+    };
+    Ok(Outbound {
+        protocol: Protocol::Hysteria2 {
+            password,
+            obfs,
+            up_mbps: query.mbps(&["up", "upmbps", "up_mbps"])?,
+            down_mbps: query.mbps(&["down", "downmbps", "down_mbps"])?,
+            ports: query.ports(&["mport", "ports"])?,
+            hop_interval: query.seconds(&["hop-interval", "hop_interval"])?,
+            pin: query.pin()?,
+        },
+        transport: Transport::Tcp,
+        security: Security::Tls {
+            sni: query
+                .string("sni")
+                .or_else(|| query.string("peer"))
+                .or_else(|| host_name(&server)),
+            alpn: query.list("alpn"),
+            fingerprint: None,
+            allow_insecure: query.flag("insecure") || query.flag("allowinsecure"),
+        },
+        server,
+        port,
+        remark,
+    })
+}
+
+fn parse_tuic(rest: &str) -> Result<Outbound, String> {
+    let (body, remark) = split_fragment(rest);
+    let (authority, params) = split_query(body);
+    let query = Query::parse(params);
+    let (userinfo, target) = authority
+        .rsplit_once('@')
+        .ok_or("a tuic link must be tuic://<uuid>:<password>@<host>:<port>")?;
+    let (raw_uuid, raw_password) = userinfo
+        .split_once(':')
+        .ok_or("a tuic link must be tuic://<uuid>:<password>@<host>:<port>")?;
+    let uuid = percent_decode(raw_uuid).trim().to_string();
+    if !valid_uuid(&uuid) {
+        return Err(format!("tuic uuid {:?} is not a UUID", excerpt(&uuid)));
+    }
+    let (server, port) = split_host_port(trim_trailing_path(target), None)?;
+    let congestion_control = query
+        .string("congestion_control")
+        .or_else(|| query.string("congestion-control"));
+    if let Some(control) = congestion_control.as_deref() {
+        if !matches!(control, "cubic" | "new_reno" | "bbr") {
+            return Err(format!(
+                "tuic congestion control {control:?} is not supported (cubic, new_reno, bbr)"
+            ));
+        }
+    }
+    let udp_relay_mode = query
+        .string("udp_relay_mode")
+        .or_else(|| query.string("udp-relay-mode"));
+    if let Some(mode) = udp_relay_mode.as_deref() {
+        if !matches!(mode, "native" | "quic") {
+            return Err(format!(
+                "tuic udp relay mode {mode:?} is not supported (native, quic)"
+            ));
+        }
+    }
+    Ok(Outbound {
+        protocol: Protocol::Tuic {
+            uuid,
+            password: percent_decode(raw_password),
+            congestion_control,
+            udp_relay_mode,
+            zero_rtt: query.flag("zero_rtt_handshake")
+                || query.flag("zero-rtt-handshake")
+                || query.flag("reduce_rtt"),
+        },
+        transport: Transport::Tcp,
+        security: Security::Tls {
+            sni: query.string("sni").or_else(|| host_name(&server)),
+            alpn: query.list("alpn"),
+            fingerprint: query.string("fp"),
+            allow_insecure: query.flag("insecure")
+                || query.flag("allow_insecure")
+                || query.flag("allowinsecure"),
+        },
+        server,
+        port,
+        remark,
+    })
+}
+
+fn parse_anytls(rest: &str) -> Result<Outbound, String> {
+    let (body, remark) = split_fragment(rest);
+    let (authority, params) = split_query(body);
+    let query = Query::parse(params);
+    let (userinfo, target) = authority
+        .rsplit_once('@')
+        .ok_or("an anytls link must be anytls://<password>@<host>:<port>")?;
+    let password = percent_decode(userinfo).trim().to_string();
+    if password.is_empty() {
+        return Err("an anytls link needs its password".into());
+    }
+    let (server, port) = split_host_port(trim_trailing_path(target), Some(443))?;
+    Ok(Outbound {
+        protocol: Protocol::AnyTls { password },
+        transport: Transport::Tcp,
+        security: Security::Tls {
+            sni: query
+                .string("sni")
+                .or_else(|| query.string("peer"))
+                .or_else(|| host_name(&server)),
+            alpn: query.list("alpn"),
+            fingerprint: query.string("fp"),
+            allow_insecure: query.flag("insecure") || query.flag("allowinsecure"),
+        },
+        server,
+        port,
+        remark,
+    })
+}
+
+/// `hysteria2://…@host:443/?…` and friends carry a path separator no other
+/// scheme uses; the authority ends at it.
+fn trim_trailing_path(target: &str) -> &str {
+    target.trim_end_matches('/')
+}
+
+// ---------------------------------------------------------------------------
 // Shared link grammar
 // ---------------------------------------------------------------------------
 
@@ -541,6 +775,28 @@ fn parse_port(text: &str) -> Result<u16, String> {
         .ok()
         .filter(|port| *port != 0)
         .ok_or_else(|| format!("port {:?} is not a port number", excerpt(text)))
+}
+
+/// One end of a port-hopping range; unlike [`parse_port`], an open end is a
+/// mistake the caller reports.
+fn hop_port(text: &str) -> Result<u16, String> {
+    text.trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| format!("{:?} is not a port in a hopping range", excerpt(text)))
+}
+
+fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        out.push(hex_value(pair[0])? << 4 | hex_value(pair[1])?);
+    }
+    Some(out)
 }
 
 fn split_credentials(userinfo: Option<&str>) -> (Option<String>, Option<String>) {
@@ -699,6 +955,102 @@ impl Query {
 
     fn list(&self, key: &str) -> Vec<String> {
         split_list(self.get(key))
+    }
+
+    /// The first of `keys` the link carries, in a caller-chosen priority
+    /// order: clients spell the same parameter differently.
+    fn first(&self, keys: &[&str]) -> Option<&str> {
+        keys.iter().find_map(|key| self.get(key))
+    }
+
+    /// A bandwidth hint in Mbps. Links spell it `50`, `50mbps` or `50Mbps`;
+    /// anything else is a link this app cannot honour rather than a number to
+    /// guess at.
+    fn mbps(&self, keys: &[&str]) -> Result<Option<u32>, String> {
+        let Some(raw) = self.first(keys) else {
+            return Ok(None);
+        };
+        let digits: String = raw
+            .trim()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let value = digits
+            .parse::<u32>()
+            .map_err(|_| format!("{raw:?} is not a bandwidth in Mbps"))?;
+        Ok((value > 0).then_some(value))
+    }
+
+    /// A duration in seconds, for the parameters that take one.
+    fn seconds(&self, keys: &[&str]) -> Result<Option<u64>, String> {
+        let Some(raw) = self.first(keys) else {
+            return Ok(None);
+        };
+        let digits: String = raw
+            .trim()
+            .trim_end_matches(['s', 'S'])
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let value = digits
+            .parse::<u64>()
+            .map_err(|_| format!("{raw:?} is not a duration in seconds"))?;
+        Ok((value > 0).then_some(value))
+    }
+
+    /// Port hopping, normalised to sing-box's `server_ports` syntax: one
+    /// `start:end` range per entry. Links spell one `443-8443`, `443:8443` or a
+    /// bare port, comma or semicolon separated.
+    fn ports(&self, keys: &[&str]) -> Result<Vec<String>, String> {
+        // sing-box expands every port of every range into a slice it then hops
+        // over, so a link asking for a million ports is refused, not copied.
+        const MAX_HOP_PORTS: u32 = 1024;
+        let Some(raw) = self.first(keys) else {
+            return Ok(Vec::new());
+        };
+        let mut ranges = Vec::new();
+        let mut total: u32 = 0;
+        for item in raw.split([',', ';']) {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let (start, end) = match item.split_once(['-', ':']) {
+                Some((start, end)) => (hop_port(start)?, hop_port(end)?),
+                None => {
+                    let port = hop_port(item)?;
+                    (port, port)
+                }
+            };
+            if end < start {
+                return Err(format!("port range {item:?} runs backwards"));
+            }
+            total = total.saturating_add(end - start + 1);
+            ranges.push(format!("{start}:{end}"));
+        }
+        if total > MAX_HOP_PORTS {
+            return Err(format!(
+                "port hopping over {total} ports is more than this app will carry ({MAX_HOP_PORTS})"
+            ));
+        }
+        Ok(ranges)
+    }
+
+    /// `pinSHA256`: the hex digest a link carries for the server certificate's
+    /// public key, converted to the base64 sing-box's `tls` block takes.
+    fn pin(&self) -> Result<Option<String>, String> {
+        let Some(raw) = self.first(&["pinsha256", "pin_sha256", "pinned_sha256", "pin"]) else {
+            return Ok(None);
+        };
+        let digest = hex_decode(raw.trim())
+            .ok_or_else(|| format!("pinSHA256 {:?} is not a hex digest", excerpt(raw)))?;
+        if digest.len() != 32 {
+            return Err(format!(
+                "pinSHA256 is {} bytes; a SHA-256 digest is 32",
+                digest.len()
+            ));
+        }
+        Ok(Some(STANDARD.encode(digest)))
     }
 
     fn flag(&self, key: &str) -> bool {
@@ -954,7 +1306,7 @@ fn routable(ip: IpAddr) -> bool {
 
 /// The C entry points a core's shim exports from the shared Go archive.
 ///
-/// Every core exports the same four shapes under its own prefix; holding them in
+/// Every core exports the same shapes under its own prefix; holding them in
 /// one struct is what lets [`start`] be written once for both cores.
 #[derive(Clone, Copy)]
 pub struct CoreFfi {
@@ -963,6 +1315,13 @@ pub struct CoreFfi {
     pub running: unsafe extern "C" fn() -> c_int,
     /// Frees a message the shim returned, with the shim's own allocator.
     pub string_free: unsafe extern "C" fn(*mut c_char),
+    /// Cumulative `(uplink, downlink)` bytes through the core. Returns 1 when
+    /// the core reported a sample and 0 when it has none to report — the
+    /// counters are optional, so a config without them is not an error.
+    pub stats: unsafe extern "C" fn(*mut i64, *mut i64) -> c_int,
+    /// Installs the host log sink (NULL clears it) and its level gate, from the
+    /// scale [`log_gate`] produces.
+    pub set_log: unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>, c_int),
 }
 
 /// One core's build identity and config grammar — the only per-core code.
@@ -971,9 +1330,52 @@ pub trait Dialect: Send + Sync + 'static {
     const DISPLAY: &'static str;
     /// The shim this core exports from `libfcae_go_bridge`.
     const FFI: CoreFfi;
+    /// The trampoline that receives this core's log lines.
+    const LOG_SINK: unsafe extern "C" fn(c_int, *const c_char);
 
     /// Emit the core's own config for this session.
     fn generate(plan: &Plan<'_>) -> std::result::Result<Value, String>;
+}
+
+/// Level gate for a core's logger: 0 leaves it silent, 1..=4 are errors,
+/// warnings, info and debug. The scale is the shims': see `xray.set_log` and
+/// `sb.set_log` in `bridges/*/go/bridge.go`.
+fn log_gate(level: Level) -> c_int {
+    match level {
+        Level::Off => 0,
+        Level::Error => 1,
+        Level::Warn => 2,
+        Level::Info => 3,
+        Level::Debug | Level::Trace => 4,
+    }
+}
+
+/// Hand one core log line to the app's logger.
+///
+/// The shims call this from their own goroutines with a NUL-terminated line
+/// they own, so it is copied before returning and nothing panics across the cgo
+/// boundary.
+pub fn forward_log(core: &str, level: c_int, message: *const c_char) {
+    if message.is_null() {
+        return;
+    }
+    let level = match level {
+        1 => log::Level::Error,
+        2 => log::Level::Warn,
+        4 => log::Level::Debug,
+        _ => log::Level::Info,
+    };
+    // The gate drops most of what a core emits, so check before building the
+    // line, not after.
+    if !log::log_enabled!(level) {
+        return;
+    }
+    let _ = std::panic::catch_unwind(|| {
+        // SAFETY: the pointer is valid for the duration of the call, as the
+        // shims pass a `C.CString` they free immediately afterwards.
+        let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+        log::log!(level, "[{core}] {text}");
+    });
 }
 
 /// Load the core, start it on the generated config and wait until its listeners
@@ -1028,6 +1430,10 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     // a second or two, so it runs on the blocking pool: a long Go call must not
     // stall a Tokio worker the rest of the session shares.
     let ffi = D::FFI;
+    // The sink goes in before the core runs, not after: binding listeners,
+    // resolving the server and failing a config all happen during start, and
+    // that is exactly what a user needs in the console.
+    unsafe { (ffi.set_log)(Some(D::LOG_SINK), log_gate(Level::of(config.core.log_level))) };
     let started = tokio::task::spawn_blocking(move || {
         // Unpacks the embedded cronet DLL where sing-box's loader can find it,
         // if this build embedded one. It has to happen before the core starts:
@@ -1057,6 +1463,9 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
         ffi,
         endpoints,
         stopping: AtomicBool::new(false),
+        traffic: Mutex::new(Traffic::default()),
+        rtt_ms: Arc::new(AtomicU32::new(0)),
+        rtt_started: AtomicBool::new(false),
     };
     running.await_ready().await?;
     Ok(running)
@@ -1098,6 +1507,13 @@ pub struct Running {
     ffi: CoreFfi,
     endpoints: Endpoints,
     stopping: AtomicBool,
+    /// Sample bookkeeping behind [`BackendHandle::counters`].
+    traffic: Mutex<Traffic>,
+    /// Tunnel round trip in milliseconds; 0 until a probe succeeds.
+    rtt_ms: Arc<AtomicU32>,
+    /// One probe per session: set before the probe thread starts, cleared only
+    /// if it could not be spawned.
+    rtt_started: AtomicBool,
 }
 
 impl Running {
@@ -1143,6 +1559,173 @@ impl Running {
         // lifetime, so the pointer is always valid.
         unsafe { (self.ffi.running)() == 1 }
     }
+
+    /// Cumulative `(tx, rx)` bytes from the core, or `None` when it keeps no
+    /// counters.
+    fn bytes(&self) -> Option<(u64, u64)> {
+        let mut uplink: i64 = 0;
+        let mut downlink: i64 = 0;
+        // SAFETY: the shim writes both values through the pointers, and it is
+        // linked into this binary for the whole process lifetime.
+        let reported = unsafe { (self.ffi.stats)(&mut uplink, &mut downlink) };
+        (reported == 1).then(|| (uplink.max(0) as u64, downlink.max(0) as u64))
+    }
+
+    /// Measure the tunnel round trip, once per session.
+    ///
+    /// Neither core reports latency without a config section this app does not
+    /// own (Xray's observatory, sing-box's `urltest` group), so it is measured
+    /// the way the Psiphon bridge measures it: one connect through the core's
+    /// own listener, timed until the core answers. The probe runs on its own
+    /// thread so a stalled tunnel can never delay a telemetry sample.
+    fn measure_rtt(&self) {
+        if self.rtt_ms.load(Ordering::Acquire) != 0
+            || self.rtt_started.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        // A SOCKS listener answers a CONNECT only after the outbound dial
+        // completes, and so does the HTTP proxy; either is a full tunnel round
+        // trip. SOCKS wins because TUN mode always has one.
+        let target = match (self.endpoints.socks, self.endpoints.http) {
+            (Some(socks), _) => (socks, true),
+            (None, Some(http)) => (http, false),
+            (None, None) => {
+                self.rtt_started.store(false, Ordering::Release);
+                return;
+            }
+        };
+        let rtt_ms = Arc::clone(&self.rtt_ms);
+        let spawned = std::thread::Builder::new()
+            .name("fcae-core-rtt".into())
+            .spawn(move || {
+                if let Some(measured) = rtt_once(target.0, target.1) {
+                    rtt_ms.store(measured, Ordering::Release);
+                }
+            });
+        if spawned.is_err() {
+            self.rtt_started.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Host name and port the latency probe connects to: a plain HTTP port on a
+/// host that answers everywhere, so the probe measures the tunnel and not the
+/// target.
+const RTT_HOST: &str = "www.gstatic.com";
+const RTT_PORT: u16 = 80;
+
+/// One tunnelled connect, timed from request to answer.
+///
+/// The target is named, never resolved locally: the core resolves it, so a
+/// blocked local resolver cannot fake or fail a latency reading.
+fn rtt_once(address: SocketAddr, socks: bool) -> Option<u32> {
+    use std::io::{Read, Write};
+
+    let mut stream = std::net::TcpStream::connect_timeout(&address, PROBE_TIMEOUT).ok()?;
+    stream.set_read_timeout(Some(PROBE_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(PROBE_TIMEOUT)).ok()?;
+    let started = if socks {
+        // The greeting never leaves the host, so it is not part of the round
+        // trip.
+        stream.write_all(&[0x05, 0x01, 0x00]).ok()?;
+        let mut greeting = [0u8; 2];
+        stream.read_exact(&mut greeting).ok()?;
+        if greeting != [0x05, 0x00] {
+            return None;
+        }
+        let host = RTT_HOST.as_bytes();
+        let mut request = Vec::with_capacity(7 + host.len());
+        request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host.len() as u8]);
+        request.extend_from_slice(host);
+        request.extend_from_slice(&RTT_PORT.to_be_bytes());
+        let started = Instant::now();
+        stream.write_all(&request).ok()?;
+        // VER, REP, RSV, ATYP: the address that follows is not needed.
+        let mut reply = [0u8; 4];
+        stream.read_exact(&mut reply).ok()?;
+        if reply[0] != 0x05 || reply[1] != 0x00 {
+            return None;
+        }
+        started
+    } else {
+        let request = format!(
+            "CONNECT {RTT_HOST}:{RTT_PORT} HTTP/1.1\r\nHost: {RTT_HOST}:{RTT_PORT}\r\n\r\n"
+        );
+        let started = Instant::now();
+        stream.write_all(request.as_bytes()).ok()?;
+        let mut status = [0u8; 12];
+        stream.read_exact(&mut status).ok()?;
+        // A status line, and a 2xx/3xx answer: an error page is not a tunnel
+        // round trip.
+        if !status.starts_with(b"HTTP/1.") || status[8] != b' ' || !matches!(status[9], b'2' | b'3')
+        {
+            return None;
+        }
+        started
+    };
+    let elapsed = started.elapsed().as_millis();
+    Some(elapsed.clamp(1, u32::MAX as u128) as u32)
+}
+
+/// Bytes-per-second between two samples `elapsed_ms` apart, computed in
+/// milliseconds so a fast pump cannot collapse the rate to zero.
+fn rate(delta: u64, elapsed_ms: u64) -> u64 {
+    delta.saturating_mul(1_000) / elapsed_ms.max(1)
+}
+
+/// Rate bookkeeping for one core.
+///
+/// Totals are cumulative and the pump samples them once a second; the UI wants
+/// bytes/sec, so the previous sample is kept here. Owned by the handle rather
+/// than a module static, so two cores in one process can never share a
+/// baseline, and a restarted core starts a fresh one.
+#[derive(Default)]
+struct Traffic {
+    /// Totals published by the last sample.
+    total_tx: u64,
+    total_rx: u64,
+    /// Baseline of the last rate calculation.
+    prev_tx: u64,
+    prev_rx: u64,
+    at: Option<Instant>,
+}
+
+impl Traffic {
+    /// Fold one shim sample into a telemetry sample.
+    ///
+    /// `None` means the core had no totals to report: the previous ones are
+    /// republished with zero rates, because a momentary gap must not look like
+    /// a restart to [`crate::telemetry`] — it folds the published total when a
+    /// sample goes backwards, and folding twice would double-count the session.
+    fn counters(&mut self, sample: Option<(u64, u64)>, now: Instant, rtt_ms: u32) -> Counters {
+        if let Some((tx, rx)) = sample {
+            self.total_tx = tx;
+            self.total_rx = rx;
+        }
+        let (tx_bytes_sec, rx_bytes_sec) = match self.at {
+            // The first sample has no baseline; a one-off spike of the session's
+            // lifetime bytes would be a lie.
+            None => (0, 0),
+            Some(at) => {
+                let elapsed = now.saturating_duration_since(at).as_millis() as u64;
+                (
+                    rate(self.total_tx.saturating_sub(self.prev_tx), elapsed),
+                    rate(self.total_rx.saturating_sub(self.prev_rx), elapsed),
+                )
+            }
+        };
+        self.prev_tx = self.total_tx;
+        self.prev_rx = self.total_rx;
+        self.at = Some(now);
+        Counters {
+            total_rx: self.total_rx,
+            total_tx: self.total_tx,
+            rx_bytes_sec,
+            tx_bytes_sec,
+            rtt_ms,
+        }
+    }
 }
 
 #[async_trait]
@@ -1155,11 +1738,17 @@ impl BackendHandle for Running {
         self.alive()
     }
 
-    /// The cores expose byte counters only through their stats APIs, which
-    /// neither shim enables: a default sample leaves telemetry reporting "no
-    /// sample yet" instead of inventing a rate.
+    /// Cumulative totals read from the core's own stats manager, the rate
+    /// between the last two polls, and the tunnel round trip once measured.
+    /// Nothing here is estimated: a core that reports no counters publishes
+    /// zeros instead of a guess.
     fn counters(&self) -> Counters {
-        Counters::default()
+        self.measure_rtt();
+        let sample = self.bytes();
+        let rtt_ms = self.rtt_ms.load(Ordering::Acquire);
+        self.traffic
+            .lock()
+            .counters(sample, Instant::now(), rtt_ms)
     }
 
     /// The cores have no "session ended" event to await, so the handle polls the
@@ -1373,5 +1962,154 @@ mod tests {
         assert!(CoreProfile::parse(&format!("vless://{UUID}@example.com:0")).is_err());
         assert!(CoreProfile::parse(&format!("vless://{UUID}@example.com")).is_err());
         assert!(CoreProfile::parse(&format!("vless://{UUID}@:443")).is_err());
+    }
+
+    #[test]
+    fn hysteria2_links_carry_obfs_bandwidth_hopping_and_the_pin() {
+        let outbound = link(
+            "hysteria2://pa%3Ass@example.com:8443/?sni=www.example.com&insecure=1\
+             &obfs=salamander&obfs-password=salt&up=50&down=200\
+             &mport=20000-20100&hop-interval=30\
+             &pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f#fast",
+        );
+        assert_eq!(outbound.server, "example.com");
+        assert_eq!(outbound.port, 8443);
+        assert_eq!(outbound.remark.as_deref(), Some("fast"));
+        match &outbound.protocol {
+            Protocol::Hysteria2 {
+                password,
+                obfs,
+                up_mbps,
+                down_mbps,
+                ports,
+                hop_interval,
+                pin,
+            } => {
+                assert_eq!(password, "pa:ss");
+                assert_eq!(
+                    obfs,
+                    &Some(("salamander".to_string(), "salt".to_string()))
+                );
+                assert_eq!((*up_mbps, *down_mbps), (Some(50), Some(200)));
+                assert_eq!(ports, &vec!["20000:20100".to_string()]);
+                assert_eq!(*hop_interval, Some(30));
+                // Base64 of the 32-byte digest, which is what sing-box takes.
+                assert_eq!(pin.as_deref().map(str::len), Some(44));
+            }
+            other => panic!("expected hysteria2, got {other:?}"),
+        }
+        match outbound.security {
+            Security::Tls {
+                sni,
+                allow_insecure,
+                ..
+            } => {
+                assert_eq!(sni.as_deref(), Some("www.example.com"));
+                assert!(allow_insecure);
+            }
+            other => panic!("expected TLS, got {other:?}"),
+        }
+        // Xray-core has no Hysteria2 outbound: the bridge refuses it by name.
+        assert!(!outbound.protocol.xray_carries());
+    }
+
+    #[test]
+    fn tuic_and_anytls_links_parse() {
+        let tuic = link(
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pass@example.com:10443\
+             ?congestion_control=bbr&udp_relay_mode=quic&alpn=h3&sni=www.example.com\
+             &reduce_rtt=1#tuic",
+        );
+        assert_eq!(tuic.port, 10443);
+        match &tuic.protocol {
+            Protocol::Tuic {
+                uuid,
+                password,
+                congestion_control,
+                udp_relay_mode,
+                zero_rtt,
+            } => {
+                assert_eq!(uuid, "b831381d-6324-4d53-ad4f-8cda48b30811");
+                assert_eq!(password, "pass");
+                assert_eq!(congestion_control.as_deref(), Some("bbr"));
+                assert_eq!(udp_relay_mode.as_deref(), Some("quic"));
+                assert!(zero_rtt);
+            }
+            other => panic!("expected tuic, got {other:?}"),
+        }
+        assert!(!tuic.protocol.xray_carries());
+
+        let anytls = link("anytls://secret@example.com:443?sni=www.example.com&fp=chrome#a");
+        match &anytls.protocol {
+            Protocol::AnyTls { password } => assert_eq!(password, "secret"),
+            other => panic!("expected anytls, got {other:?}"),
+        }
+        match &anytls.security {
+            Security::Tls { fingerprint, .. } => {
+                assert_eq!(fingerprint.as_deref(), Some("chrome"))
+            }
+            other => panic!("expected TLS, got {other:?}"),
+        }
+        assert!(!anytls.protocol.xray_carries());
+    }
+
+    #[test]
+    fn quic_link_parameters_this_app_cannot_honour_are_refused() {
+        let error = CoreProfile::parse("hysteria2://secret@example.com:443?obfs=gecko")
+            .expect_err("only salamander is supported");
+        assert!(error.contains("salamander"), "{error}");
+        let error = CoreProfile::parse("hysteria2://secret@example.com:443?mport=1-9000")
+            .expect_err("a range that large is refused");
+        assert!(error.contains("hopping"), "{error}");
+        let error = CoreProfile::parse("hysteria2://secret@example.com:443?up=fast")
+            .expect_err("bandwidth is a number");
+        assert!(error.contains("Mbps"), "{error}");
+        let error = CoreProfile::parse("tuic://not-a-uuid:pass@example.com:443")
+            .expect_err("tuic needs a UUID");
+        assert!(error.contains("uuid"), "{error}");
+        let error = CoreProfile::parse("hysteria2://example.com:443")
+            .expect_err("hysteria2 needs a password");
+        assert!(error.contains("password"), "{error}");
+    }
+
+    #[test]
+    fn the_log_gate_follows_the_engine_level() {
+        assert_eq!(log_gate(Level::Off), 0);
+        assert_eq!(log_gate(Level::Error), 1);
+        assert_eq!(log_gate(Level::Warn), 2);
+        assert_eq!(log_gate(Level::Info), 3);
+        assert_eq!(log_gate(Level::Debug), 4);
+        assert_eq!(log_gate(Level::Trace), 4);
+    }
+
+    #[test]
+    fn traffic_rates_follow_the_pump_interval() {
+        let start = Instant::now();
+        let mut traffic = Traffic::default();
+        let first = traffic.counters(Some((1_000, 500)), start, 0);
+        assert_eq!((first.total_tx, first.total_rx), (1_000, 500));
+        // No baseline yet: totals without an invented rate.
+        assert_eq!((first.tx_bytes_sec, first.rx_bytes_sec), (0, 0));
+        let second = traffic.counters(Some((3_000, 1_500)), start + Duration::from_secs(2), 42);
+        assert_eq!((second.total_tx, second.total_rx), (3_000, 1_500));
+        assert_eq!((second.tx_bytes_sec, second.rx_bytes_sec), (1_000, 500));
+        assert_eq!(second.rtt_ms, 42);
+        // Sub-second pumps are scaled, not truncated: 50 bytes in 500 ms.
+        let fast = traffic.counters(Some((3_050, 1_500)), start + Duration::from_millis(2_500), 42);
+        assert_eq!(fast.tx_bytes_sec, 100);
+    }
+
+    #[test]
+    fn a_silent_core_keeps_its_totals_instead_of_restarting_them() {
+        let start = Instant::now();
+        let mut traffic = Traffic::default();
+        traffic.counters(Some((4_000, 2_000)), start, 0);
+        // The core reports nothing for one poll: republish, do not reset.
+        let gap = traffic.counters(None, start + Duration::from_secs(1), 0);
+        assert_eq!((gap.total_tx, gap.total_rx), (4_000, 2_000));
+        assert_eq!((gap.tx_bytes_sec, gap.rx_bytes_sec), (0, 0));
+        let resumed = traffic.counters(Some((4_500, 2_000)), start + Duration::from_secs(2), 0);
+        assert_eq!((resumed.total_tx, resumed.total_rx), (4_500, 2_000));
+        assert_eq!(resumed.tx_bytes_sec, 500);
     }
 }

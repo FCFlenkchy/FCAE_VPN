@@ -27,12 +27,12 @@ pub fn generate(plan: &Plan<'_>) -> Result<Value, String> {
             if plan.socks.is_none() && plan.http.is_none() {
                 return Err("the session has no listener for the core to serve".into());
             }
-            Ok(config(plan, outbound, &Rules::build(plan.routing)?))
+            config(plan, outbound, &Rules::build(plan.routing)?)
         }
     }
 }
 
-fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Value {
+fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Result<Value, String> {
     let mut inbounds = Vec::with_capacity(2);
     if let Some(socks) = plan.socks {
         inbounds.push(json!({
@@ -56,7 +56,7 @@ fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Value {
     }
 
     let mut outbounds = Vec::with_capacity(4);
-    outbounds.push(outbound_config(outbound, plan.upstream.is_some()));
+    outbounds.push(outbound_config(outbound, plan.upstream.is_some())?);
     if let Some(upstream) = plan.upstream {
         outbounds.push(upstream_config(upstream));
     }
@@ -64,13 +64,30 @@ fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Value {
     outbounds.push(json!({"tag": DIRECT_TAG, "protocol": "freedom"}));
     outbounds.push(json!({"tag": BLOCK_TAG, "protocol": "blackhole"}));
 
-    json!({
+    Ok(json!({
         // `access: none` matters: Xray defaults the access log to the console
         // and would otherwise print a line per connection from a GUI process.
         "log": {"loglevel": level(plan.level), "access": "none"},
+        // Counters need the stats app, and the policy flags are what make the
+        // handlers register a counter in the first place: without both the core
+        // runs and reports no bytes at all.
+        "stats": {},
+        "policy": {"system": system_stats()},
         "inbounds": inbounds,
         "outbounds": outbounds,
         "routing": {"domainStrategy": "AsIs", "rules": routing_rules(rules)},
+    }))
+}
+
+/// The policy flags the app's counters read. Inbound counters are the client's
+/// own traffic; the outbound ones are the fallback for a native config whose
+/// listeners carry no tag, which Xray does not count.
+fn system_stats() -> Value {
+    json!({
+        "statsInboundUplink": true,
+        "statsInboundDownlink": true,
+        "statsOutboundUplink": true,
+        "statsOutboundDownlink": true,
     })
 }
 
@@ -88,7 +105,7 @@ fn level(level: Level) -> &'static str {
     }
 }
 
-fn outbound_config(outbound: &Outbound, chained: bool) -> Value {
+fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> {
     let (protocol, settings) = match &outbound.protocol {
         Protocol::Vless { uuid, flow } => {
             let mut user = json!({"id": uuid, "encryption": "none"});
@@ -151,6 +168,15 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Value {
                 password.as_deref(),
             )]}),
         ),
+        // sing-box's own protocols: Xray-core has no outbound for any of them,
+        // so the session is refused with the reason instead of a config the
+        // core would reject with a protocol name nobody can act on.
+        Protocol::Hysteria2 { .. } | Protocol::Tuic { .. } | Protocol::AnyTls { .. } => {
+            return Err(format!(
+                "Xray-core cannot carry a {} outbound; save this link as a sing-box config",
+                outbound.protocol.name()
+            ))
+        }
     };
 
     let mut value = json!({"tag": PROXY_TAG, "protocol": protocol, "settings": settings});
@@ -158,7 +184,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Value {
     if !stream.is_empty() {
         value["streamSettings"] = Value::Object(stream);
     }
-    value
+    Ok(value)
 }
 
 fn account_server(address: &str, port: u16, user: Option<&str>, password: Option<&str>) -> Value {
@@ -345,6 +371,11 @@ fn native(config: &Value, plan: &Plan<'_>) -> Result<Value, String> {
             object.insert("log".into(), json!({"loglevel": level(plan.level)}));
         }
     }
+    // Same counters as a generated config, merged rather than replaced: the
+    // `stats` app may already carry settings and `policy` may hold timeouts or
+    // per-level settings this app must not drop.
+    object.entry("stats").or_insert_with(|| json!({}));
+    merge_system_stats(object);
 
     let inbounds = match object.remove("inbounds") {
         Some(Value::Array(inbounds)) => inbounds,
@@ -422,6 +453,31 @@ fn native(config: &Value, plan: &Plan<'_>) -> Result<Value, String> {
     }
     object.insert("inbounds".into(), Value::Array(rewritten));
     Ok(config)
+}
+
+/// Merge the counters' policy flags into a native config's own `policy`, which
+/// may be absent, may hold unrelated fields, or may be the wrong shape for the
+/// flags to be added to.
+fn merge_system_stats(object: &mut Map<String, Value>) {
+    let policy = object.entry("policy").or_insert_with(|| json!({}));
+    if !policy.is_object() {
+        *policy = json!({});
+    }
+    let policy = policy
+        .as_object_mut()
+        .expect("policy was just replaced with an object");
+    let system = policy.entry("system").or_insert_with(|| json!({}));
+    if !system.is_object() {
+        *system = json!({});
+    }
+    let system = system
+        .as_object_mut()
+        .expect("system was just replaced with an object");
+    if let Some(flags) = system_stats().as_object() {
+        for (key, value) in flags {
+            system.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 fn rewrite_listener(
@@ -506,6 +562,27 @@ mod tests {
         assert_eq!(config["outbounds"][1]["tag"], DIRECT_TAG);
         assert_eq!(config["outbounds"][2]["tag"], BLOCK_TAG);
         assert_eq!(config["log"]["loglevel"], "warning");
+        assert!(config["stats"].is_object());
+        assert_eq!(config["policy"]["system"]["statsInboundUplink"], true);
+        assert_eq!(config["policy"]["system"]["statsOutboundDownlink"], true);
+    }
+
+    #[test]
+    fn native_policies_keep_their_own_settings_and_gain_the_counter_flags() {
+        let profile = Profile::parse(
+            r#"{
+                "inbounds": [{"tag": "in", "protocol": "socks", "port": 1080}],
+                "outbounds": [{"protocol": "freedom"}],
+                "policy": {"system": {"connIdle": 300}, "levels": {"0": {"handshake": 4}}}
+            }"#,
+        )
+        .expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        assert!(config["stats"].is_object());
+        assert_eq!(config["policy"]["system"]["connIdle"], 300);
+        assert_eq!(config["policy"]["system"]["statsInboundDownlink"], true);
+        assert_eq!(config["policy"]["levels"]["0"]["handshake"], 4);
     }
 
     #[test]
@@ -622,6 +699,21 @@ mod tests {
         assert_eq!(inbounds[0]["listen"], "127.0.0.1");
         assert_eq!(inbounds[0]["port"], 1080);
         assert_eq!(inbounds[0]["settings"]["udp"], true);
+    }
+
+    #[test]
+    fn sing_box_only_links_are_refused_with_the_reason() {
+        for text in [
+            "hysteria2://secret@example.com:443",
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pass@example.com:443",
+            "anytls://secret@example.com:443",
+        ] {
+            let profile = Profile::parse(text).expect("profile parses");
+            let routing = routing();
+            let error =
+                generate(&plan(&profile, &routing, None)).expect_err("xray cannot carry it");
+            assert!(error.contains("sing-box"), "{text}: {error}");
+        }
     }
 
     #[test]

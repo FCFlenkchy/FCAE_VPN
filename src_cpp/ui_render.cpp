@@ -467,12 +467,20 @@ static uint64_t config_signature() {
     h = fnv_value(h, g_app.http_port);
     h = fnv_value(h, g_app.firefox_socks_port);
     h = fnv_value(h, g_app.firefox_http_port);
+    h = fnv_value(h, g_app.xray_socks_port);
+    h = fnv_value(h, g_app.xray_http_port);
+    h = fnv_value(h, g_app.singbox_socks_port);
+    h = fnv_value(h, g_app.singbox_http_port);
     h = fnv_value(h, g_app.tor_http_port);
     h = fnv_value(h, g_app.tor_http_enabled);
     h = fnv_value(h, g_app.socks_enabled);
     h = fnv_value(h, g_app.http_enabled);
     h = fnv_value(h, g_app.firefox_socks_enabled);
     h = fnv_value(h, g_app.firefox_http_enabled);
+    h = fnv_value(h, g_app.xray_socks_enabled);
+    h = fnv_value(h, g_app.xray_http_enabled);
+    h = fnv_value(h, g_app.singbox_socks_enabled);
+    h = fnv_value(h, g_app.singbox_http_enabled);
     h = fnv_value(h, g_app.psiphon_socks_enabled);
     h = fnv_value(h, g_app.psiphon_http_enabled);
     h = fnv_value(h, g_app.tor_socks_enabled);
@@ -587,6 +595,10 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.http_enabled);
     h = fnv_value(h, g_app.firefox_socks_enabled);
     h = fnv_value(h, g_app.firefox_http_enabled);
+    h = fnv_value(h, g_app.xray_socks_enabled);
+    h = fnv_value(h, g_app.xray_http_enabled);
+    h = fnv_value(h, g_app.singbox_socks_enabled);
+    h = fnv_value(h, g_app.singbox_http_enabled);
     h = fnv_value(h, g_app.psiphon_socks_enabled);
     h = fnv_value(h, g_app.psiphon_http_enabled);
     h = fnv_value(h, g_app.tor_socks_enabled);
@@ -596,6 +608,10 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.http_port);
     h = fnv_value(h, g_app.firefox_socks_port);
     h = fnv_value(h, g_app.firefox_http_port);
+    h = fnv_value(h, g_app.xray_socks_port);
+    h = fnv_value(h, g_app.xray_http_port);
+    h = fnv_value(h, g_app.singbox_socks_port);
+    h = fnv_value(h, g_app.singbox_http_port);
     h = fnv_value(h, g_app.h2_enabled);
     h = fnv_value(h, g_app.ech_enabled);
     h = fnv_value(h, g_app.sys_profile);
@@ -1249,6 +1265,14 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         g_app.firefox_http_port = (uint16_t)parse_port(val, g_app.firefox_http_port);
         s_loaded_firefox_http_port = true;
     }
+    else if (key == "xray_socks_port") g_app.xray_socks_port = (uint16_t)parse_port(val, g_app.xray_socks_port);
+    else if (key == "xray_http_port") g_app.xray_http_port = (uint16_t)parse_port(val, g_app.xray_http_port);
+    else if (key == "singbox_socks_port") g_app.singbox_socks_port = (uint16_t)parse_port(val, g_app.singbox_socks_port);
+    else if (key == "singbox_http_port") g_app.singbox_http_port = (uint16_t)parse_port(val, g_app.singbox_http_port);
+    else if (key == "xray_socks_enabled") g_app.xray_socks_enabled = atoi(val.c_str()) != 0;
+    else if (key == "xray_http_enabled") g_app.xray_http_enabled = atoi(val.c_str()) != 0;
+    else if (key == "singbox_socks_enabled") g_app.singbox_socks_enabled = atoi(val.c_str()) != 0;
+    else if (key == "singbox_http_enabled") g_app.singbox_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "aether_http_unified") { g_app.http_enabled = atoi(val.c_str()) != 0; s_loaded_unified_aether_http = true; }
     else if (key == "firefox_http_unified") { g_app.firefox_http_enabled = atoi(val.c_str()) != 0; s_loaded_unified_firefox_http = true; }
     else if (key == "aether_http_enabled" && !s_loaded_unified_aether_http) { g_app.http_enabled = atoi(val.c_str()) != 0; s_loaded_aether_http_enabled = true; }
@@ -1400,12 +1424,20 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "http_port=%u\n", (unsigned)g_app.http_port);
     fprintf(f, "firefox_socks_port=%u\n", (unsigned)g_app.firefox_socks_port);
     fprintf(f, "firefox_http_port=%u\n", (unsigned)g_app.firefox_http_port);
+    fprintf(f, "xray_socks_port=%u\n", (unsigned)g_app.xray_socks_port);
+    fprintf(f, "xray_http_port=%u\n", (unsigned)g_app.xray_http_port);
+    fprintf(f, "singbox_socks_port=%u\n", (unsigned)g_app.singbox_socks_port);
+    fprintf(f, "singbox_http_port=%u\n", (unsigned)g_app.singbox_http_port);
     fprintf(f, "tor_http_port=%u\n", (unsigned)g_app.tor_http_port);
     fprintf(f, "tor_http_enabled=%d\n", g_app.tor_http_enabled ? 1 : 0);
     fprintf(f, "socks_enabled=%d\n", g_app.socks_enabled ? 1 : 0);
     fprintf(f, "aether_http_unified=%d\n", g_app.http_enabled ? 1 : 0);
     fprintf(f, "firefox_socks_enabled=%d\n", g_app.firefox_socks_enabled ? 1 : 0);
     fprintf(f, "firefox_http_unified=%d\n", g_app.firefox_http_enabled ? 1 : 0);
+    fprintf(f, "xray_socks_enabled=%d\n", g_app.xray_socks_enabled ? 1 : 0);
+    fprintf(f, "xray_http_enabled=%d\n", g_app.xray_http_enabled ? 1 : 0);
+    fprintf(f, "singbox_socks_enabled=%d\n", g_app.singbox_socks_enabled ? 1 : 0);
+    fprintf(f, "singbox_http_enabled=%d\n", g_app.singbox_http_enabled ? 1 : 0);
     fprintf(f, "psiphon_socks_enabled=%d\n", g_app.psiphon_socks_enabled ? 1 : 0);
     fprintf(f, "psiphon_http_enabled=%d\n", g_app.psiphon_http_enabled ? 1 : 0);
     fprintf(f, "tor_socks_enabled=%d\n", g_app.tor_socks_enabled ? 1 : 0);
@@ -1624,6 +1656,9 @@ static bool load_config_from(const std::string& path) {
                            return entry.name.empty() || entry.text.empty();
                        }),
         g_app.core_configs.end());
+    // What each config can answer on, and the ports it pins, are cached for the
+    // listener switches; the library only settles here.
+    g_app.refresh_core_listeners();
     // Every reference to a saved config is a position, so a config that did not
     // survive above takes its references with it.
     if (g_app.core_selected < 0 || g_app.core_selected >= (int)g_app.core_configs.size()) {
@@ -3247,47 +3282,115 @@ static void core_config_check(int row) {
         snprintf(s_core_status, sizeof(s_core_status), "%s", reason);
         return;
     }
+    // Every session dialect dials its listener through SOCKS5 — TUN mode, a
+    // chained hop, the Psiphon egress — so a config that declares none can never
+    // start, and saying so here is cheaper than saying it after a failed connect.
+    uint32_t socks_port = 0;
+    uint32_t http_port = 0;
+    const uint32_t kinds = fcae_core_listeners(s_core_text_buf.data(), backend, &socks_port, &http_port);
+    if ((kinds & FCAE_CORE_LISTENER_SOCKS) == 0) {
+        snprintf(s_core_status, sizeof(s_core_status),
+                 "This config declares no SOCKS5 inbound; %s needs one to serve the session.",
+                 s_core_backend_buf == 1 ? "sing-box" : "Xray");
+        return;
+    }
     s_core_status_error = false;
     snprintf(s_core_status, sizeof(s_core_status), "Valid %s config.",
              s_core_backend_buf == 1 ? "sing-box" : "Xray");
 }
 
+/// What a core backend's listener can answer on while it runs the session: the
+/// resolved config's own answer when the final hop is that backend, otherwise
+/// anything its saved configs could serve.
+static uint32_t core_backend_listener_kinds(int backend) {
+    if (const AppState::CoreConfigEntry* entry = g_app.final_core_config())
+        if (entry->backend == backend) return entry->kinds;
+    uint32_t kinds = 0;
+    for (const AppState::CoreConfigEntry& entry : g_app.core_configs)
+        if (entry.backend == backend) kinds |= entry.kinds;
+    return kinds ? kinds : (FCAE_CORE_LISTENER_SOCKS | FCAE_CORE_LISTENER_HTTP);
+}
+
+/// One core's listener: the same switches and ports Aether and Firefox have.
+/// Both stay on screen when the resolved config cannot answer on them — the
+/// switch is disabled and the block says why, because a control that vanishes
+/// with the current selection is one the user cannot reason about.
+static void core_listener_block(int backend) {
+    const char* label = backend == 1 ? "sing-box" : "Xray";
+    bool& socks_enabled = backend == 1 ? g_app.singbox_socks_enabled : g_app.xray_socks_enabled;
+    bool& http_enabled  = backend == 1 ? g_app.singbox_http_enabled : g_app.xray_http_enabled;
+    uint16_t& socks_port = backend == 1 ? g_app.singbox_socks_port : g_app.xray_socks_port;
+    uint16_t& http_port  = backend == 1 ? g_app.singbox_http_port : g_app.xray_http_port;
+    const uint32_t kinds = core_backend_listener_kinds(backend);
+    const bool serves_socks = (kinds & FCAE_CORE_LISTENER_SOCKS) != 0;
+    const bool serves_http = (kinds & FCAE_CORE_LISTENER_HTTP) != 0;
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s listener", label);
+    ImGui::PushItemWidth(120);
+    ImGui::BeginDisabled(!serves_socks);
+    ImGui::Checkbox(backend == 1 ? "SOCKS5##singbox-socks" : "SOCKS5##xray-socks", &socks_enabled);
+    ImGui::SameLine();
+    ImGui::InputScalar(backend == 1 ? "port##singbox-socks-port" : "port##xray-socks-port",
+                       ImGuiDataType_U16, &socks_port);
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!serves_http);
+    ImGui::Checkbox(backend == 1 ? "HTTP##singbox-http" : "HTTP##xray-http", &http_enabled);
+    ImGui::SameLine();
+    ImGui::InputScalar(backend == 1 ? "port##singbox-http-port" : "port##xray-http-port",
+                       ImGuiDataType_U16, &http_port);
+    ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+    if (!serves_socks)
+        ImGui::TextDisabled("No saved %s config declares a SOCKS5 inbound.", label);
+    if (!serves_http)
+        ImGui::TextDisabled("No saved %s config declares an HTTP inbound, so this listener stays off.", label);
+}
+
 static void render_core_configs() {
+    static const char* const kTitle = "Xray & sing-box settings";
     if (s_core_configs_popup_open) {
-        ImGui::OpenPopup("Xray / sing-box configs");
+        ImGui::OpenPopup(kTitle);
         s_core_configs_popup_open = false;
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(modal_size(760.0f, 660.0f), ImGuiCond_Always);
-    if (!ImGui::BeginPopupModal("Xray / sing-box configs", nullptr, ImGuiWindowFlags_NoResize)) return;
+    ImGui::SetNextWindowSize(modal_size(760.0f, 720.0f), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize)) return;
 
-    ImGui::TextWrapped(
-        "Each saved config becomes an entry in the protocol list, so it can be the main "
-        "protocol or a chained exit. A saved config runs the core it is assigned to.");
-    ImGui::Spacing();
-    ImGui::BeginChild("##core_list", ImVec2(0, 138), ImGuiChildFlags_Borders);
+    // The library first, Xray above sing-box: it is what both cores run, and the
+    // group heading is the same one Aether and Firefox carry.
+    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Saved configs");
+    ImGui::BeginChild("##core_list", ImVec2(0, 146), ImGuiChildFlags_Borders);
+    static const char* const kGroupLabels[] = {"Xray", "sing-box"};
     int remove_row = -1;
-    for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
-        const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
-        ImGui::PushID(i);
-        const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
-        if (ImGui::Selectable(label.c_str(), s_core_edit == i)) {
-            s_core_edit = i;
-            s_core_buf_for = -1;
+    for (int group = 0; group < 2; ++group) {
+        ImGui::PushID(group);
+        ImGui::TextDisabled("%s", kGroupLabels[group]);
+        bool any = false;
+        for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
+            const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
+            if (entry.backend != group) continue;
+            any = true;
+            ImGui::PushID(i);
+            const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
+            if (ImGui::Selectable(label.c_str(), s_core_edit == i)) {
+                s_core_edit = i;
+                s_core_buf_for = -1;
+            }
+            ImGui::SameLine(std::max(0.0f, ImGui::GetContentRegionAvail().x - 90.0f));
+            if (ImGui::SmallButton("Remove")) remove_row = i;
+            ImGui::PopID();
         }
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%s)", entry.backend == 1 ? "sing-box" : "Xray");
-        ImGui::SameLine(std::max(0.0f, ImGui::GetContentRegionAvail().x - 90.0f));
-        if (ImGui::SmallButton("Remove")) remove_row = i;
+        if (!any) ImGui::TextDisabled("No saved %s configs.", kGroupLabels[group]);
         ImGui::PopID();
     }
-    if (g_app.core_configs.empty()) ImGui::TextDisabled("No saved configs yet.");
     ImGui::EndChild();
 
     if (ImGui::Button("+ Add config") && (int)g_app.core_configs.size() < kMaxCoreConfigs) {
         AppState::CoreConfigEntry entry;
         entry.name = "Config " + std::to_string(g_app.core_configs.size() + 1);
         g_app.core_configs.push_back(std::move(entry));
+        g_app.refresh_core_listeners();
         s_core_edit = (int)g_app.core_configs.size() - 1;
         s_core_buf_for = -1;
     }
@@ -3325,6 +3428,7 @@ static void render_core_configs() {
             entry.name = s_core_name_buf;
             entry.backend = s_core_backend_buf == 1 ? 1 : 0;
             entry.text = s_core_text_buf.data();
+            AppState::refresh_core_listeners(entry);
             core_config_check(s_core_edit);
         }
         ImGui::TextColored(s_core_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
@@ -3337,7 +3441,17 @@ static void render_core_configs() {
     if (remove_row >= 0) {
         g_app.core_configs.erase(g_app.core_configs.begin() + remove_row);
         core_configs_forget(remove_row);
+        g_app.refresh_core_listeners();
     }
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Listener");
+    ImGui::TextWrapped(
+        "The session's final hop uses one of these pairs. A saved config serves the inbounds "
+        "it declares, so a SOCKS5-only config leaves its HTTP listener off whatever the switch "
+        "says, and a port the config names is kept until you choose one.");
+    core_listener_block(0);
+    core_listener_block(1);
+    ImGui::Spacing();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
@@ -3810,6 +3924,13 @@ void render_ui() {
                 const bool uses_tor = (g_app.backend == 0 && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)) || has_hop(4);
                 const bool uses_psi = g_app.backend == 1 || has_hop(5) || g_app.tor_mode == 3;
                 const bool uses_firefox = g_app.backend == 2 || has_hop(10);
+                // A core final hop serves what its config declares: with no
+                // listener switch left on, the engine refuses the session, so
+                // say which switch before it gets that far.
+                const bool core_final = g_app.final_listener_is_core();
+                const std::string core_socks_name =
+                    std::string(g_app.final_listener_core() == 4 ? "sing-box" : "Xray") + " SOCKS5";
+                const std::string core_listener_name = core_socks_name + " or HTTP";
                 const bool psi_carrier = !g_app.chain_transports.empty() &&
                     (g_app.backend == 1 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end() - 1, 5) != g_app.chain_transports.end() - 1);
                 const bool firefox_carrier = !g_app.chain_transports.empty() &&
@@ -3823,6 +3944,8 @@ void render_ui() {
                     uses_psi && !g_app.psiphon_socks_enabled && !g_app.psiphon_http_enabled ? "Psiphon SOCKS5 or HTTP" :
                     uses_psi && g_app.mode == 1 && (g_app.chain_transports.empty() ? g_app.backend == 1 : g_app.chain_transports.back() == 5) && !g_app.psiphon_socks_enabled ? "Psiphon SOCKS5" :
                     uses_firefox && !g_app.firefox_socks_enabled && g_app.mode == 1 && g_app.final_listener_is_firefox() ? "Firefox SOCKS5" :
+                    core_final && g_app.mode == 1 && !g_app.listener_socks_enabled() ? core_socks_name.c_str() :
+                    core_final && !g_app.listener_socks_enabled() && !g_app.listener_http_enabled() ? core_listener_name.c_str() :
                     uses_aether && !g_app.socks_enabled ? "Aether SOCKS5" : nullptr;
                 if (disabled) {
                     char msg[256];
@@ -4653,7 +4776,7 @@ void render_ui() {
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Firefox settings")) open_firefox_settings();
             if (!narrow) ImGui::SameLine();
-            if (ImGui::Button("Xray / sing-box configs")) open_core_configs();
+            if (ImGui::Button("Xray & sing-box settings")) open_core_configs();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "APP SETTINGS");
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);

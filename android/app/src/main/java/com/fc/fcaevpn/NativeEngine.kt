@@ -173,6 +173,13 @@ object NativeEngine {
      * when it can. Lets the config editor refuse a bad paste before saving it.
      */
     @JvmStatic external fun nativeCheckCoreConfig(config: String, backend: Int): String
+    /**
+     * What [config] can serve for [backend] (bitwise: 1 = SOCKS5, 2 = HTTP) and
+     * the ports it pins for those listeners, as `[kinds, socksPort, httpPort]`.
+     * A zero port means the config names none — a share link never does, because
+     * the engine builds its listeners.
+     */
+    @JvmStatic external fun nativeCoreListeners(config: String, backend: Int): IntArray
 
     @JvmStatic external fun nativePsiphonAttachRequest(): String
     @JvmStatic external fun nativePsiphonAttachComplete(id: Long, socks: Int, http: Int)

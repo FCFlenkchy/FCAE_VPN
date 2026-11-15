@@ -28,7 +28,7 @@ use fcae_abi::FcaeBackend;
 use serde_json::Value;
 
 use crate::config::backend_label;
-use crate::sing_xray::{native_dialect, CoreProfile};
+use crate::sing_xray::{carries, native_dialect, CoreProfile};
 
 /// Upper bound on saved configs. A menu longer than this is not a menu.
 pub const MAX_ENTRIES: usize = 64;
@@ -191,7 +191,90 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
             ));
         }
     }
+    // A scheme only one core implements is refused for the other here, where
+    // the editor can say why, rather than as a start failure later.
+    if let CoreProfile::Link(outbound) = &profile {
+        if !carries(backend, outbound) {
+            return Err(format!(
+                "a {} link runs on sing-box only; {} cannot carry it",
+                outbound.protocol.name(),
+                backend_label(backend)
+            ));
+        }
+    }
     Ok(profile)
+}
+
+/// What a saved config lets a session serve, and the ports it pins for those
+/// listeners.
+///
+/// A share link is a single outbound and the bridge builds the session's
+/// listeners around it, so it serves both and pins neither. A native config
+/// brings its own inbounds and the bridge only rewrites the types it declares,
+/// so one that carries nothing but a SOCKS5 inbound cannot answer an HTTP proxy
+/// however the toggle is set — and where it names a port, that port is the
+/// config's own opinion, not the app default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Listeners {
+    /// Bitwise [`fcae_abi::FCAE_CORE_LISTENER_SOCKS`] and `_HTTP`.
+    pub kinds: u32,
+    /// The port the config pins for its SOCKS5 inbound, if any.
+    pub socks_port: Option<u16>,
+    /// The port the config pins for its HTTP inbound, if any.
+    pub http_port: Option<u16>,
+}
+
+pub fn listeners(backend: FcaeBackend, text: &str) -> Listeners {
+    let config = match CoreProfile::parse(text.trim()) {
+        Ok(CoreProfile::Link(_)) => {
+            return Listeners {
+                kinds: fcae_abi::FCAE_CORE_LISTENER_SOCKS | fcae_abi::FCAE_CORE_LISTENER_HTTP,
+                ..Listeners::default()
+            }
+        }
+        Ok(CoreProfile::Native(config)) => config,
+        // Unusable: the editor refuses it, and nothing can be served from it.
+        Err(_) => return Listeners::default(),
+    };
+    // The dialects name the same two facts differently, and the tag is what the
+    // user chose to store the config under.
+    let xray = backend == FcaeBackend::Xray;
+    let kind_key = if xray { "protocol" } else { "type" };
+    let port_key = if xray { "port" } else { "listen_port" };
+    let mut listeners = Listeners::default();
+    for inbound in config
+        .get("inbounds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let kind = inbound
+            .get(kind_key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !matches!(kind.as_str(), "socks" | "mixed" | "http") {
+            continue;
+        }
+        // Xray accepts a number or a numeric string here; sing-box only a number.
+        let port = inbound
+            .get(port_key)
+            .and_then(|value| match value {
+                Value::Number(_) => value.as_u64(),
+                Value::String(text) => text.trim().parse::<u64>().ok(),
+                _ => None,
+            })
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port != 0);
+        if kind == "http" {
+            listeners.kinds |= fcae_abi::FCAE_CORE_LISTENER_HTTP;
+            listeners.http_port = listeners.http_port.or(port);
+        } else {
+            listeners.kinds |= fcae_abi::FCAE_CORE_LISTENER_SOCKS;
+            listeners.socks_port = listeners.socks_port.or(port);
+        }
+    }
+    listeners
 }
 
 fn parse_entry(value: &Value) -> Result<SavedConfig, String> {
@@ -339,5 +422,38 @@ mod tests {
     fn an_empty_config_is_rejected_by_the_checker() {
         assert!(check_config(FcaeBackend::Xray, "   ").is_err());
         assert!(check_config(FcaeBackend::Xray, "socks5://127.0.0.1:1080").is_ok());
+    }
+
+    #[test]
+    fn a_sing_box_only_link_is_refused_for_xray_and_accepted_for_sing_box() {
+        let link = "hysteria2://secret@example.com:443?sni=www.example.com#fast";
+        assert!(check_config(FcaeBackend::SingBox, link).is_ok());
+        let error = check_config(FcaeBackend::Xray, link).expect_err("xray cannot carry it");
+        assert!(error.contains("hysteria2"), "{error}");
+        assert!(error.contains("sing-box"), "{error}");
+    }
+
+    #[test]
+    fn listeners_follow_the_config() {
+        let both = fcae_abi::FCAE_CORE_LISTENER_SOCKS | fcae_abi::FCAE_CORE_LISTENER_HTTP;
+        // A link is wrapped by the bridge, so it answers both and pins neither.
+        let link = listeners(FcaeBackend::Xray, "socks5://u:p@127.0.0.1:1080");
+        assert_eq!(link.kinds, both);
+        assert_eq!((link.socks_port, link.http_port), (None, None));
+        // A native config serves the inbound types it declares, at its own ports.
+        let socks_only = listeners(FcaeBackend::Xray, r#"{"inbounds":
+            [{"protocol": "socks", "port": 10808}], "outbounds": [{"protocol": "freedom"}]}"#);
+        assert_eq!(socks_only.kinds, fcae_abi::FCAE_CORE_LISTENER_SOCKS);
+        assert_eq!(socks_only.socks_port, Some(10808));
+        assert_eq!(socks_only.http_port, None);
+        let mixed_and_http = listeners(FcaeBackend::SingBox, r#"{"inbounds":
+            [{"type": "mixed", "listen_port": 2080}, {"type": "http", "listen_port": 2081}],
+            "outbounds": [{"type": "direct"}]}"#);
+        assert_eq!(mixed_and_http.kinds, both);
+        assert_eq!((mixed_and_http.socks_port, mixed_and_http.http_port), (Some(2080), Some(2081)));
+        let http_only = listeners(FcaeBackend::SingBox, r#"{"inbounds": [{"type": "http"}],
+            "outbounds": [{"type": "direct"}]}"#);
+        assert_eq!(http_only.kinds, fcae_abi::FCAE_CORE_LISTENER_HTTP);
+        assert_eq!(listeners(FcaeBackend::SingBox, "not a link").kinds, 0);
     }
 }

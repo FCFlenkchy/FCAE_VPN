@@ -757,6 +757,19 @@ Java_com_fc_fcaevpn_NativeEngine_nativeCheckCoreConfig(JNIEnv* env, jclass, jstr
     return env->NewStringUTF(out);
 }
 
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeCoreListeners(JNIEnv* env, jclass, jstring config, jint backend) {
+    const std::string value = jstr(env, config);
+    uint32_t socks_port = 0;
+    uint32_t http_port = 0;
+    const uint32_t kinds =
+        fcae_core_listeners(value.c_str(), (int32_t)backend, &socks_port, &http_port);
+    const jint values[3] = {(jint)kinds, (jint)socks_port, (jint)http_port};
+    jintArray out = env->NewIntArray(3);
+    if (out) env->SetIntArrayRegion(out, 0, 3, values);
+    return out;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeInit(JNIEnv*, jclass) {
     ensure_init();

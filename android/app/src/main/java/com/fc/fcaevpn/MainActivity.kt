@@ -277,6 +277,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchPsiphonHttp: SwitchMaterial
     private var firefoxSocksEnabled = true
     private var firefoxHttpEnabled = true
+    // Xray and sing-box serve their own listeners, so each core keeps the pair
+    // it was saved with: a session whose final hop is Xray must not inherit
+    // Aether's answer.
+    /** The listener rows of the open Xray / sing-box dialog, when there is one. */
+    private var coreListenerRows: LinearLayout? = null
+    private var xraySocksEnabled = true
+    private var xrayHttpEnabled = true
+    private var singBoxSocksEnabled = true
+    private var singBoxHttpEnabled = true
     private lateinit var switchTorHttp: SwitchMaterial
     private lateinit var editTorHttpPort: android.widget.EditText
     private lateinit var switchHttp: SwitchMaterial
@@ -292,6 +301,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editHttpPort: android.widget.EditText
     private lateinit var editFirefoxSocksPort: android.widget.EditText
     private lateinit var editFirefoxHttpPort: android.widget.EditText
+    private lateinit var editXraySocksPort: android.widget.EditText
+    private lateinit var editXrayHttpPort: android.widget.EditText
+    private lateinit var editSingBoxSocksPort: android.widget.EditText
+    private lateinit var editSingBoxHttpPort: android.widget.EditText
     private lateinit var editTunMtu: android.widget.EditText
     private lateinit var editTunTcpSndbuf: android.widget.EditText
     private lateinit var editTunTcpRcvbuf: android.widget.EditText
@@ -1444,6 +1457,10 @@ class MainActivity : AppCompatActivity() {
         editHttpPort = findViewById(R.id.editHttpPort)
         editFirefoxSocksPort = findViewById(R.id.editFirefoxSocksPort)
         editFirefoxHttpPort = findViewById(R.id.editFirefoxHttpPort)
+        editXraySocksPort = findViewById(R.id.editXraySocksPort)
+        editXrayHttpPort = findViewById(R.id.editXrayHttpPort)
+        editSingBoxSocksPort = findViewById(R.id.editSingBoxSocksPort)
+        editSingBoxHttpPort = findViewById(R.id.editSingBoxHttpPort)
         editTunMtu = findViewById(R.id.editTunMtu)
         editTunTcpSndbuf = findViewById(R.id.editTunTcpSndbuf)
         editTunTcpRcvbuf = findViewById(R.id.editTunTcpRcvbuf)
@@ -1530,7 +1547,7 @@ class MainActivity : AppCompatActivity() {
         // cursor.  This covers every focus-loss path (taps outside, back
         // button, keyboard dismissal, spinner selection) regardless of how
         // the focus was moved.
-        val editTexts = listOf(editTunMtu, editSni, editForcePeer, editUpstreamProxy, editSocksPort, editHttpPort, editFirefoxSocksPort, editFirefoxHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
+        val editTexts = listOf(editTunMtu, editSni, editForcePeer, editUpstreamProxy, editSocksPort, editHttpPort, editFirefoxSocksPort, editFirefoxHttpPort, editXraySocksPort, editXrayHttpPort, editSingBoxSocksPort, editSingBoxHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
             editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline,
             editEchDns, editEchDomain, editGoolInner, editApiAddress, editApiHost, editApiSni, editExitLoc,
             editTlsCiphers, editTls13Ciphers, editTlsGroups, editTlsKeyShares, editTlsSigalgs,
@@ -2062,7 +2079,7 @@ class MainActivity : AppCompatActivity() {
         val shown = if (::peerText.isInitialized) peerText.text?.toString().orEmpty() else ""
         if (!isPurePsiphon() && !isTorOnly() && !shown.contains("Peer:")) return true
         val finalBackend = routeBackends().lastOrNull() ?: 0
-        val finalName = if (finalBackend == 2) "Firefox" else "Aether"
+        val finalName = backendDisplayName(finalBackend)
         val wantsFinalProxy = !isPurePsiphon() && !isTorOnly() && finalBackend != 1 &&
             (finalSocksEnabled() || finalHttpEnabled())
         if (wantsFinalProxy && !shown.contains("$finalName local:")) return true
@@ -2485,27 +2502,89 @@ class MainActivity : AppCompatActivity() {
     private fun routeBackends(): List<Int> =
         listOf(backendFromSelection()) + selectedChain().map { backendForProtocolPosition(it) }
 
-    private fun finalListenerIsFirefox(): Boolean = routeBackends().lastOrNull() == 2
+    /** Protocol-list positions this session runs, carrier first, exit last. */
+    private fun routePositions(): List<Int> =
+        listOf(if (::spinnerProtocol.isInitialized) spinnerProtocol.selectedItemPosition else 0) +
+            selectedChain()
 
-    private fun finalSocksEnabled(): Boolean = if (finalListenerIsFirefox()) firefoxSocksEnabled else switchSocks.isChecked
-    private fun finalHttpEnabled(): Boolean = if (finalListenerIsFirefox()) firefoxHttpEnabled else switchHttp.isChecked
+    /** 0 = Aether, 1 = Psiphon, 2 = Firefox, 3 = Xray, 4 = sing-box. */
+    private fun finalListenerBackend(): Int = routeBackends().lastOrNull() ?: 0
 
-    private fun selectedSocksPort(): android.widget.EditText =
-        if (finalListenerIsFirefox()) editFirefoxSocksPort else editSocksPort
+    private fun finalListenerIsFirefox(): Boolean = finalListenerBackend() == 2
+    private fun finalListenerIsXray(): Boolean = finalListenerBackend() == 3
+    private fun finalListenerIsSingBox(): Boolean = finalListenerBackend() == 4
+    private fun finalListenerIsCore(): Boolean = finalListenerBackend() >= 3
 
-    private fun selectedHttpPort(): android.widget.EditText =
-        if (finalListenerIsFirefox()) editFirefoxHttpPort else editHttpPort
+    /** 0 = Xray, 1 = sing-box: the core the session's final listener belongs to. */
+    private fun finalCoreBackendIndex(): Int = if (finalListenerIsSingBox()) 1 else 0
 
-    private fun defaultSocksPort(): Int = if (finalListenerIsFirefox()) FIREFOX_SOCKS_PORT else 1819
-    private fun defaultHttpPort(): Int = if (finalListenerIsFirefox()) FIREFOX_HTTP_PORT else 1820
+    /** The saved config the session's final hop runs, or null for a built-in. */
+    private fun finalCoreConfig(): CoreConfig? {
+        val position = routePositions().lastOrNull() ?: return null
+        if (position < CORE_TRANSPORT_BASE) return null
+        return coreConfigEntries().getOrNull(position - CORE_TRANSPORT_BASE)
+    }
+
+    /**
+     * Whether the final hop can serve [http]. A core config that declares only a
+     * SOCKS5 inbound cannot answer an HTTP proxy however the toggle is set, and
+     * the engine would open a listener nothing answers on.
+     */
+    private fun finalServes(http: Boolean): Boolean =
+        finalCoreConfig()?.let { coreConfigServes(it, http) } ?: true
+
+    private fun finalSocksEnabled(): Boolean = when {
+        finalListenerIsFirefox() -> firefoxSocksEnabled
+        finalListenerIsXray() -> xraySocksEnabled
+        finalListenerIsSingBox() -> singBoxSocksEnabled
+        else -> switchSocks.isChecked
+    } && finalServes(http = false)
+
+    private fun finalHttpEnabled(): Boolean = when {
+        finalListenerIsFirefox() -> firefoxHttpEnabled
+        finalListenerIsXray() -> xrayHttpEnabled
+        finalListenerIsSingBox() -> singBoxHttpEnabled
+        else -> switchHttp.isChecked
+    } && finalServes(http = true)
+
+    private fun selectedSocksPort(): android.widget.EditText = when {
+        finalListenerIsFirefox() -> editFirefoxSocksPort
+        finalListenerIsXray() -> editXraySocksPort
+        finalListenerIsSingBox() -> editSingBoxSocksPort
+        else -> editSocksPort
+    }
+
+    private fun selectedHttpPort(): android.widget.EditText = when {
+        finalListenerIsFirefox() -> editFirefoxHttpPort
+        finalListenerIsXray() -> editXrayHttpPort
+        finalListenerIsSingBox() -> editSingBoxHttpPort
+        else -> editHttpPort
+    }
+
+    private fun defaultSocksPort(): Int = when {
+        finalListenerIsFirefox() -> FIREFOX_SOCKS_PORT
+        finalListenerIsXray() -> XRAY_SOCKS_PORT
+        finalListenerIsSingBox() -> SING_BOX_SOCKS_PORT
+        else -> 1819
+    }
+
+    private fun defaultHttpPort(): Int = when {
+        finalListenerIsFirefox() -> FIREFOX_HTTP_PORT
+        finalListenerIsXray() -> XRAY_HTTP_PORT
+        finalListenerIsSingBox() -> SING_BOX_HTTP_PORT
+        else -> 1820
+    }
 
     private fun effectiveSocksPort(): Int {
+        if (finalListenerIsCore()) return coreListenerPort(finalCoreBackendIndex(), http = false)
         val port = selectedSocksPort().text.toString().toIntOrNull() ?: defaultSocksPort()
         return if (isTunModeSelected() && port == 0) defaultSocksPort() else port
     }
 
-    private fun effectiveHttpPort(): Int =
-        selectedHttpPort().text.toString().toIntOrNull() ?: defaultHttpPort()
+    private fun effectiveHttpPort(): Int {
+        if (finalListenerIsCore()) return coreListenerPort(finalCoreBackendIndex(), http = true)
+        return selectedHttpPort().text.toString().toIntOrNull() ?: defaultHttpPort()
+    }
 
     // Preserve explicit Firefox values and custom legacy ports; migrate old defaults.
     private fun firefoxPortPreference(key: String, legacyKey: String, legacyDefault: Int, newDefault: Int): String {
@@ -2517,13 +2596,14 @@ class MainActivity : AppCompatActivity() {
     private fun updateProtocolButton() {
         if (!::spinnerProtocol.isInitialized) return
         // A saved config is named by the user, and that name is how it is
-        // identified everywhere else, so show it here too.
+        // identified everywhere else, so the button carries it alone: it is a
+        // picker, and a "Protocol:" prefix only eats the label's width.
         val spinner = spinnerProtocol.adapter
         val position = spinnerProtocol.selectedItemPosition
         val label = if (spinner != null && position in 0 until spinner.count)
             spinner.getItem(position)?.toString() else null
         findViewById<MaterialButton>(R.id.btnProtocolSettings).text =
-            if (label.isNullOrBlank()) "Protocol" else "Protocol: $label"
+            if (label.isNullOrBlank()) "Protocol" else label
     }
 
     private fun dp(value: Int): Int =
@@ -2713,6 +2793,82 @@ class MainActivity : AppCompatActivity() {
         scheduleSettingsSave()
     }
 
+    /** The port field a core backend's listener edits. */
+    private fun corePortField(backendIndex: Int, http: Boolean): android.widget.EditText = when {
+        backendIndex == 0 && http -> editXrayHttpPort
+        backendIndex == 0 -> editXraySocksPort
+        http -> editSingBoxHttpPort
+        else -> editSingBoxSocksPort
+    }
+
+    private fun coreDefaultPort(backendIndex: Int, http: Boolean): Int = when {
+        backendIndex == 0 && http -> XRAY_HTTP_PORT
+        backendIndex == 0 -> XRAY_SOCKS_PORT
+        http -> SING_BOX_HTTP_PORT
+        else -> SING_BOX_SOCKS_PORT
+    }
+
+    private fun corePortKey(backendIndex: Int, http: Boolean): String = when {
+        backendIndex == 0 && http -> "xrayHttpPort"
+        backendIndex == 0 -> "xraySocksPort"
+        http -> "singBoxHttpPort"
+        else -> "singBoxSocksPort"
+    }
+
+    /**
+     * `[kinds, socksPort, httpPort]` for [config]: the listener types it can
+     * serve (1 = SOCKS5, 2 = HTTP) and the ports it pins for them, zero when it
+     * pins none. A share link is one outbound the engine wraps in whatever
+     * listeners the session asks for; a native config brings its own inbounds
+     * and only the types it declares. The engine answers, not the UI, so the
+     * editor and the session can never disagree.
+     */
+    private fun coreConfigListeners(config: CoreConfig): IntArray = try {
+        NativeEngine.nativeCoreListeners(config.config, 3 + config.backend)
+    } catch (_: Throwable) {
+        intArrayOf(LISTENER_SOCKS or LISTENER_HTTP, 0, 0)
+    }
+
+    private fun coreConfigServes(config: CoreConfig, http: Boolean): Boolean =
+        coreConfigListeners(config)[0] and (if (http) LISTENER_HTTP else LISTENER_SOCKS) != 0
+
+    /**
+     * The listener port a core backend starts with: the stored value, else the
+     * port the backend's native config pins for that listener, else the app
+     * default. A config's own port is never overridden behind the user's back —
+     * the engine rewrites the listener to whatever the session asks for, so the
+     * field has to open where the config put it.
+     */
+    private fun corePortPreference(backendIndex: Int, http: Boolean): String =
+        prefs.getString(corePortKey(backendIndex, http), null)
+            ?: coreDeclaredPort(backendIndex, http)?.toString()
+            ?: coreDefaultPort(backendIndex, http).toString()
+
+    /** The port a native config pins for its SOCKS5 or HTTP inbound, if any. */
+    private fun coreDeclaredPort(backendIndex: Int, http: Boolean): Int? {
+        val finalName = finalCoreConfig()?.takeIf { it.backend == backendIndex }?.name
+        return coreConfigEntries()
+            .filter { it.backend == backendIndex }
+            .sortedBy { if (it.name == finalName) 0 else 1 }
+            .firstNotNullOfOrNull { entry ->
+                // Index 1 is SOCKS5, index 2 HTTP: the array the engine filled.
+                coreConfigListeners(entry)[if (http) 2 else 1].takeIf { it in 1..65535 }
+            }
+    }
+
+    private fun coreListenerPort(backendIndex: Int, http: Boolean): Int =
+        corePortField(backendIndex, http).text.toString().trim().toIntOrNull()
+            ?: coreDefaultPort(backendIndex, http)
+
+    /** The name a backend goes by in the UI. */
+    private fun backendDisplayName(backend: Int): String = when (backend) {
+        1 -> "Psiphon"
+        2 -> "Firefox"
+        3 -> "Xray"
+        4 -> "sing-box"
+        else -> "Aether"
+    }
+
     /** Why [config] cannot be used for [backend] (3 = Xray, 4 = sing-box), or "". */
     private fun checkCoreConfig(config: String, backend: Int): String = try {
         NativeEngine.nativeCheckCoreConfig(config, backend)
@@ -2792,17 +2948,17 @@ class MainActivity : AppCompatActivity() {
      * immediately: the engine reads the library when a session starts, so
      * nothing has to be re-saved before connecting.
      */
+    /**
+     * Xray and sing-box settings. The saved library stays at the top — it is what
+     * both cores run — with Xray above sing-box, and each core's listeners below
+     * the list, because a listener belongs to the core that answers on it while a
+     * session's final hop only runs one of them.
+     */
     private fun showCoreConfigs() {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(12), dp(20), dp(8))
         }
-        box.addView(TextView(this).apply {
-            text = "Saved configs appear in the protocol list, so each one can be the main " +
-                "protocol or a chained exit."
-            setTextColor(Color.parseColor("#FF9AA3B5"))
-            textSize = 13f
-        })
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         box.addView(list)
 
@@ -2824,7 +2980,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(Color.parseColor("#FF9AA3B5"))
                 setPadding(0, dp(12), 0, dp(3))
             })
-            val backendLabels = arrayOf("Xray", "sing-box")
+            val backendLabels = CORE_BACKEND_LABELS.toTypedArray()
             val backendGroup = android.widget.RadioGroup(this).apply { orientation = LinearLayout.HORIZONTAL }
             backendLabels.forEachIndexed { choice, label ->
                 backendGroup.addView(android.widget.RadioButton(this).apply {
@@ -2895,10 +3051,20 @@ class MainActivity : AppCompatActivity() {
                 }
                 val reason = checkCoreConfig(text, backendValue())
                 if (reason.isNotEmpty()) return fail(reason)
+                // Every session dialect dials its listener through SOCKS5 — TUN
+                // mode, a chained hop, the Psiphon egress — so a config that
+                // declares no SOCKS5 inbound can never start, and saying so here
+                // is cheaper than saying it after a failed connect.
+                val candidate = CoreConfig(nameText, backendIndex(), text)
+                if (!coreConfigServes(candidate, http = false)) {
+                    return fail(
+                        "This config declares no SOCKS5 inbound; " +
+                            "${backendLabels[backendIndex()]} needs one to serve the session."
+                    )
+                }
                 // The whole list is one document: it is what the engine parses
                 // and what an Intent carries, so it is measured as it will be
                 // stored. A library that saves is then a library that starts.
-                val candidate = CoreConfig(nameText, backendIndex(), text)
                 val prospective = entries.toMutableList()
                     .also { if (index in it.indices) it[index] = candidate else it.add(candidate) }
                 if (coreConfigDocument(prospective).toByteArray(Charsets.UTF_8).size >
@@ -2931,6 +3097,7 @@ class MainActivity : AppCompatActivity() {
                     entries = next
                     saveCoreConfigs(entries)
                     renderList()
+                    refreshCoreListenerRows()
                     dialog.dismiss()
                 }
             }
@@ -2939,33 +3106,45 @@ class MainActivity : AppCompatActivity() {
 
         renderList = {
             list.removeAllViews()
-            if (entries.isEmpty()) {
+            CORE_BACKEND_LABELS.forEachIndexed { backend, label ->
                 list.addView(TextView(this).apply {
-                    text = "No saved configs yet."
-                    setTextColor(Color.parseColor("#FF9AA3B5"))
-                    setPadding(0, dp(12), 0, dp(4))
+                    text = label
+                    setTextColor(Color.parseColor("#FF60A5FA"))
+                    textSize = 13f
+                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                    setPadding(0, dp(10), 0, dp(2))
                 })
-            }
-            entries.forEachIndexed { index, entry ->
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(6), 0, 0)
+                val group = entries.withIndex().filter { it.value.backend == backend }
+                if (group.isEmpty()) {
+                    list.addView(TextView(this).apply {
+                        text = "No saved $label configs."
+                        setTextColor(Color.parseColor("#FF6B7280"))
+                        textSize = 13f
+                        setPadding(0, dp(2), 0, dp(2))
+                    })
                 }
-                row.addView(TextView(this).apply {
-                    text = "${entry.name}  (${entry.backendLabel})"
-                    setTextColor(Color.parseColor("#FFE0E4EE"))
-                    textSize = 14f
-                    isSingleLine = true
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addDialogButton(row, "Edit") { editEntry(index) }
-                addDialogButton(row, "Remove") {
-                    entries = entries.toMutableList().also { it.removeAt(index) }
-                    saveCoreConfigs(entries)
-                    renderList()
+                group.forEach { (rowIndex, entry) ->
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = android.view.Gravity.CENTER_VERTICAL
+                        setPadding(0, dp(6), 0, 0)
+                    }
+                    row.addView(TextView(this).apply {
+                        text = entry.name
+                        setTextColor(Color.parseColor("#FFE0E4EE"))
+                        textSize = 14f
+                        isSingleLine = true
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    addDialogButton(row, "Edit") { editEntry(rowIndex) }
+                    addDialogButton(row, "Remove") {
+                        entries = entries.toMutableList().also { it.removeAt(rowIndex) }
+                        saveCoreConfigs(entries)
+                        renderList()
+                        refreshCoreListenerRows()
+                    }
+                    list.addView(row)
                 }
-                list.addView(row)
             }
         }
 
@@ -2979,12 +3158,112 @@ class MainActivity : AppCompatActivity() {
         }
         renderList()
 
+        // Listeners last: the library above decides what they can answer on.
+        dialogLabel(box, "Listener")
+        box.addView(TextView(this).apply {
+            text = "The session's final hop uses one of these pairs. A saved config " +
+                "serves the inbounds it declares, so a SOCKS5-only config leaves its " +
+                "HTTP listener off whatever the switch says."
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            textSize = 13f
+            setPadding(0, 0, 0, dp(4))
+        })
+        val listenerRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(listenerRows)
+        coreListenerRows = listenerRows
+        refreshCoreListenerRows()
+
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("XRAY & SING-BOX SETTINGS")
             .setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("Close", null)
             .create()
         dialog.setOnShowListener { styleDialogButtons(dialog) }
+        dialog.setOnDismissListener {
+            if (coreListenerRows === listenerRows) coreListenerRows = null
+        }
         dialog.show()
+    }
+
+    /**
+     * Redraw the listener rows after the library changed: adding, editing or
+     * removing a config decides what a listener can answer on.
+     */
+    private fun refreshCoreListenerRows() {
+        val rows = coreListenerRows ?: return
+        rows.removeAllViews()
+        CORE_BACKEND_LABELS.indices.forEach { backend ->
+            coreListenerRow(rows, backend, http = false)
+            coreListenerRow(rows, backend, http = true)
+        }
+    }
+
+    /**
+     * One core listener: a switch and a port field, the pair the other backends
+     * have. Both stay on screen even when the saved config cannot answer on them
+     * — the row says why instead of vanishing, because a control that disappears
+     * with the current selection is a control the user cannot reason about.
+     *
+     * Ports follow the config: a native config pins its own, so the field opens
+     * where the config put it and a stored value is never overwritten. A link
+     * config has no opinion, so the app default stands until the user edits it.
+     */
+    private fun coreListenerRow(rows: LinearLayout, backend: Int, http: Boolean) {
+        val label = CORE_BACKEND_LABELS[backend]
+        val field = corePortField(backend, http)
+        val finalConfig = finalCoreConfig()?.takeIf { it.backend == backend }
+        val served = finalConfig?.let { coreConfigServes(it, http) }
+            ?: coreConfigEntries().any { it.backend == backend && coreConfigServes(it, http) }
+        val stored = when {
+            backend == 0 && http -> xrayHttpEnabled
+            backend == 0 -> xraySocksEnabled
+            http -> singBoxHttpEnabled
+            else -> singBoxSocksEnabled
+        }
+        val switch = SwitchMaterial(this).apply {
+            text = if (http) "$label HTTP proxy" else "$label SOCKS5 proxy"
+            isChecked = stored
+            isEnabled = served
+        }
+        switch.setOnCheckedChangeListener { _, checked ->
+            when {
+                backend == 0 && http -> xrayHttpEnabled = checked
+                backend == 0 -> xraySocksEnabled = checked
+                http -> singBoxHttpEnabled = checked
+                else -> singBoxSocksEnabled = checked
+            }
+            scheduleSettingsSave()
+        }
+        rows.addView(switch, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            .also { it.topMargin = dp(if (http && backend > 0) 12 else 6) })
+
+        val port = addDialogInput(rows, if (http) "HTTP proxy port" else "SOCKS5 port",
+            field.text.toString())
+        port.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        port.isEnabled = served
+        fun validate() {
+            port.error = if (port.text.toString().toIntOrNull()?.let { it in 1..65535 } == true)
+                null else "Use a port from 1 to 65535"
+        }
+        validate()
+        watchSettingsText(port) {
+            field.setText(port.text.toString())
+            validate()
+        }
+
+        if (!served) {
+            rows.addView(TextView(this).apply {
+                text = if (finalConfig != null)
+                    "\"${finalConfig.name}\" declares no ${if (http) "HTTP" else "SOCKS5"} " +
+                        "inbound, so this listener stays off for it."
+                else
+                    "No saved $label config serves ${if (http) "HTTP" else "SOCKS5"}."
+                setTextColor(Color.parseColor("#FF6B7280"))
+                textSize = 12f
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
     }
 
     private fun addDialogInput(box: LinearLayout, label: String, value: String = "", password: Boolean = false): android.widget.EditText {
@@ -4074,6 +4353,10 @@ class MainActivity : AppCompatActivity() {
             editHttpPort,
             editFirefoxSocksPort,
             editFirefoxHttpPort,
+            editXraySocksPort,
+            editXrayHttpPort,
+            editSingBoxSocksPort,
+            editSingBoxHttpPort,
             editTunMtu,
             editTunTcpSndbuf,
             editTunTcpRcvbuf,
@@ -4146,12 +4429,11 @@ class MainActivity : AppCompatActivity() {
         val route = routeBackends()
         val transports = listOf(spinnerProtocol.selectedItemPosition) + selectedChain()
         val torUsed = 4 in transports || effectiveTorMode() in 1..2
-        val firefoxFinal = finalListenerIsFirefox()
         return listOf(
-            Triple(!firefoxFinal && switchSocks.isChecked, editSocksPort, false),
-            Triple(!firefoxFinal && switchHttp.isChecked, editHttpPort, false),
-            Triple(firefoxFinal && firefoxSocksEnabled, editFirefoxSocksPort, false),
-            Triple(firefoxFinal && firefoxHttpEnabled, editFirefoxHttpPort, false),
+            // Whichever backend owns the final listener — Aether, Firefox, Xray or
+            // sing-box — its pair is the pair that has to parse.
+            Triple(finalSocksEnabled(), selectedSocksPort(), false),
+            Triple(finalHttpEnabled(), selectedHttpPort(), false),
             Triple(torUsed && switchTorSocks.isChecked, editTorSocksPort, true),
             Triple(switchTorHttp.isChecked, editTorHttpPort, false),
             Triple(1 in route && switchPsiphonSocks.isChecked, editPsiphonSocksPort, true),
@@ -4260,6 +4542,14 @@ class MainActivity : AppCompatActivity() {
             putString("httpPort", editHttpPort.text.toString())
             putString("firefoxSocksPort", editFirefoxSocksPort.text.toString())
             putString("firefoxHttpPort", editFirefoxHttpPort.text.toString())
+            putBoolean("xraySocks", xraySocksEnabled)
+            putBoolean("xrayHttp", xrayHttpEnabled)
+            putBoolean("singBoxSocks", singBoxSocksEnabled)
+            putBoolean("singBoxHttp", singBoxHttpEnabled)
+            putString("xraySocksPort", editXraySocksPort.text.toString())
+            putString("xrayHttpPort", editXrayHttpPort.text.toString())
+            putString("singBoxSocksPort", editSingBoxSocksPort.text.toString())
+            putString("singBoxHttpPort", editSingBoxHttpPort.text.toString())
             putString("tunMtu", editTunMtu.text.toString())
             putInt("splitTunnelMode", spinnerSplitTunnel.selectedItemPosition)
             putStringSet("splitTunnelApps", HashSet(splitTunnelSelectedApps))
@@ -4410,6 +4700,14 @@ class MainActivity : AppCompatActivity() {
         editHttpPort.setText(prefs.getString("httpPort", "1820"))
         editFirefoxSocksPort.setText(firefoxPortPreference("firefoxSocksPort", "socksPort", 1819, FIREFOX_SOCKS_PORT))
         editFirefoxHttpPort.setText(firefoxPortPreference("firefoxHttpPort", "httpPort", 1820, FIREFOX_HTTP_PORT))
+        xraySocksEnabled = prefs.getBoolean("xraySocks", true)
+        xrayHttpEnabled = prefs.getBoolean("xrayHttp", true)
+        singBoxSocksEnabled = prefs.getBoolean("singBoxSocks", true)
+        singBoxHttpEnabled = prefs.getBoolean("singBoxHttp", true)
+        editXraySocksPort.setText(corePortPreference(0, false))
+        editXrayHttpPort.setText(corePortPreference(0, true))
+        editSingBoxSocksPort.setText(corePortPreference(1, false))
+        editSingBoxHttpPort.setText(corePortPreference(1, true))
         editTunMtu.setText(prefs.getString("tunMtu", "1500"))
         editTunTcpSndbuf.setText(prefs.getString("tunTcpSndbuf", "256000"))
         editTunTcpRcvbuf.setText(prefs.getString("tunTcpRcvbuf", "256000"))
@@ -4476,6 +4774,10 @@ class MainActivity : AppCompatActivity() {
             1 in route && !switchPsiphonSocks.isChecked && !switchPsiphonHttp.isChecked -> "Psiphon SOCKS5 or HTTP"
             isFinalPsiphon() && isTunModeSelected() && !switchPsiphonSocks.isChecked -> "Psiphon SOCKS5"
             finalListenerIsFirefox() && !firefoxSocksEnabled && isTunModeSelected() -> "Firefox SOCKS5"
+            finalListenerIsCore() && !finalSocksEnabled() && isTunModeSelected() ->
+                backendDisplayName(finalListenerBackend()) + " SOCKS5"
+            finalListenerIsCore() && !finalSocksEnabled() && !finalHttpEnabled() ->
+                backendDisplayName(finalListenerBackend()) + " SOCKS5 or HTTP"
             transports.any { it < CORE_TRANSPORT_BASE && it != 4 && it != 5 && it != 10 } &&
                 !switchSocks.isChecked -> "Aether SOCKS5"
             else -> null
@@ -4496,6 +4798,10 @@ class MainActivity : AppCompatActivity() {
                 editHttpPort -> "Aether HTTP"
                 editFirefoxSocksPort -> "Firefox SOCKS5"
                 editFirefoxHttpPort -> "Firefox HTTP"
+                editXraySocksPort -> "Xray SOCKS5"
+                editXrayHttpPort -> "Xray HTTP"
+                editSingBoxSocksPort -> "sing-box SOCKS5"
+                editSingBoxHttpPort -> "sing-box HTTP"
                 editTorSocksPort -> "Tor SOCKS5"
                 editTorHttpPort -> "Tor HTTP"
                 editPsiphonSocksPort -> "Psiphon SOCKS5"
@@ -5759,7 +6065,7 @@ class MainActivity : AppCompatActivity() {
             if (!isTorOnly()) {
                 val finalBackend = routeBackends().lastOrNull() ?: 0
                 if (finalBackend != 1) {
-                    endpoints(if (finalBackend == 2) "Firefox" else "Aether",
+                    endpoints(backendDisplayName(finalBackend),
                         if (finalSocksEnabled())
                             effectiveSocksPort().toString() else null,
                         if (finalHttpEnabled()) effectiveHttpPort().toString() else null)
@@ -6236,6 +6542,18 @@ class MainActivity : AppCompatActivity() {
         private const val TOR_SOCKS_ENGINE_DEFAULT = 1821
         private const val FIREFOX_SOCKS_PORT = 1825
         private const val FIREFOX_HTTP_PORT = 1826
+        // The cores get their own pairs: Aether (1819/1820), Tor (1821/1822),
+        // Psiphon (1823/1824) and Firefox (1825/1826) already hold theirs, and a
+        // port the engine would reject as a clash is not a default.
+        private const val XRAY_SOCKS_PORT = 1827
+        private const val XRAY_HTTP_PORT = 1828
+        private const val SING_BOX_SOCKS_PORT = 1829
+        private const val SING_BOX_HTTP_PORT = 1830
+        /** Saved-config backends, indexed the way the stored tag is. */
+        private val CORE_BACKEND_LABELS = listOf("Xray", "sing-box")
+        // fcae.h FCAE_CORE_LISTENER_*: what a saved config can serve.
+        private const val LISTENER_SOCKS = 1
+        private const val LISTENER_HTTP = 2
 
         /**
          * The built-in transports, in protocol-list order. H2 is folded into

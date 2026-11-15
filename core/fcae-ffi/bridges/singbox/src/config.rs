@@ -154,18 +154,88 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Value {
             with_credentials(&mut value, user.as_deref(), password.as_deref());
             value
         }
+        Protocol::Hysteria2 {
+            password,
+            obfs,
+            up_mbps,
+            down_mbps,
+            ports,
+            hop_interval,
+            ..
+        } => {
+            let mut value = json!({
+                "type": "hysteria2",
+                "tag": PROXY_TAG,
+                "server": outbound.server,
+                "server_port": outbound.port,
+                "password": password,
+            });
+            if let Some((kind, secret)) = obfs {
+                value["obfs"] = json!({"type": kind, "password": secret});
+            }
+            if let Some(up) = up_mbps {
+                value["up_mbps"] = json!(up);
+            }
+            if let Some(down) = down_mbps {
+                value["down_mbps"] = json!(down);
+            }
+            if !ports.is_empty() {
+                value["server_ports"] = json!(ports);
+            }
+            if let Some(seconds) = hop_interval {
+                value["hop_interval"] = json!(format!("{seconds}s"));
+            }
+            value
+        }
+        Protocol::Tuic {
+            uuid,
+            password,
+            congestion_control,
+            udp_relay_mode,
+            zero_rtt,
+        } => {
+            let mut value = json!({
+                "type": "tuic",
+                "tag": PROXY_TAG,
+                "server": outbound.server,
+                "server_port": outbound.port,
+                "uuid": uuid,
+                "password": password,
+            });
+            if let Some(control) = congestion_control {
+                value["congestion_control"] = json!(control);
+            }
+            if let Some(mode) = udp_relay_mode {
+                value["udp_relay_mode"] = json!(mode);
+            }
+            if *zero_rtt {
+                value["zero_rtt_handshake"] = json!(true);
+            }
+            value
+        }
+        Protocol::AnyTls { password } => json!({
+            "type": "anytls",
+            "tag": PROXY_TAG,
+            "server": outbound.server,
+            "server_port": outbound.port,
+            "password": password,
+        }),
     };
 
     match tls_config(&outbound.security, &outbound.server) {
         Some(tls) => value["tls"] = tls,
         None => {
-            // Trojan is TLS by contract and sing-box refuses the config
-            // outright without it, so a link that said `security=none` still
-            // gets TLS rather than a core that exits at startup.
-            if matches!(outbound.protocol, Protocol::Trojan { .. }) {
+            // Trojan, Hysteria2, TUIC and AnyTLS are TLS by contract and
+            // sing-box refuses the config outright without it, so a link that
+            // said `security=none` still gets TLS rather than a core that exits
+            // at startup.
+            if is_tls_by_contract(&outbound.protocol) {
                 value["tls"] = json!({"enabled": true});
             }
         }
+    }
+    if let Protocol::Hysteria2 { pin: Some(pin), .. } = &outbound.protocol {
+        value["tls"]["certificate_public_key_sha256"] = json!([pin]);
     }
 
     if let Some(transport) = transport_config(&outbound.transport) {
@@ -175,6 +245,18 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Value {
         value["detour"] = json!(UPSTREAM_TAG);
     }
     value
+}
+
+/// Whether the protocol's own handshake is TLS, which sing-box requires even
+/// when the link left `security` unset.
+fn is_tls_by_contract(protocol: &Protocol) -> bool {
+    matches!(
+        protocol,
+        Protocol::Trojan { .. }
+            | Protocol::Hysteria2 { .. }
+            | Protocol::Tuic { .. }
+            | Protocol::AnyTls { .. }
+    )
 }
 
 fn with_credentials(value: &mut Value, user: Option<&str>, password: Option<&str>) {
@@ -511,6 +593,59 @@ mod tests {
         assert_eq!(rules[0]["outbound"], BLOCK_TAG);
         assert_eq!(rules[1]["ip_cidr"][0], "10.0.0.0/8");
         assert_eq!(rules[2]["domain_suffix"][0], "intranet.example");
+    }
+
+    #[test]
+    fn hysteria2_outbounds_carry_obfs_bandwidth_hopping_and_the_pin() {
+        let profile = Profile::parse(
+            "hysteria2://secret@example.com:8443?sni=www.example.com&obfs=salamander\
+             &obfs-password=salt&up=50&down=200&mport=20000-20100&hop-interval=30\
+             &pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["type"], "hysteria2");
+        assert_eq!(outbound["server_port"], 8443);
+        assert_eq!(outbound["password"], "secret");
+        assert_eq!(outbound["obfs"]["type"], "salamander");
+        assert_eq!(outbound["obfs"]["password"], "salt");
+        assert_eq!(outbound["up_mbps"], 50);
+        assert_eq!(outbound["down_mbps"], 200);
+        assert_eq!(outbound["server_ports"][0], "20000:20100");
+        assert_eq!(outbound["hop_interval"], "30s");
+        // TLS is the protocol's own handshake, not the link's option.
+        assert_eq!(outbound["tls"]["enabled"], true);
+        assert_eq!(outbound["tls"]["server_name"], "www.example.com");
+        assert!(outbound["tls"]["certificate_public_key_sha256"][0].is_string());
+    }
+
+    #[test]
+    fn tuic_and_anytls_outbounds_reach_the_core() {
+        let profile = Profile::parse(
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pass@example.com:10443\
+             ?congestion_control=bbr&udp_relay_mode=quic&alpn=h3&sni=www.example.com&reduce_rtt=1",
+        )
+        .expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["type"], "tuic");
+        assert_eq!(outbound["uuid"], "b831381d-6324-4d53-ad4f-8cda48b30811");
+        assert_eq!(outbound["congestion_control"], "bbr");
+        assert_eq!(outbound["udp_relay_mode"], "quic");
+        assert_eq!(outbound["zero_rtt_handshake"], true);
+        assert_eq!(outbound["tls"]["alpn"][0], "h3");
+
+        let profile =
+            Profile::parse("anytls://secret@example.com:443?sni=www.example.com&fp=chrome")
+                .expect("profile parses");
+        let config = build(&plan(&profile, &routing, None));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["type"], "anytls");
+        assert_eq!(outbound["password"], "secret");
+        assert_eq!(outbound["tls"]["utls"]["fingerprint"], "chrome");
     }
 
     #[test]

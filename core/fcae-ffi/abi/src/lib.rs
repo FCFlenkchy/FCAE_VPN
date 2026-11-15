@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 25;
+pub const FCAE_ABI_VERSION: u32 = 26;
 /// Explicitly allow `http_port` to open an HTTP listener in TUN mode.
 pub const FCAE_CONFIG_TUN_HTTP: u64 = 0x8000_0000_0000_0000;
 
@@ -30,6 +30,13 @@ pub const FCAE_CONFIG_TUN_HTTP: u64 = 0x8000_0000_0000_0000;
 /// UIs and the runtime share this, so a saved config is pickable everywhere a
 /// built-in transport is. ABI v25.
 pub const FCAE_CORE_TRANSPORT_BASE: u32 = 11;
+
+/// Listener types a saved core config can serve, bitwise. A share link is one
+/// outbound and the bridge builds the session's listeners around it, so it
+/// serves both; a native config only serves the inbound types it declares.
+/// ABI v26.
+pub const FCAE_CORE_LISTENER_SOCKS: u32 = 1;
+pub const FCAE_CORE_LISTENER_HTTP: u32 = 2;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.

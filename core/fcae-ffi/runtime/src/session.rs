@@ -722,10 +722,10 @@ async fn run_session(
         let carrier_wait_handle = handles[0].clone();
         let carrier_ended = async move { carrier_wait_handle.wait().await };
         let pump_handle = handles[0].clone();
-        let firefox_exit_rtt = Arc::new(Mutex::new(
-            if chained && config.exit_backend() == FcaeBackend::Firefox { handles.last().cloned() } else { None }
+        let exit_rtt = Arc::new(Mutex::new(
+            if chained && exit_measures_rtt(config.exit_backend()) { handles.last().cloned() } else { None }
         ));
-        let pump_firefox_exit_rtt = firefox_exit_rtt.clone();
+        let pump_exit_rtt = exit_rtt.clone();
         let pump_sink = sink.clone();
         let pump_config = config.clone();
         let pump_tun = tun_bridge.clone();
@@ -743,7 +743,7 @@ async fn run_session(
                 &pump_control,
                 &pump_settle,
                 pump_peers.as_deref(),
-                &pump_firefox_exit_rtt,
+                &pump_exit_rtt,
             ).await
         };
         tokio::pin!(carrier_ended, pump);
@@ -766,8 +766,8 @@ async fn run_session(
                     if !up {
                         log::info!("[session] chain hop {index} dropped; stopping its downstream exits");
                         stop_after(&mut handles, index, stop_timeout).await;
-                        if chained && config.exit_backend() == FcaeBackend::Firefox && handles.len() <= config.chain.len() {
-                            *firefox_exit_rtt.lock() = None;
+                        if chained && exit_measures_rtt(config.exit_backend()) && handles.len() <= config.chain.len() {
+                            *exit_rtt.lock() = None;
                         }
                         hop_up.truncate(handles.len());
                         let peer_ip = endpoints.peer_ip.clone();
@@ -794,8 +794,8 @@ async fn run_session(
                     };
                     match restarted {
                         Ok(()) => {
-                            if chained && config.exit_backend() == FcaeBackend::Firefox {
-                                *firefox_exit_rtt.lock() = handles.last().cloned();
+                            if chained && exit_measures_rtt(config.exit_backend()) {
+                                *exit_rtt.lock() = handles.last().cloned();
                             }
                             let listener_changed = rebuilt.socks != previous.socks || rebuilt.http != previous.http;
                             if listener_changed && config.is_tun() {
@@ -1146,6 +1146,18 @@ async fn backoff(cancel: &CancelToken, attempt: u32) -> std::ops::ControlFlow<()
     }
 }
 
+/// Whether a chained session's latency is the exit's rather than the carrier's.
+///
+/// The cores and Firefox each measure their own tunnel round trip, and on a
+/// chained session that measurement is the number the user is watching; every
+/// other backend leaves the carrier's sample in place.
+fn exit_measures_rtt(exit: FcaeBackend) -> bool {
+    matches!(
+        exit,
+        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn pump_counters(
     handle: &dyn BackendHandle,
@@ -1156,7 +1168,7 @@ async fn pump_counters(
     control: &Mutex<()>,
     settle: &Mutex<Option<std::time::Instant>>,
     carrier_peers: Option<&str>,
-    firefox_exit_rtt: &Mutex<Option<Arc<dyn BackendHandle>>>,
+    exit_rtt: &Mutex<Option<Arc<dyn BackendHandle>>>,
 ) -> Result<()> {
     #[cfg(not(windows))]
     let _ = carrier_peers;
@@ -1165,8 +1177,8 @@ async fn pump_counters(
     loop {
         tick.tick().await;
         let mut counters = handle.counters();
-        if !cfg.chain.is_empty() && cfg.exit_backend() == FcaeBackend::Firefox {
-            counters.rtt_ms = firefox_exit_rtt.lock().as_ref().map_or(0, |exit| exit.counters().rtt_ms);
+        if !cfg.chain.is_empty() && exit_measures_rtt(cfg.exit_backend()) {
+            counters.rtt_ms = exit_rtt.lock().as_ref().map_or(0, |exit| exit.counters().rtt_ms);
         }
         sink.set_counters(counters);
         let Some(_control) = control.try_lock() else { continue; };

@@ -23,6 +23,16 @@ extern "C" {
     fn sb_stop();
     fn sb_running() -> c_int;
     fn sb_string_free(value: *mut c_char);
+    fn sb_stats(uplink: *mut i64, downlink: *mut i64) -> c_int;
+    fn sb_set_log(sink: LogSink, gate: c_int);
+}
+
+/// Host log sink, implemented here and called from the core's own goroutines.
+type LogSink = Option<unsafe extern "C" fn(c_int, *const c_char)>;
+
+/// Receives the core's log lines and hands them to the app console.
+unsafe extern "C" fn log_sink(level: c_int, message: *const c_char) {
+    fcae_runtime::sing_xray::forward_log("sing-box", level, message);
 }
 
 pub struct SingBoxDialect;
@@ -34,7 +44,10 @@ impl Dialect for SingBoxDialect {
         stop: sb_stop,
         running: sb_running,
         string_free: sb_string_free,
+        stats: sb_stats,
+        set_log: sb_set_log,
     };
+    const LOG_SINK: unsafe extern "C" fn(c_int, *const c_char) = log_sink;
 
     fn generate(plan: &Plan<'_>) -> std::result::Result<serde_json::Value, String> {
         config::generate(plan)

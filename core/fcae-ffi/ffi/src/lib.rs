@@ -1256,6 +1256,48 @@ pub unsafe extern "C" fn fcae_core_check_profile(
     checked.is_ok()
 }
 
+/// What a saved core config lets a session serve, bitwise (`1` = SOCKS5,
+/// `2` = HTTP; see `FCAE_CORE_LISTENER_*`), and the ports it pins for those
+/// listeners. A pinned port is zero when the config names none — a share link
+/// never does, because the engine builds its listeners.
+///
+/// The config editors use this to offer a switch only where a config can answer
+/// and to start a port field where the config put it: a native config with a
+/// lone SOCKS5 inbound cannot serve an HTTP proxy, and rewriting a port the
+/// config declared is a change the user never asked for.
+///
+/// # Safety
+/// `config` must be NULL or NUL-terminated; the port pointers must be NULL or
+/// point at a writable `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_core_listeners(
+    config: *const c_char,
+    backend: i32,
+    socks_port: *mut u32,
+    http_port: *mut u32,
+) -> u32 {
+    let listeners = guard_value("fcae_core_listeners", fcae_runtime::saved_configs::Listeners::default(), || {
+        let Ok(backend) = FcaeBackend::try_from(backend as u32) else {
+            return fcae_runtime::saved_configs::Listeners::default();
+        };
+        if !config::is_core_backend(backend) || config.is_null() {
+            return fcae_runtime::saved_configs::Listeners::default();
+        }
+        let Ok(text) = CStr::from_ptr(config).to_str() else {
+            return fcae_runtime::saved_configs::Listeners::default();
+        };
+        fcae_runtime::saved_configs::listeners(backend, text)
+    });
+    let pinned = |port: Option<u16>| port.map_or(0, u32::from);
+    if !socks_port.is_null() {
+        *socks_port = pinned(listeners.socks_port);
+    }
+    if !http_port.is_null() {
+        *http_port = pinned(listeners.http_port);
+    }
+    listeners.kinds
+}
+
 /// Psiphon's currently bound SOCKS port, or zero when unavailable.
 #[no_mangle]
 pub extern "C" fn fcae_psiphon_socks_port() -> u16 {

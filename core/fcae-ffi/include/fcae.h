@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 25
+#define FCAE_ABI_VERSION 26
 
 /* Protocol-list positions at and above this index name a saved Xray/sing-box
  * config (its position in FcaeCore::library) instead of one of the built-in
@@ -52,6 +52,13 @@ extern "C" {
  * pickable everywhere a built-in transport is: as the main protocol and as a
  * chained exit. Below it, positions follow the built-in transport order. */
 #define FCAE_CORE_TRANSPORT_BASE 11
+
+/* fcae_core_listeners() bits: the listener types a saved core config can
+ * serve. A share link serves both; a native config only serves the inbound
+ * types it declares (a `mixed` inbound counts as SOCKS5). */
+#define FCAE_CORE_LISTENER_SOCKS 1u
+#define FCAE_CORE_LISTENER_HTTP 2u
+
 /* Opt in to an HTTP listener in TUN mode when http_port is nonzero. */
 #define FCAE_CONFIG_TUN_HTTP (UINT64_C(1) << 63)
 
@@ -587,6 +594,14 @@ bool fcae_normalize_upstream_proxy(const char *text, char *out, uint32_t cap);
  * true and writes "" into `out`, or false and writes the reason there. */
 bool fcae_core_check_profile(const char *config, int32_t backend, char *out, uint32_t cap);
 
+/* What a saved core config lets a session serve, bitwise (FCAE_CORE_LISTENER_*),
+ * and the ports it pins for those listeners. `socks_port`/`http_port` receive 0
+ * when the config names no port; either pointer may be NULL. Returns 0 for a
+ * config the core cannot read or one tagged for a backend that is not Xray or
+ * sing-box. */
+uint32_t fcae_core_listeners(const char *config, int32_t backend,
+                             uint32_t *socks_port, uint32_t *http_port);
+
 /* True if the process can create a TUN device (admin/root). */
 bool       fcae_is_privileged(void);
 
@@ -754,4 +769,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x37a013e9c20f56d0 */
+/* fcae-abi-fingerprint: 0x0bd781298ae6abad */
