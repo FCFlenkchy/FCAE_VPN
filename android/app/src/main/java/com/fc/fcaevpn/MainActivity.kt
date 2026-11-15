@@ -3061,7 +3061,8 @@ class MainActivity : AppCompatActivity() {
                 // of the library that is meant to hold it (and its HTTP
                 // listener switched off forever). It saves, and the note below
                 // says what it cannot do.
-                val socksServed = coreConfigServes(CoreConfig(nameText, backendIndex(), text), http = false)
+                val candidate = CoreConfig(nameText, backendIndex(), text)
+                val socksServed = coreConfigServes(candidate, http = false)
                 // The whole list is one document: it is what the engine parses
                 // and what an Intent carries, so it is measured as it will be
                 // stored. A library that saves is then a library that starts.

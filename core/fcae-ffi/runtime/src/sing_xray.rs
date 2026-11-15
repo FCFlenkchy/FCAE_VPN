@@ -3188,13 +3188,13 @@ mod tests {
         assert_eq!(&next, b"HT");
     }
 
-    /// A listener on loopback that hands every connection to `serve`.
-    fn serve(serve: impl FnOnce(std::net::TcpStream) + Send + 'static) -> std::net::SocketAddr {
+    /// A listener on loopback that hands its one connection to `handler`.
+    fn serve(handler: impl FnOnce(std::net::TcpStream) + Send + 'static) -> std::net::SocketAddr {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("address");
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            serve(stream);
+            handler(stream);
         });
         address
     }
@@ -3298,13 +3298,12 @@ mod tests {
         assert_eq!(handshake(&target), None);
     }
 
-    #[test]
-    fn a_proxy_that_wants_credentials_gets_them() {
+    /// A proxy that asks for RFC 1929 credentials: it offers both methods, picks
+    /// the password one, and answers the CONNECT only to the right secret.
+    fn credentials_hop() -> std::net::SocketAddr {
         use std::io::{Read as _, Write as _};
 
-        // RFC 1929: the offer lists "no auth" and "username/password", the proxy
-        // picks the latter, and only the right password gets a CONNECT through.
-        let address = serve(|mut stream| {
+        serve(|mut stream| {
             let mut greeting = [0u8; 4];
             stream.read_exact(&mut greeting).expect("greeting");
             assert_eq!(greeting, [0x05, 0x02, 0x00, 0x02]);
@@ -3329,18 +3328,53 @@ mod tests {
             stream
                 .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .expect("connect reply");
-        });
+        })
+    }
+
+    #[test]
+    fn a_proxy_that_wants_credentials_gets_them() {
+        use std::io::{Read as _, Write as _};
+
+        // Its own listener per attempt: a single-shot one would fail the second
+        // handshake with a closed port, and the rejection below would then hold
+        // for the wrong reason.
         let with = |password: &str| RttTarget {
             server: "example.com".into(),
             port: 443,
             via: Some(UpstreamProxy {
                 user: Some("alice".into()),
                 password: Some(password.into()),
-                ..proxy(ProxyKind::Socks5, address)
+                ..proxy(ProxyKind::Socks5, credentials_hop())
             }),
         };
         assert!(handshake(&with("secret")).is_some());
-        assert_eq!(handshake(&with("wrong")), None);
+
+        // A proxy that reads the credentials and refuses them: the CONNECT is
+        // never asked for, so there is no handshake to report.
+        let refusing = serve(|mut stream| {
+            let mut greeting = [0u8; 4];
+            let _ = stream.read_exact(&mut greeting);
+            let _ = stream.write_all(&[0x05, 0x02]);
+            let mut head = [0u8; 2];
+            let _ = stream.read_exact(&mut head);
+            let mut rest = vec![0u8; head[1] as usize + 1];
+            let _ = stream.read_exact(&mut rest);
+            let mut length = [0u8; 1];
+            let _ = stream.read_exact(&mut length);
+            let mut password = vec![0u8; length[0] as usize];
+            let _ = stream.read_exact(&mut password);
+            let _ = stream.write_all(&[0x01, 0x01]);
+        });
+        let wrong = RttTarget {
+            server: "example.com".into(),
+            port: 443,
+            via: Some(UpstreamProxy {
+                user: Some("alice".into()),
+                password: Some("wrong".into()),
+                ..proxy(ProxyKind::Socks5, refusing)
+            }),
+        };
+        assert_eq!(handshake(&wrong), None);
     }
 
     #[test]
