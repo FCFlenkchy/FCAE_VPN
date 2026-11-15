@@ -192,8 +192,18 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
                 "server_port": outbound.port,
                 "password": password,
             });
-            if let Some((kind, secret)) = obfs {
-                value["obfs"] = json!({"type": kind, "password": secret});
+            if let Some(obfs) = obfs {
+                let mut settings = Map::new();
+                settings.insert("type".into(), json!(obfs.kind));
+                settings.insert("password".into(), json!(obfs.password));
+                // Gecko pads into a window the link may size itself.
+                if let Some(size) = obfs.min_packet_size {
+                    settings.insert("min_packet_size".into(), json!(size));
+                }
+                if let Some(size) = obfs.max_packet_size {
+                    settings.insert("max_packet_size".into(), json!(size));
+                }
+                value["obfs"] = Value::Object(settings);
             }
             if let Some(up) = up_mbps {
                 value["up_mbps"] = json!(up);
@@ -365,19 +375,15 @@ fn transport_config(outbound: &Outbound) -> Result<Option<Value>, String> {
             }
             Value::Object(ws)
         }
-        Transport::HttpUpgrade {
-            path,
-            host,
-            max_early_data,
-        } => {
+        Transport::HttpUpgrade { path, host, .. } => {
             let mut upgrade = Map::new();
             upgrade.insert("type".into(), json!("httpupgrade"));
+            // This block has no early-data field — the count is Xray's, carried
+            // inside the path's query by that core alone — so the path goes out
+            // as the link spelled it and nothing pretends to set one here.
             upgrade.insert("path".into(), json!(path));
             if let Some(host) = host {
                 upgrade.insert("host".into(), json!(host));
-            }
-            if let Some(count) = max_early_data {
-                upgrade.insert("max_early_data".into(), json!(count));
             }
             Value::Object(upgrade)
         }
@@ -757,6 +763,46 @@ mod tests {
         assert_eq!(transport["type"], "http");
         assert_eq!(transport["host"][0], "cdn.example.com");
         assert_eq!(transport["method"], "GET");
+    }
+
+    #[test]
+    fn httpupgrade_carries_no_early_data_field() {
+        // This transport has no such field, and sing-box refuses a config that
+        // names one — an early-data link is Xray's to honour, through the path.
+        let routing = routing();
+        let config = build(&plan(
+            &Profile::parse(
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=httpupgrade\
+                 &path=%2Fup%3Fed%3D2048&host=cdn.example.com&security=tls",
+            )
+            .expect("profile parses"),
+            &routing,
+            None,
+        ));
+        let transport = &config["outbounds"][0]["transport"];
+        assert_eq!(transport["type"], "httpupgrade");
+        assert_eq!(transport["path"], "/up");
+        assert_eq!(transport["host"], "cdn.example.com");
+        assert!(transport.get("max_early_data").is_none());
+    }
+
+    #[test]
+    fn gecko_obfs_reaches_the_outbound() {
+        let routing = routing();
+        let config = build(&plan(
+            &Profile::parse(
+                "hysteria2://secret@example.com:443?obfs=gecko&obfs-password=salt\
+                 &minPacketSize=512&maxPacketSize=1200&sni=www.example.com",
+            )
+            .expect("profile parses"),
+            &routing,
+            None,
+        ));
+        let obfs = &config["outbounds"][0]["obfs"];
+        assert_eq!(obfs["type"], "gecko");
+        assert_eq!(obfs["password"], "salt");
+        assert_eq!(obfs["min_packet_size"], 512);
+        assert_eq!(obfs["max_packet_size"], 1200);
     }
 
     #[test]

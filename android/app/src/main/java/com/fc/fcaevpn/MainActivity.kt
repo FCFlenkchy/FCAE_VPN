@@ -2750,33 +2750,54 @@ class MainActivity : AppCompatActivity() {
         return array.toString()
     }
 
-    /** Store the list, then rebuild the protocol list so the names show up. */
-    private fun saveCoreConfigs(entries: List<CoreConfig>) {
+    /**
+     * Store the list, then rebuild the protocol list so the names show up.
+     *
+     * [replacedAt] is the row the caller rewrote in place, if any: an edited
+     * config keeps its own position even when the user renamed it, while every
+     * other entry is followed by name.
+     */
+    private fun saveCoreConfigs(entries: List<CoreConfig>, replacedAt: Int = -1) {
         // A protocol position is a position in this list, so the selected
-        // protocol and every saved chain exit are remapped by name before the
-        // list they index is replaced: removing one config must not silently
-        // re-point them at whichever config took its place.
+        // protocol and every saved chain exit are remapped before the list they
+        // index is replaced: removing one config must not silently re-point them
+        // at whichever config took its place, and adding one must not move them
+        // at all.
         val previous = coreConfigEntries()
-        val selectedBefore = selectedCoreConfig()?.name
-        fun remap(position: Int): Int {
-            if (position < CORE_TRANSPORT_BASE) return position
-            val name = previous.getOrNull(position - CORE_TRANSPORT_BASE)?.name ?: return -1
-            val index = entries.indexOfFirst { it.name.equals(name, true) }
-            return if (index >= 0) CORE_TRANSPORT_BASE + index else -1
-        }
         fun remapIndex(index: Int): Int {
-            val name = previous.getOrNull(index)?.name ?: return -1
+            if (index !in previous.indices) return -1
+            if (index == replacedAt && index in entries.indices) return index
+            val name = previous[index].name
             return entries.indexOfFirst { it.name.equals(name, true) }
         }
+        fun remap(position: Int): Int {
+            if (position < CORE_TRANSPORT_BASE) return position
+            val index = remapIndex(position - CORE_TRANSPORT_BASE)
+            return if (index >= 0) CORE_TRANSPORT_BASE + index else -1
+        }
+        // The spinner is the selection, not the stored position: the user can
+        // pick another protocol without waiting for the autosave.
+        val selectedBefore =
+            if (::spinnerProtocol.isInitialized && spinnerProtocol.selectedItemPosition >= CORE_TRANSPORT_BASE)
+                spinnerProtocol.selectedItemPosition - CORE_TRANSPORT_BASE
+            else -1
         val chain = selectedChain().map { remap(it) }.filter { it >= 0 }
-        val selected = remapIndex(prefs.getInt("coreSelected", -1))
+        val selected = remapIndex(selectedBefore)
         val editor = prefs.edit()
             .putString("coreConfigs", coreConfigDocument(entries))
             .putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
             .remove("chainCount").remove("chainExit0").remove("chainExit1").remove("chainExit2")
         if (selected >= 0) editor.putInt("coreSelected", selected) else editor.remove("coreSelected")
         editor.apply()
-        refreshProtocolChoices(selectedBefore)
+        // A built-in transport keeps its position through this: only a saved
+        // config that the list no longer holds has to give way.
+        refreshProtocolChoices(
+            when {
+                selectedBefore < 0 -> null
+                selected >= 0 -> CORE_TRANSPORT_BASE + selected
+                else -> 0
+            }
+        )
         scheduleSettingsSave()
     }
 
@@ -2894,25 +2915,20 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Rebuild the protocol list after the saved configs changed, keeping the
-     * user on the same position and dropping chain exits that no longer exist.
+     * user on the protocol they had chosen and dropping chain exits that no
+     * longer exist.
+     *
+     * [target] is the position to land on, or null to keep the position the
+     * spinner already holds. A saved config's label carries its core tag, so a
+     * label is not a name: the caller resolves the config it wants and passes
+     * the position it has in the list it just stored.
      */
-    private fun refreshProtocolChoices(previousSelection: String? = null) {
+    private fun refreshProtocolChoices(target: Int? = null) {
         if (!::spinnerProtocol.isInitialized) return
         val position = spinnerProtocol.selectedItemPosition
         val labels = protocolChoices()
         spinnerProtocol.adapter = ArrayAdapter(this, R.layout.spinner_dark_item, labels)
-        // A saved config is tracked by the name the user gave it, so editing the
-        // list around it keeps the same config selected. A built-in transport is
-        // tracked by position, which its own edits never move.
-        val byName = if (previousSelection != null)
-            labels.indexOfFirst { it.equals(previousSelection, true) } else -1
-        val selected = when {
-            byName >= CORE_TRANSPORT_BASE -> byName
-            // The config the protocol ran is gone; the first transport is the
-            // only honest choice left.
-            previousSelection != null -> 0
-            else -> position.coerceIn(0, labels.lastIndex)
-        }
+        val selected = (target ?: position).coerceIn(0, labels.lastIndex.coerceAtLeast(0))
         spinnerProtocol.setSelection(selected)
         persistSelectedCoreConfig(selected)
         val chain = selectedChain().filter { it in labels.indices }
@@ -2920,14 +2936,6 @@ class MainActivity : AppCompatActivity() {
             .putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
             .apply()
         applyTorLock()
-    }
-
-    /** The saved config the main protocol runs, or null for a built-in one. */
-    private fun selectedCoreConfig(): CoreConfig? {
-        if (!::spinnerProtocol.isInitialized) return null
-        val position = spinnerProtocol.selectedItemPosition
-        if (position < CORE_TRANSPORT_BASE) return null
-        return coreConfigEntries().getOrNull(position - CORE_TRANSPORT_BASE)
     }
 
     /** Stored alongside the protocol so a saved config's position survives a restart. */
@@ -3099,9 +3107,12 @@ class MainActivity : AppCompatActivity() {
                         config.text.toString().trim(),
                     )
                     val next = entries.toMutableList()
-                    if (index in next.indices) next[index] = updated else next.add(updated)
+                    // Rewriting a row in place keeps its position; an appended
+                    // one is a config no saved chain or selection can name yet.
+                    val replacedAt = if (index in next.indices) index else -1
+                    if (replacedAt >= 0) next[replacedAt] = updated else next.add(updated)
                     entries = next
-                    saveCoreConfigs(entries)
+                    saveCoreConfigs(entries, replacedAt)
                     renderList()
                     refreshCoreListenerRows()
                     dialog.dismiss()

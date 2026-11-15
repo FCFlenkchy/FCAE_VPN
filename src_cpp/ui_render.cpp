@@ -1663,7 +1663,12 @@ static bool load_config_from(const std::string& path) {
     // survive above takes its references with it.
     if (g_app.core_selected < 0 || g_app.core_selected >= (int)g_app.core_configs.size()) {
         g_app.core_selected = -1;
-        if (g_app.backend >= 3) g_app.backend = 0;
+        if (g_app.backend >= 3) {
+            g_app.backend = 0;
+            // Auto is the saved config's own transport talking; without one the
+            // file's protocol field would claim it still has a profile.
+            if (g_app.protocol == 3) g_app.protocol = 0;
+        }
     }
     const int positions = transport_count();
     g_app.chain_transports.erase(
@@ -3249,8 +3254,11 @@ static void open_core_configs() {
 /// silently re-pointed at a different one.
 static void core_configs_forget(int removed) {
     if (g_app.core_selected == removed) {
-        g_app.core_selected = -1;
-        if (g_app.backend >= 3) g_app.backend = 0;
+        // The config the session ran is gone, so the whole choice goes with it:
+        // leaving `protocol` at Auto with nothing behind it is a state neither
+        // the settings panel nor the engine can read, and it would keep the
+        // profile the user had picked before this config ever existed.
+        apply_transport(0);
     } else if (g_app.core_selected > removed) {
         g_app.core_selected--;
     }
@@ -3275,6 +3283,24 @@ static void core_configs_forget(int removed) {
     }
 }
 
+/// Whether `name` is free for row `row` (-1 = a row that does not exist yet).
+/// A name identifies a config in the library the engine parses, so a duplicate
+/// makes that document ambiguous and gets the later entry dropped.
+static bool core_config_name_free(const char* name, int row) {
+    const size_t length = strlen(name);
+    if (length == 0 || length > 48) return false;
+    for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
+        if (i == row) continue;
+        const std::string& other = g_app.core_configs[(size_t)i].name;
+        const bool same = other.size() == length
+            && std::equal(other.begin(), other.end(), name, [](char a, char b) {
+                   return std::tolower((unsigned char)a) == std::tolower((unsigned char)b);
+               });
+        if (same) return false;
+    }
+    return true;
+}
+
 /// Validate the editor's buffers. Names must be unique because a saved config
 /// can be referenced by name as well as by position, and a duplicate would make
 /// that ambiguous.
@@ -3293,18 +3319,10 @@ static void core_config_check(int row) {
         snprintf(s_core_status, sizeof(s_core_status), "Names are limited to 48 characters.");
         return;
     }
-    for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
-        if (i == row) continue;
-        const std::string& other = g_app.core_configs[(size_t)i].name;
-        const bool same = other.size() == name.size()
-            && std::equal(other.begin(), other.end(), name.begin(), [](char a, char b) {
-                   return std::tolower((unsigned char)a) == std::tolower((unsigned char)b);
-               });
-        if (same) {
-            snprintf(s_core_status, sizeof(s_core_status),
-                     "Another config is already called \"%s\".", other.c_str());
-            return;
-        }
+    if (!core_config_name_free(s_core_name_buf, row)) {
+        snprintf(s_core_status, sizeof(s_core_status),
+                 "Another config is already called \"%s\".", name.c_str());
+        return;
     }
     if (s_core_text_buf.empty() || s_core_text_buf[0] == 0) {
         snprintf(s_core_status, sizeof(s_core_status),
@@ -3434,7 +3452,14 @@ static void render_core_configs() {
 
     if (ImGui::Button("+ Add config") && (int)g_app.core_configs.size() < kMaxCoreConfigs) {
         AppState::CoreConfigEntry entry;
-        entry.name = "Config " + std::to_string(g_app.core_configs.size() + 1);
+        // A name the library can hold: the engine drops a duplicate entry, and a
+        // config that is not in that document cannot be selected as a protocol.
+        for (int suffix = (int)g_app.core_configs.size() + 1;; ++suffix) {
+            std::string name = "Config " + std::to_string(suffix);
+            if (!core_config_name_free(name.c_str(), -1)) continue;
+            entry.name = std::move(name);
+            break;
+        }
         g_app.core_configs.push_back(std::move(entry));
         g_app.refresh_core_listeners();
         s_core_edit = (int)g_app.core_configs.size() - 1;
@@ -3471,7 +3496,9 @@ static void render_core_configs() {
                                              s_core_text_buf.size(), ImVec2(-FLT_MIN, editor_height));
         if (changed) {
             AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)s_core_edit];
-            entry.name = s_core_name_buf;
+            // A duplicate name is refused here and the stored one stays: a typo
+            // must not drop the config the session runs from the library.
+            if (core_config_name_free(s_core_name_buf, s_core_edit)) entry.name = s_core_name_buf;
             entry.backend = s_core_backend_buf == 1 ? 1 : 0;
             entry.text = s_core_text_buf.data();
             AppState::refresh_core_listeners(entry);

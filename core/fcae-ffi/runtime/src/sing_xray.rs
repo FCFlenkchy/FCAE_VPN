@@ -160,6 +160,21 @@ pub enum Security {
     },
 }
 
+/// Hysteria2's packet obfuscation: the scheme, its password, and for `gecko` the
+/// padding window it fills to.
+///
+/// Both schemes are sing-box's own; Xray-core has no hysteria2 outbound at all,
+/// so nothing here has to be expressed twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Obfs {
+    /// `salamander`, or `gecko` with its packet sizes.
+    pub kind: String,
+    pub password: String,
+    /// Gecko pads every packet into this window; `None` keeps the core's own.
+    pub min_packet_size: Option<u32>,
+    pub max_packet_size: Option<u32>,
+}
+
 /// A SIP003 plugin, as a share link spells it: the name up to the first `;` and
 /// the plugin's own options after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,8 +222,8 @@ pub enum Protocol {
     /// is false.
     Hysteria2 {
         password: String,
-        /// Packet obfuscation: the scheme (`salamander`) and its password.
-        obfs: Option<(String, String)>,
+        /// Packet obfuscation: the scheme, its password, and gecko's sizes.
+        obfs: Option<Obfs>,
         /// Bandwidth hint in Mbps, which is what Brutal shapes to.
         up_mbps: Option<u32>,
         down_mbps: Option<u32>,
@@ -263,6 +278,10 @@ impl Protocol {
             Protocol::Shadowsocks { method, plugin, .. } => {
                 plugin.is_none() && xray_cipher(method)
             }
+            // A cipher Xray-core no longer has is not silently swapped for
+            // `auto`: that would connect with a different one than the server
+            // expects.
+            Protocol::Vmess { security, .. } => security != "aes-128-cfb",
             _ => true,
         }
     }
@@ -387,6 +406,9 @@ impl Outbound {
                 )),
                 Protocol::Shadowsocks { method, .. } => refuse(&format!(
                     "the shadowsocks method {method:?} was removed from Xray-core"
+                )),
+                Protocol::Vmess { security, .. } => refuse(&format!(
+                    "the vmess security {security:?} was removed from Xray-core"
                 )),
                 _ => refuse(&format!("a {name} link runs on sing-box only")),
             };
@@ -582,9 +604,12 @@ fn parse_vless(rest: &str) -> Result<Outbound, String> {
         .flatten();
     let flow = query.string("flow");
     if let Some(flow) = flow.as_deref() {
-        if !matches!(flow, "xtls-rprx-vision" | "xtls-rprx-vision-udp443") {
+        // The core accepts one flow and nothing else; the `-udp443` variant
+        // older links carry is refused rather than passed through as a value
+        // the core would exit on.
+        if flow != "xtls-rprx-vision" {
             return Err(format!(
-                "vless flow={flow:?} is not supported (only xtls-rprx-vision)"
+                "vless flow={flow:?} is not supported by this core (only xtls-rprx-vision)"
             ));
         }
     }
@@ -658,8 +683,16 @@ fn vless_encryption(raw: &str) -> Result<Option<String>, String> {
 }
 
 fn parse_vmess(rest: &str) -> Result<Outbound, String> {
-    let body = rest.split('#').next().unwrap_or(rest).trim();
-    let decoded = b64_decode(body).ok_or("a vmess link must be vmess://<base64 JSON>")?;
+    let (body, remark) = split_fragment(rest);
+    // Two shapes carry a vmess outbound: the base64 JSON every client exports,
+    // and the URI form that publishes the same settings as a query. A base64
+    // blob cannot contain `@`, so the shape decides.
+    if split_query(&body).0.rsplit_once('@').is_some() {
+        return parse_vmess_uri(&body, remark);
+    }
+    let decoded = b64_decode(body.trim()).ok_or(
+        "a vmess link must be vmess://<base64 JSON> or vmess://<uuid>@<host>:<port>?…",
+    )?;
     let json: Value = serde_json::from_str(&decoded)
         .map_err(|error| format!("vmess payload is not JSON: {error}"))?;
     let server = json_text(&json, "add").ok_or("vmess payload has no \"add\" server")?;
@@ -671,31 +704,45 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
     let alter_id = json_text(&json, "aid")
         .and_then(|text| text.trim().parse::<u16>().ok())
         .unwrap_or(0);
-    let cipher = json_text(&json, "scy").unwrap_or_else(|| "auto".into());
-    // `type` is the old TCP/mKCP header obfuscation, which the core removed
-    // along with the mKCP header itself: a link still naming one is reported,
-    // not quietly downgraded to a plain header.
-    if let Some(kind) = json_text(&json, "type") {
-        if !kind.eq_ignore_ascii_case("none") {
-            return Err(format!(
-                "the vmess header type {kind:?} was removed from Xray-core (finalmask replaced it)"
-            ));
-        }
-    }
+    let cipher = json_text(&json, "scy").unwrap_or_default();
     // The JSON names the same transports the query grammar does, only under
     // `net`/`path`/`host`, so it is handed to the one parser that knows all of
-    // them instead of a second, shorter copy of it.
-    let network = json_text(&json, "net");
+    // them instead of a second, shorter copy of it. `type` is not one setting:
+    // it is the transport's own mode on gRPC and XHTTP, the seed carrier on
+    // mKCP and the header obfuscation on plain TCP.
+    let network = json_text(&json, "net")
+        .map(|net| net.to_ascii_lowercase())
+        .unwrap_or_else(|| "tcp".into());
+    let kind = json_text(&json, "type");
     let mut params = Query::new();
-    params.set("type", network.clone());
-    if network.is_some_and(|net| net.eq_ignore_ascii_case("grpc")) {
-        params.set(
-            "servicename",
-            json_text(&json, "path").or_else(|| json_text(&json, "host")),
-        );
-    } else {
-        params.set("path", json_text(&json, "path"));
-        params.set("host", json_text(&json, "host"));
+    params.set("type", Some(network.clone()));
+    match network.as_str() {
+        "tcp" | "raw" | "none" => params.set("headertype", kind),
+        "kcp" | "mkcp" => {
+            params.set("headertype", kind);
+            // The seed lives in `path` in this grammar; the core removed it
+            // along with the header, so it is reported rather than dropped.
+            if let Some(seed) = json_text(&json, "path") {
+                return Err(format!(
+                    "the vmess mKCP seed {:?} was removed from Xray-core (finalmask replaced it)",
+                    excerpt(&seed)
+                ));
+            }
+        }
+        "grpc" | "gun" => {
+            params.set("mode", kind);
+            params.set("servicename", json_text(&json, "path"));
+            params.set("authority", json_text(&json, "host"));
+        }
+        "xhttp" | "splithttp" => {
+            params.set("mode", kind);
+            params.set("path", json_text(&json, "path"));
+            params.set("host", json_text(&json, "host"));
+        }
+        _ => {
+            params.set("path", json_text(&json, "path"));
+            params.set("host", json_text(&json, "host"));
+        }
     }
     let transport = parse_transport(&params)?;
     let security = if json_text(&json, "tls").is_some_and(|tls| tls.eq_ignore_ascii_case("tls")) {
@@ -703,7 +750,7 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
             json_text(&json, "sni").or_else(|| json_text(&json, "host")),
             split_list(json_text(&json, "alpn").as_deref()),
             json_text(&json, "fp"),
-            false,
+            json_text(&json, "insecure").is_some_and(|flag| flag.trim() == "1"),
             None,
         )
     } else {
@@ -713,15 +760,67 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         protocol: Protocol::Vmess {
             uuid,
             alter_id,
-            security: cipher,
+            security: vmess_security(&cipher)?,
         },
         transport,
         security,
         finalmask: None,
         server,
         port,
-        remark: percent_text(rest.split_once('#').map(|(_, remark)| remark)),
+        remark,
     })
+}
+
+/// `vmess://<uuid>@<host>:<port>?type=…&security=…`: the same outbound as the
+/// JSON form, spelled as a query. Its credentials carry no cipher, so the core
+/// default is what it runs.
+fn parse_vmess_uri(body: &str, remark: Option<String>) -> Result<Outbound, String> {
+    let (authority, params) = split_query(body);
+    let query = Query::parse(params);
+    let (userinfo, target) = authority
+        .rsplit_once('@')
+        .ok_or("a vmess link must be vmess://<uuid>@<host>:<port>")?;
+    let uuid = percent_decode(userinfo).trim().to_string();
+    if !valid_uuid(&uuid) {
+        return Err(format!("vmess id {:?} is not a UUID", excerpt(&uuid)));
+    }
+    let (server, port) = split_host_port(target, None)?;
+    Ok(Outbound {
+        protocol: Protocol::Vmess {
+            uuid,
+            alter_id: 0,
+            security: vmess_security(query.get("scy").unwrap_or_default())?,
+        },
+        transport: parse_transport(&query)?,
+        security: parse_security(&query, &server, false)?,
+        finalmask: parse_finalmask(&query)?,
+        server,
+        port,
+        remark,
+    })
+}
+
+/// VMess's packet cipher, spelled the way both cores accept it.
+///
+/// Xray-core knows four of them and silently falls back to `auto` for anything
+/// else, while sing-box refuses a value outside its enum outright — so a link
+/// that names a cipher neither implements is reported here, and the one cipher
+/// only sing-box still carries is left to [`Protocol::xray_carries`].
+fn vmess_security(raw: &str) -> Result<String, String> {
+    let cipher = match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => "auto",
+        "none" | "plain" => "none",
+        "zero" => "zero",
+        "aes-128-gcm" | "aes128gcm" => "aes-128-gcm",
+        "chacha20-poly1305" | "chacha20-ietf-poly1305" | "chacha20poly1305" => "chacha20-poly1305",
+        "aes-128-cfb" => "aes-128-cfb",
+        other => {
+            return Err(format!(
+                "vmess security {other:?} is not a cipher these cores implement"
+            ))
+        }
+    };
+    Ok(cipher.to_string())
 }
 
 fn parse_trojan(rest: &str) -> Result<Outbound, String> {
@@ -734,6 +833,15 @@ fn parse_trojan(rest: &str) -> Result<Outbound, String> {
     let password = percent_decode(userinfo);
     if password.is_empty() {
         return Err("trojan password is empty".into());
+    }
+    // Trojan's own `flow` was an XTLS Vision variant of the protocol and is
+    // gone from the core; a link that still asks for one is reported instead of
+    // connecting without it.
+    if let Some(flow) = query.get("flow").filter(|flow| !flow.is_empty()) {
+        return Err(format!(
+            "trojan flow={flow:?} was removed from Xray-core \
+             (use a VLESS link with xtls-rprx-vision)"
+        ));
     }
     let (server, port) = split_host_port(target, None)?;
     Ok(Outbound {
@@ -809,21 +917,28 @@ fn parse_socks(rest: &str) -> Result<Outbound, String> {
 
 fn parse_http(rest: &str, tls: bool) -> Result<Outbound, String> {
     let (body, remark) = split_fragment(rest);
-    let (body, _params) = split_query(body);
+    let (body, params) = split_query(body);
+    let mut query = Query::parse(params);
     let (userinfo, target) = match body.rsplit_once('@') {
         Some((userinfo, target)) => (Some(userinfo), target),
         None => (None, body),
     };
     let (server, port) = split_host_port(target, Some(if tls { 443 } else { 8080 }))?;
     let (user, password) = split_credentials(userinfo);
+    // `https` states its own security, so a stray `security=none` in the query
+    // cannot quietly turn it into a plaintext proxy; everything else the link
+    // names (SNI, ALPN, a fingerprint) is read by the grammar every other
+    // scheme uses.
+    let security = if tls {
+        query.remove("security");
+        parse_security(&query, &server, true)?
+    } else {
+        Security::None
+    };
     Ok(Outbound {
         protocol: Protocol::Http { user, password },
         transport: Transport::Tcp,
-        security: if tls {
-            tls_security(host_name(&server), Vec::new(), None, false, None)
-        } else {
-            Security::None
-        },
+        security,
         server,
         port,
         finalmask: None,
@@ -851,18 +966,36 @@ fn parse_hysteria2(rest: &str) -> Result<Outbound, String> {
         return Err("a hysteria2 link needs its password".into());
     }
     let (server, port) = split_host_port(trim_trailing_path(target), Some(443))?;
+    // `salamander` is the original scheme and `gecko` the one that pads every
+    // packet into a window; both need their password, and gecko takes the size
+    // of that window from the link when it names one.
     let obfs = match query.string("obfs").map(|kind| kind.to_ascii_lowercase()) {
         None => None,
-        Some(kind) if kind == "salamander" => {
+        Some(kind) => {
+            if !matches!(kind.as_str(), "salamander" | "gecko") {
+                return Err(format!(
+                    "hysteria2 obfs {kind:?} is not supported (salamander, gecko)"
+                ));
+            }
             let secret = query
                 .first(&["obfs-password", "obfs_password"])
-                .ok_or("hysteria2 obfs=salamander needs obfs-password")?;
-            Some((kind, percent_decode(secret)))
-        }
-        Some(other) => {
-            return Err(format!(
-                "hysteria2 obfs {other:?} is not supported (only salamander)"
-            ))
+                .ok_or_else(|| format!("hysteria2 obfs={kind} needs obfs-password"))?;
+            let (min_packet_size, max_packet_size) = if kind == "gecko" {
+                let min = query.number("minpacketsize")?;
+                let max = query.number("maxpacketsize")?;
+                if min.zip(max).is_some_and(|(min, max)| min > max) {
+                    return Err("hysteria2 gecko minPacketSize is larger than maxPacketSize".into());
+                }
+                (min, max)
+            } else {
+                (None, None)
+            };
+            Some(Obfs {
+                kind,
+                password: percent_decode(secret),
+                min_packet_size,
+                max_packet_size,
+            })
         }
     };
     Ok(Outbound {
@@ -991,6 +1124,54 @@ fn trim_trailing_path(target: &str) -> &str {
     target.trim_end_matches('/')
 }
 
+/// Split a transport path into the part the core requests and the early-data
+/// count it was asked for.
+///
+/// Xray spells early data as an `ed` query inside the path and strips it before
+/// the request goes out; sing-box has a field for the count instead and knows
+/// nothing about the query. The path is normalised to what each core should
+/// request, so neither sees the other's spelling.
+fn split_early_data(path: &str) -> (String, Option<u32>) {
+    let Some((base, query)) = path.split_once('?') else {
+        return (path.to_string(), None);
+    };
+    let mut kept = String::new();
+    let mut count = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        if let Some((key, value)) = pair.split_once('=') {
+            if key.eq_ignore_ascii_case("ed") {
+                count = count.or_else(|| value.trim().parse::<u32>().ok().filter(|ed| *ed > 0));
+                continue;
+            }
+        }
+        if !kept.is_empty() {
+            kept.push('&');
+        }
+        kept.push_str(pair);
+    }
+    let mut path = base.to_string();
+    if !kept.is_empty() {
+        path.push('?');
+        path.push_str(&kept);
+    }
+    (path, count)
+}
+
+/// The plain TCP transport's own header obfuscation.
+///
+/// Xray still parses it, but a link can only name the shape (`http`), never the
+/// request and response templates the core needs to build one, so a link that
+/// asks for it is reported instead of being run without the header it expects.
+fn plain_tcp_header(query: &Query) -> Result<(), String> {
+    match query.get("headertype") {
+        Some(kind) if !kind.eq_ignore_ascii_case("none") => Err(format!(
+            "the TCP headerType={kind:?} needs request and response templates a link cannot carry; \
+             use finalmask (fm)"
+        )),
+        _ => Ok(()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared link grammar
 // ---------------------------------------------------------------------------
@@ -1001,17 +1182,24 @@ fn parse_transport(query: &Query) -> Result<Transport, String> {
         .or_else(|| query.get("net"))
         .unwrap_or("tcp")
         .to_ascii_lowercase();
-    let path = query.string("path").unwrap_or_else(|| "/".into());
+    // Early data is a count plus, on sing-box, the header it rides in. Links
+    // spell the count either as its own parameter or — Xray's own way — as an
+    // `ed` query inside the path, so the path is normalised here and the count
+    // is what the generators re-emit in each core's own grammar.
+    let (path, path_early_data) =
+        split_early_data(&query.string("path").unwrap_or_else(|| "/".into()));
     let host = query.string("host");
-    // Early data travels as a count plus the header it is sent in; Xray keeps
-    // the count in the path query and dropped the header, sing-box names both.
     let max_early_data = query
         .number("ed")?
         .or(query.number("maxearlydata")?)
+        .or(path_early_data)
         .filter(|count| *count > 0);
     let transport = match network.as_str() {
         // `raw` is the name Xray 25.x gave the plain TCP transport.
-        "tcp" | "raw" | "none" => Transport::Tcp,
+        "tcp" | "raw" | "none" => {
+            plain_tcp_header(query)?;
+            Transport::Tcp
+        }
         "ws" => Transport::Ws {
             path,
             host,
@@ -1072,10 +1260,22 @@ fn parse_transport(query: &Query) -> Result<Transport, String> {
                 }
                 None => None,
             };
+            // The core knows four modes and refuses a config that names another
+            // one, so the link is checked here where the message can say so.
+            let mode = query.string("mode");
+            if let Some(mode) = mode.as_deref() {
+                const MODES: [&str; 4] = ["auto", "packet-up", "stream-up", "stream-one"];
+                if !MODES.contains(&mode) {
+                    return Err(format!(
+                        "xhttp mode={mode:?} is not one Xray-core runs \
+                         (auto, packet-up, stream-up, stream-one)"
+                    ));
+                }
+            }
             Transport::Xhttp {
                 path,
                 host,
-                mode: query.string("mode"),
+                mode,
                 extra,
             }
         }
@@ -1115,6 +1315,16 @@ fn parse_security(query: &Query, server: &str, implicit_tls: bool) -> Result<Sec
                 .string("sni")
                 .or_else(|| host_name(server))
                 .ok_or("reality needs sni (the camouflaged server name)")?;
+            // `spx` is the path the camouflage crawler is shown; the core
+            // refuses anything that is not a path, so a link naming one is
+            // reported here.
+            let spider_x = query.string("spx").unwrap_or_else(|| "/".into());
+            if !spider_x.starts_with('/') {
+                return Err(format!(
+                    "reality spx={:?} must be a path, starting with /",
+                    excerpt(&spider_x)
+                ));
+            }
             Ok(Security::Reality {
                 sni,
                 fingerprint: query
@@ -1122,7 +1332,7 @@ fn parse_security(query: &Query, server: &str, implicit_tls: bool) -> Result<Sec
                     .unwrap_or_else(|| "chrome".into()),
                 public_key,
                 short_id: query.string("sid").unwrap_or_default(),
-                spider_x: query.string("spx").unwrap_or_else(|| "/".into()),
+                spider_x,
                 mldsa65_verify: query.string("pqv"),
             })
         }
@@ -1165,6 +1375,9 @@ fn parse_ss_plugin(query: &Query) -> Result<Option<ShadowSocksPlugin>, String> {
         Some((name, options)) => (name.trim(), Some(options.trim().to_string())),
         None => (raw.trim(), None),
     };
+    // SIP002's own example spells the plugin `simple-obfs`, the name it had
+    // before it was renamed; sing-box answers to `obfs-local` alone.
+    let name = if name.eq_ignore_ascii_case("simple-obfs") { "obfs-local" } else { name };
     if !PLUGINS.contains(&name) {
         return Err(format!(
             "shadowsocks plugin {:?} is not one sing-box implements (obfs-local, v2ray-plugin)",
@@ -1331,10 +1544,6 @@ fn json_text(json: &Value, key: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn percent_text(text: Option<&str>) -> Option<String> {
-    text.map(percent_decode).filter(|text| !text.is_empty())
-}
-
 fn excerpt(text: &str) -> String {
     const LIMIT: usize = 48;
     if text.chars().count() <= LIMIT {
@@ -1421,6 +1630,10 @@ impl Query {
                 .or_insert_with(|| value.trim().to_string());
         }
         Self(map)
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.0.remove(key);
     }
 
     fn get(&self, key: &str) -> Option<&str> {
@@ -1968,17 +2181,20 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
         }
     }
 
+    let rtt_probe = RttProbe::plan(profile, config.upstream_proxy.clone(), &endpoints);
     let running = Running {
         ffi,
-        rtt_target: RttTarget::new(profile, config.upstream_proxy.clone()),
         endpoints,
         stopping: AtomicBool::new(false),
         traffic: Mutex::new(Traffic::default()),
         rtt_ms: Arc::new(AtomicU32::new(0)),
-        rtt_started: Arc::new(AtomicBool::new(false)),
-        rtt_attempts: AtomicU32::new(0),
-        rtt_next: Mutex::new(None),
+        rtt_stop: Arc::new(AtomicBool::new(false)),
+        rtt_probe,
     };
+    // The measurement starts with the core, not with the first telemetry read:
+    // a session shows its latency as soon as it is up, the way the Firefox
+    // bridge records one on its first tunnel open.
+    running.spawn_rtt();
     running.await_ready().await?;
     Ok(running)
 }
@@ -2021,17 +2237,13 @@ pub struct Running {
     stopping: AtomicBool,
     /// Sample bookkeeping behind [`BackendHandle::counters`].
     traffic: Mutex<Traffic>,
-    /// Tunnel round trip in milliseconds; 0 until a probe succeeds.
+    /// Tunnel round trip in milliseconds; 0 until a measurement lands.
     rtt_ms: Arc<AtomicU32>,
-    /// Held while a probe is in flight, and for good once one has answered.
-    rtt_started: Arc<AtomicBool>,
-    /// Probes started so far; indexes [`RTT_RETRY`].
-    rtt_attempts: AtomicU32,
-    /// Earliest time the next probe may start.
-    rtt_next: Mutex<Option<Instant>>,
-    /// The remote to handshake with, or `None` for an outbound no TCP handshake
-    /// can reach.
-    rtt_target: Option<RttTarget>,
+    /// Set when the session goes down, so the measurement loop outlives neither
+    /// the core nor the handle that owns it.
+    rtt_stop: Arc<AtomicBool>,
+    /// How this session measures its latency, or `None` when it cannot be.
+    rtt_probe: Option<RttProbe>,
 }
 
 impl Running {
@@ -2089,66 +2301,75 @@ impl Running {
         (reported == 1).then(|| (uplink.max(0) as u64, downlink.max(0) as u64))
     }
 
-    /// Measure the session's handshake with its remote.
+    /// Start the latency measurement, once per handle.
     ///
-    /// Neither core reports latency without a config section this app does not
-    /// own — Xray wants an `observatory`, sing-box a `urltest` group, and both
-    /// measure by fetching a URL — so it is measured here instead: the round
-    /// trip the session's last leg spends reaching the server the config names.
-    /// A direct outbound gets a SYN to the server; a chained one gets the
-    /// CONNECT the hop above issues, because that is the path its traffic takes.
-    /// No application request is sent: the SYN, or the hop's CONNECT, is the
-    /// whole exchange, and no third party is contacted.
+    /// This is the Firefox bridge's keepalive shape on the connection this side
+    /// can time: a five-second tick that measures until it has a sample,
+    /// records that sample, and retires. The first answer sticks — the same
+    /// `compare_exchange(0, …)` the Firefox transport uses — so a later, busier
+    /// measurement can never rewrite a latency the UI already shows.
     ///
-    /// Outbounds no TCP handshake can reach — QUIC end to end — have no reading
-    /// ([`RttTarget`]), and none is invented for them.
-    ///
-    /// A probe that fails is retried on [`RTT_RETRY`]'s spacing: holding the
-    /// "already probed" flag across a failure was a one-shot that left a session
-    /// whose first probe landed before the tunnel settled with no latency at all
-    /// until it was restarted.
-    fn measure_rtt(&self) {
-        let Some(target) = self.rtt_target.as_ref() else { return };
-        if self.rtt_ms.load(Ordering::Acquire) != 0
-            || self.rtt_started.swap(true, Ordering::AcqRel)
-        {
-            return;
-        }
-        let attempt = self.rtt_attempts.fetch_add(1, Ordering::AcqRel) as usize;
-        {
-            let mut next = self.rtt_next.lock();
-            if next.as_ref().is_some_and(|at| Instant::now() < *at) {
-                self.rtt_started.store(false, Ordering::Release);
-                return;
-            }
-            let seconds = RTT_RETRY[attempt.min(RTT_RETRY.len() - 1)];
-            *next = Some(Instant::now() + Duration::from_secs(seconds));
-        }
+    /// The loop is the handle's own: it wakes every [`POLL`] to watch the stop
+    /// flag, so a session that goes down retires it in a quarter second instead
+    /// of leaving a thread behind for the life of the process.
+    fn spawn_rtt(&self) {
+        let Some(probe) = self.rtt_probe.clone() else { return };
         let rtt_ms = Arc::clone(&self.rtt_ms);
-        let started = Arc::clone(&self.rtt_started);
-        let target = target.clone();
+        let stop = Arc::clone(&self.rtt_stop);
         let spawned = std::thread::Builder::new()
             .name("fcae-core-rtt".into())
-            .spawn(move || match handshake(&target) {
-                Some(measured) => {
-                    log::debug!("[core] handshake to {} took {measured}ms", target.server);
-                    rtt_ms.store(measured, Ordering::Release);
-                }
-                // Cleared, not held: the next sample retries on the spacing
-                // above.
-                None => started.store(false, Ordering::Release),
-            });
+            .spawn(move || measure_until_known(&probe, &rtt_ms, &stop));
         if spawned.is_err() {
-            self.rtt_started.store(false, Ordering::Release);
+            log::warn!("[core] could not start the latency measurement thread");
         }
     }
 }
 
-/// Seconds between probe attempts, from the end of the previous one. The first
-/// few cover a tunnel that is still warming up when the session reports its
-/// first sample; the rest keep a route that heals later in the session
-/// measurable without spending a thread on a dead one every second.
-const RTT_RETRY: [u64; 9] = [0, 2, 5, 15, 30, 60, 120, 300, 600];
+/// Measure the session's latency until one lands, then stop.
+fn measure_until_known(probe: &RttProbe, rtt_ms: &AtomicU32, stop: &AtomicBool) {
+    loop {
+        if stop.load(Ordering::Acquire) || rtt_ms.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        if let Some(measured) = probe.measure() {
+            log::debug!("[core] latency {measured}ms ({})", probe.label());
+            // First sample wins, exactly as the Firefox transport records one:
+            // a slower measurement later must not rewrite what the UI shows.
+            let _ = rtt_ms.compare_exchange(0, measured, Ordering::AcqRel, Ordering::Acquire);
+            return;
+        }
+        if !sleep_until_next_tick(stop, rtt_ms) {
+            return;
+        }
+    }
+}
+
+/// Wait out one [`RTT_INTERVAL`], waking every [`POLL`] so the session's stop is
+/// honored promptly. False when the caller should give up.
+fn sleep_until_next_tick(stop: &AtomicBool, rtt_ms: &AtomicU32) -> bool {
+    let mut left = RTT_INTERVAL;
+    while !left.is_zero() {
+        // Checked before the step as well as after it, so a session that is
+        // already down costs no nap at all.
+        if stop.load(Ordering::Acquire) || rtt_ms.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        let step = left.min(POLL);
+        std::thread::sleep(step);
+        left -= step;
+    }
+    true
+}
+
+/// How often a session without a latency sample tries again: the same five
+/// seconds the Firefox transport waits between its keepalive pings.
+const RTT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// What the through-the-tunnel probe fetches: an empty 204 on a host that
+/// answers everywhere, so the measurement is of the route, not of the target.
+const RTT_HOST: &str = "www.gstatic.com";
+const RTT_PORT: u16 = 80;
+const RTT_PATH: &str = "/generate_204";
 
 /// How long a handshake may take: the SYN, or the CONNECT a fronting hop has to
 /// dial and answer. It is a network round trip over a mobile link, not the
@@ -2174,7 +2395,7 @@ struct RttTarget {
 
 impl RttTarget {
     /// The remote to handshake with, or `None` when no TCP handshake can reach
-    /// this outbound.
+    /// this outbound — the case [`RttProbe::Through`] covers.
     ///
     /// mKCP rides UDP, and hysteria2 and tuic are QUIC end to end, so a SYN to
     /// their server says nothing about the path the tunnel takes. A native
@@ -2187,6 +2408,56 @@ impl RttTarget {
             return None;
         }
         Some(Self { server: outbound.server.clone(), port: outbound.port, via })
+    }
+}
+
+/// How a session measures its latency, decided once when it starts.
+#[derive(Clone)]
+enum RttProbe {
+    /// Time the handshake the session's last leg makes with the server the
+    /// config names: a SYN when the outbound dials directly, the hop's CONNECT
+    /// when it is chained. No application request leaves the host.
+    Handshake(RttTarget),
+    /// Time a real answer fetched through the core's own listener, for the
+    /// outbounds a TCP handshake cannot describe: hysteria2 and tuic are QUIC
+    /// end to end, mKCP rides UDP, and a native config has no single remote at
+    /// all.
+    Through { listener: SocketAddr, socks: bool },
+}
+
+impl RttProbe {
+    /// The plan for this session, or `None` when there is nothing honest to
+    /// measure.
+    fn plan(
+        profile: &CoreProfile,
+        upstream: Option<UpstreamProxy>,
+        endpoints: &Endpoints,
+    ) -> Option<Self> {
+        if let Some(target) = RttTarget::new(profile, upstream) {
+            return Some(Self::Handshake(target));
+        }
+        // SOCKS5 first: TUN mode always has one, so it is the listener a
+        // session is most likely to answer on.
+        if let Some(socks) = endpoints.socks {
+            return Some(Self::Through { listener: socks, socks: true });
+        }
+        endpoints.http.map(|http| Self::Through { listener: http, socks: false })
+    }
+
+    /// One measurement, in milliseconds.
+    fn measure(&self) -> Option<u32> {
+        match self {
+            Self::Handshake(target) => handshake(target),
+            Self::Through { listener, socks } => through_tunnel(*listener, *socks),
+        }
+    }
+
+    /// What a log line calls this measurement.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Handshake(_) => "handshake with the server",
+            Self::Through { .. } => "request through the tunnel",
+        }
     }
 }
 
@@ -2248,6 +2519,79 @@ fn handshake_via(proxy: &UpstreamProxy, target: &RttTarget) -> Option<u32> {
         }
     }
     Some(millis_ceil(started.elapsed()))
+}
+
+/// Time a request answered through the core's own listener.
+///
+/// The proxy's acknowledgement is not the measurement, for the same reason the
+/// handshake exists at all: Xray-core answers a SOCKS5 CONNECT as soon as it has
+/// parsed the request, before it has dialled anything, so timing the
+/// acknowledgement reads a loopback round trip. The probe asks twice — the first
+/// request is what makes the tunnel real, the second rides the connection it
+/// opened — and keeps the warm window.
+fn through_tunnel(listener: SocketAddr, socks: bool) -> Option<u32> {
+    use std::io::{Read, Write};
+
+    let mut stream = std::net::TcpStream::connect_timeout(&listener, PROBE_TIMEOUT).ok()?;
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
+    // The request is one short write; Nagle would fold it into a delayed ACK and
+    // charge the measurement for it.
+    let _ = stream.set_nodelay(true);
+
+    if socks {
+        stream.write_all(&[0x05, 0x01, 0x00]).ok()?;
+        let mut choice = [0u8; 2];
+        stream.read_exact(&mut choice).ok()?;
+        if choice != [0x05, 0x00] {
+            return None;
+        }
+        let host = RTT_HOST.as_bytes();
+        let mut request = Vec::with_capacity(7 + host.len());
+        request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host.len() as u8]);
+        request.extend_from_slice(host);
+        request.extend_from_slice(&RTT_PORT.to_be_bytes());
+        stream.write_all(&request).ok()?;
+        socks_reply(&mut stream)?;
+    } else {
+        let authority = format!("{RTT_HOST}:{RTT_PORT}");
+        let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+        stream.write_all(request.as_bytes()).ok()?;
+        let mut status = [0u8; 12];
+        stream.read_exact(&mut status).ok()?;
+        if !status.starts_with(b"HTTP/1.") || !matches!(status[9], b'2' | b'3') {
+            return None;
+        }
+        let mut window = [0u8; 4];
+        window.copy_from_slice(&status[8..12]);
+        skip_headers(&mut stream, window)?;
+    }
+
+    let cold = exchange(&mut stream)?;
+    Some(millis_ceil(exchange(&mut stream).unwrap_or(cold)))
+}
+
+/// Send one probe request and time it to the first byte of the answer, then read
+/// to the end of that answer's header block so the connection can carry the next
+/// one.
+fn exchange(stream: &mut std::net::TcpStream) -> Option<Duration> {
+    use std::io::{Read, Write};
+
+    let request = format!("GET {RTT_PATH} HTTP/1.1\r\nHost: {RTT_HOST}\r\n\r\n");
+    let started = Instant::now();
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut first = [0u8; 1];
+    stream.read_exact(&mut first).ok()?;
+    // A status line, and an HTTP one: an error page from the proxy itself would
+    // be an answer to the proxy, not through the tunnel.
+    if first[0] != b'H' {
+        return None;
+    }
+    let waited = started.elapsed();
+    let mut window = [0u8; 4];
+    window[3] = first[0];
+    skip_headers(stream, window)?;
+    Some(waited)
 }
 
 /// Connect to a proxy. Untimed on its own; [`handshake_via`] owns the clock.
@@ -2475,7 +2819,6 @@ impl BackendHandle for Running {
     /// Nothing here is estimated: a core that reports no counters publishes
     /// zeros instead of a guess.
     fn counters(&self) -> Counters {
-        self.measure_rtt();
         let sample = self.bytes();
         let rtt_ms = self.rtt_ms.load(Ordering::Acquire);
         self.traffic
@@ -2498,6 +2841,7 @@ impl BackendHandle for Running {
 
     async fn stop(&self, timeout: Duration) -> CoreResult<()> {
         self.stopping.store(true, Ordering::SeqCst);
+        self.rtt_stop.store(true, Ordering::Release);
         halt(self.ffi).await;
         let deadline = tokio::time::Instant::now() + timeout;
         while self.alive() {
@@ -2507,6 +2851,14 @@ impl BackendHandle for Running {
             tokio::time::sleep(POLL).await;
         }
         Ok(())
+    }
+}
+
+impl Drop for Running {
+    /// A handle dropped instead of stopped still owns the measurement loop, so
+    /// it is told to retire here as well.
+    fn drop(&mut self) {
+        self.rtt_stop.store(true, Ordering::Release);
     }
 }
 
@@ -2543,6 +2895,19 @@ mod tests {
             CoreProfile::Link(outbound) => outbound,
             CoreProfile::Native(_) => panic!("expected a link"),
         }
+    }
+
+    /// A vmess link carrying `fields` on top of an endpoint every test shares.
+    fn vmess(fields: serde_json::Value) -> String {
+        let mut payload = serde_json::json!({
+            "add": "v2.example.net",
+            "port": "8443",
+            "id": UUID,
+        });
+        for (key, value) in fields.as_object().expect("an object") {
+            payload[key.as_str()] = value.clone();
+        }
+        format!("vmess://{}", STANDARD_NO_PAD.encode(payload.to_string()))
     }
 
     #[test]
@@ -2802,6 +3167,148 @@ mod tests {
             "vless://{UUID}@example.com:443?type=ws&path=%2Fray&ed=2048&security=tls"
         ));
         assert!(plain.carried_by(FcaeBackend::Xray));
+        // Xray spells early data inside the path. It is read out of the query
+        // and dropped from the path, so sing-box — which has a field for the
+        // count and no such convention — requests what the link meant.
+        let inside = link(&format!(
+            "vless://{UUID}@example.com:443?type=ws&path=%2Fws%3Fed%3D2048%26x%3D1&security=tls"
+        ));
+        assert_eq!(
+            inside.transport,
+            Transport::Ws {
+                path: "/ws?x=1".into(),
+                host: None,
+                max_early_data: Some(2048),
+                early_data_header: None,
+            }
+        );
+        assert!(inside.carried_by(FcaeBackend::Xray));
+        assert!(inside.carried_by(FcaeBackend::SingBox));
+        assert_eq!(split_early_data("/ws"), ("/ws".to_string(), None));
+        assert_eq!(split_early_data("/ws?ed=64"), ("/ws".to_string(), Some(64)));
+        assert_eq!(split_early_data("/ws?ed=0"), ("/ws".to_string(), None));
+    }
+
+    #[test]
+    fn a_plain_tcp_header_is_refused_rather_than_dropped() {
+        // A link can name the shape of Xray's TCP header but none of the
+        // request and response templates it needs, so it is reported.
+        let error = CoreProfile::parse(&format!(
+            "vless://{UUID}@example.com:443?type=tcp&headerType=http"
+        ))
+        .expect_err("the header is not expressible from a link");
+        assert!(error.contains("headerType"), "{error}");
+        // The core's own spelling of "no header" is not a setting at all.
+        let plain = link(&format!("vless://{UUID}@example.com:443?type=raw&headerType=none"));
+        assert_eq!(plain.transport, Transport::Tcp);
+    }
+
+    #[test]
+    fn vmess_ciphers_are_normalised_and_a_removed_one_belongs_to_sing_box() {
+        let outbound = link(&vmess(serde_json::json!({"scy": "chacha20-ietf-poly1305"})));
+        match &outbound.protocol {
+            Protocol::Vmess { security, .. } => assert_eq!(security, "chacha20-poly1305"),
+            other => panic!("expected vmess, got {other:?}"),
+        }
+        // Xray-core knows four ciphers and would quietly fall back to `auto`
+        // for this one, connecting with a different cipher than the server
+        // expects; sing-box still implements it.
+        let cfb = link(&vmess(serde_json::json!({"scy": "aes-128-cfb"})));
+        assert!(!cfb.carried_by(FcaeBackend::Xray));
+        assert!(cfb.carried_by(FcaeBackend::SingBox));
+        assert!(cfb.refusal(FcaeBackend::Xray).contains("removed"));
+        // Anything else is a cipher neither core has, at save time rather than
+        // at start.
+        let error = CoreProfile::parse(&vmess(serde_json::json!({"scy": "rc4"})))
+            .expect_err("not a vmess cipher");
+        assert!(error.contains("cipher"), "{error}");
+
+        // `type` is the transport's own mode on gRPC, not a header.
+        let grpc = link(&vmess(serde_json::json!({
+            "net": "grpc",
+            "path": "svc",
+            "host": "cdn.example.net",
+            "type": "multi",
+        })));
+        assert_eq!(
+            grpc.transport,
+            Transport::Grpc {
+                service: "svc".into(),
+                authority: Some("cdn.example.net".into()),
+                multi_mode: true,
+            }
+        );
+        // mKCP keeps its seed in `path`, and the core removed it.
+        let error = CoreProfile::parse(&vmess(serde_json::json!({"net": "kcp", "path": "seed"})))
+            .expect_err("the seed is gone from the core");
+        assert!(error.contains("seed"), "{error}");
+    }
+
+    #[test]
+    fn the_uri_vmess_shape_carries_the_same_outbound() {
+        let outbound = link(&format!(
+            "vmess://{UUID}@example.com:8443?type=ws&path=%2Fvm&host=cdn.example.net\
+             &security=tls&sni=cdn.example.net#std"
+        ));
+        assert_eq!(outbound.server, "example.com");
+        assert_eq!(outbound.port, 8443);
+        assert_eq!(outbound.remark.as_deref(), Some("std"));
+        assert_eq!(
+            outbound.transport,
+            Transport::Ws {
+                path: "/vm".into(),
+                host: Some("cdn.example.net".into()),
+                max_early_data: None,
+                early_data_header: None,
+            }
+        );
+        // The query carries no cipher, so the core default is what it runs.
+        match &outbound.protocol {
+            Protocol::Vmess { security, alter_id, .. } => {
+                assert_eq!(security, "auto");
+                assert_eq!(*alter_id, 0);
+            }
+            other => panic!("expected vmess, got {other:?}"),
+        }
+        let error = CoreProfile::parse("vmess://not-a-uuid@example.com:8443")
+            .expect_err("vmess needs a UUID");
+        assert!(error.contains("UUID"), "{error}");
+    }
+
+    #[test]
+    fn an_https_proxy_link_is_tls_by_its_scheme() {
+        // The scheme decides, so a `security=none` left in the query cannot
+        // turn it into a plaintext proxy; the TLS settings it names still apply.
+        let outbound = link(
+            "https://user:pass@proxy.example.com:443?sni=other.example.com&security=none",
+        );
+        assert_eq!(outbound.port, 443);
+        match outbound.security {
+            Security::Tls { sni, .. } => assert_eq!(sni.as_deref(), Some("other.example.com")),
+            other => panic!("expected TLS, got {other:?}"),
+        }
+        let plain = link("http://proxy.example.com:8080");
+        assert_eq!(plain.security, Security::None);
+    }
+
+    #[test]
+    fn trojan_flow_is_refused_and_the_simple_obfs_plugin_is_folded() {
+        let error = CoreProfile::parse("trojan://pw@example.com:443?flow=xtls-rprx-vision")
+            .expect_err("trojan flow is gone from the core");
+        assert!(error.contains("flow"), "{error}");
+        // SIP002's own example spells the plugin by the name it had before the
+        // rename; sing-box answers to `obfs-local` alone.
+        let outbound = link(
+            "ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388\
+             ?plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dbing.com",
+        );
+        match &outbound.protocol {
+            Protocol::Shadowsocks { plugin: Some(plugin), .. } => {
+                assert_eq!(plugin.name, "obfs-local");
+                assert_eq!(plugin.options.as_deref(), Some("obfs=http;obfs-host=bing.com"));
+            }
+            other => panic!("expected a shadowsocks plugin, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3004,7 +3511,12 @@ mod tests {
                 assert_eq!(password, "pa:ss");
                 assert_eq!(
                     obfs,
-                    &Some(("salamander".to_string(), "salt".to_string()))
+                    &Some(Obfs {
+                        kind: "salamander".into(),
+                        password: "salt".into(),
+                        min_packet_size: None,
+                        max_packet_size: None,
+                    })
                 );
                 assert_eq!((*up_mbps, *down_mbps), (Some(50), Some(200)));
                 assert_eq!(ports, &vec!["20000:20100".to_string()]);
@@ -3070,10 +3582,41 @@ mod tests {
     }
 
     #[test]
-    fn quic_link_parameters_this_app_cannot_honour_are_refused() {
+    fn hysteria2_gecko_obfs_carries_its_packet_window() {
+        let outbound = link(
+            "hysteria2://secret@example.com:443?obfs=gecko&obfs-password=salt\
+             &minPacketSize=512&maxPacketSize=1200#g",
+        );
+        let Protocol::Hysteria2 { obfs, .. } = &outbound.protocol else {
+            panic!("expected hysteria2, got {:?}", outbound.protocol);
+        };
+        assert_eq!(
+            obfs,
+            &Some(Obfs {
+                kind: "gecko".into(),
+                password: "salt".into(),
+                min_packet_size: Some(512),
+                max_packet_size: Some(1200),
+            })
+        );
+        // Both schemes are sing-box's, and both need their password.
         let error = CoreProfile::parse("hysteria2://secret@example.com:443?obfs=gecko")
-            .expect_err("only salamander is supported");
+            .expect_err("gecko needs obfs-password");
+        assert!(error.contains("obfs-password"), "{error}");
+        let error = CoreProfile::parse(
+            "hysteria2://secret@example.com:443?obfs=gecko&obfs-password=salt\
+             &minPacketSize=1200&maxPacketSize=512",
+        )
+        .expect_err("a window that runs backwards is refused");
+        assert!(error.contains("minPacketSize"), "{error}");
+        let error =
+            CoreProfile::parse("hysteria2://secret@example.com:443?obfs=dns&obfs-password=s")
+                .expect_err("only the two schemes sing-box implements are accepted");
         assert!(error.contains("salamander"), "{error}");
+    }
+
+    #[test]
+    fn quic_link_parameters_this_app_cannot_honour_are_refused() {
         let error = CoreProfile::parse("hysteria2://secret@example.com:443?mport=1-9000")
             .expect_err("a range that large is refused");
         assert!(error.contains("hopping"), "{error}");
@@ -3406,6 +3949,82 @@ mod tests {
             }),
         };
         assert!(handshake(&target).is_some());
+    }
+
+    #[test]
+    fn a_quic_outbound_is_measured_through_the_tunnel_instead() {
+        // hysteria2 has no TCP handshake to time, so the plan falls back to a
+        // real request through the listener the session opened for itself.
+        let listener = std::net::SocketAddr::from(([127, 0, 0, 1], 1080));
+        let endpoints = Endpoints {
+            socks: Some(listener),
+            http: None,
+            peer_ip: None,
+            udp: true,
+            psiphon_dns: false,
+        };
+        let profile = CoreProfile::parse("hysteria2://pass@example.com:443#q").expect("parses");
+        match RttProbe::plan(&profile, None, &endpoints) {
+            Some(RttProbe::Through { listener: planned, socks }) => {
+                assert_eq!(planned, listener);
+                assert!(socks);
+            }
+            _ => panic!("a QUIC outbound must be measured through the tunnel"),
+        }
+        // Nothing to measure at all when the session opened no listener.
+        let bare = Endpoints {
+            socks: None,
+            http: None,
+            peer_ip: None,
+            udp: true,
+            psiphon_dns: false,
+        };
+        assert!(RttProbe::plan(&profile, None, &bare).is_none());
+        // And a native config has no single remote either.
+        let native = CoreProfile::parse(
+            r##"{"outbounds": [{"type": "direct", "tag": "direct"}]}"##,
+        )
+        .expect("parses");
+        assert!(matches!(
+            RttProbe::plan(&native, None, &endpoints),
+            Some(RttProbe::Through { .. })
+        ));
+    }
+
+    #[test]
+    fn a_through_the_tunnel_measurement_times_the_warm_request() {
+        use std::io::{Read as _, Write as _};
+
+        // The session's own listener, answering the way a core does: the
+        // CONNECT is acknowledged at once, the first request is slow (that is
+        // the handshake to the far end), the second one is not.
+        let listener = serve(|mut stream| {
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).expect("greeting");
+            stream.write_all(&[0x05, 0x00]).expect("greeting reply");
+            let mut head = [0u8; 5];
+            stream.read_exact(&mut head).expect("connect head");
+            let mut rest = vec![0u8; head[4] as usize + 2];
+            stream.read_exact(&mut rest).expect("host and port");
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 10, 0, 0, 1, 0x1f, 0x90])
+                .expect("connect reply");
+            for request in 0..2 {
+                let mut byte = [0u8; 1];
+                let mut window = [0u8; 4];
+                while &window != b"\r\n\r\n" {
+                    stream.read_exact(&mut byte).expect("request");
+                    window.rotate_left(1);
+                    window[3] = byte[0];
+                }
+                if request == 0 {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").expect("answer");
+            }
+        });
+        let measured = through_tunnel(listener, true).expect("measured");
+        assert!(measured < 100, "the warm request was {measured}ms");
     }
 
     #[test]
