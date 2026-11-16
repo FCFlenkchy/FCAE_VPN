@@ -1244,48 +1244,34 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // process cannot hold two upstreams: the second start rewrites the first
     // one's dial-out address, and the first then reaches the network through
     // the SOCKS listener the second was pointed at -- its own. A route that
-    // asks for two Aether layers therefore cannot run. The one arrangement with
-    // a faithful single-engine form is a Tor hop directly behind an Aether
-    // carrier: the engine runs exactly that as its Chain mode, bootstrapping
-    // Tor through the carrier's own SOCKS server and serving the listener the
-    // user dials.
-    let aether_layers = usize::from(cfg.backend == FcaeBackend::Aether)
-        + cfg.chain.iter().filter(|hop| hop.backend == FcaeBackend::Aether).count();
+    // stacks Aether on Aether therefore has to become the one engine that
+    // expresses it, or be refused with the reason.
+    let aether_hops = cfg.chain.iter().filter(|hop| hop.backend == FcaeBackend::Aether).count();
+    let aether_layers = usize::from(cfg.backend == FcaeBackend::Aether) + aether_hops;
     if aether_layers > 1 {
-        let tor_behind_carrier = cfg.backend == FcaeBackend::Aether
-            && cfg.chain.len() == 1
-            && cfg.chain[0].backend == FcaeBackend::Aether
-            && cfg.chain[0].protocol == FcaeProtocol::Tor;
-        if !tor_behind_carrier {
+        // A host is dialled before the hops behind it, so the layers one engine
+        // runs are the ones directly in front of the route. Aether on both
+        // sides of another hop would be two engines.
+        let leading = cfg
+            .chain
+            .iter()
+            .take_while(|hop| hop.backend == FcaeBackend::Aether)
+            .count();
+        if aether_hops != leading {
+            let route = cfg
+                .chain
+                .iter()
+                .map(|hop| hop.label())
+                .collect::<Vec<_>>()
+                .join(" → ");
             return Err(CoreError::InvalidConfig(format!(
-                "this route asks for {aether_layers} Aether layers, and Aether is one engine per \
-                 session: its upstream proxy is a process-wide setting, so the second layer would \
-                 dial the first one through its own SOCKS listener. Chain Tor directly behind an \
-                 Aether carrier, or use WARP-in-WARP / MASQUE-in-MASQUE for two WARP layers"
+                "this route ({route}) has another hop between its Aether layers, and Aether is one \
+                 engine per session: its upstream proxy is a process-wide setting, so a second \
+                 engine would dial the first one through its own SOCKS listener. Keep the Aether \
+                 hops next to each other at the front of the route"
             )));
         }
-        let carried_by_tor = match cfg.tor.mode {
-            FcaeTorMode::Only => Some("tor only"),
-            FcaeTorMode::Reverse => Some("tor reverse"),
-            FcaeTorMode::Off | FcaeTorMode::Chain => None,
-        };
-        if let Some(how) = carried_by_tor {
-            return Err(CoreError::InvalidConfig(format!(
-                "a Tor hop cannot ride a carrier that is already tor ({how}); keep one of the two"
-            )));
-        }
-        if cfg.tor.mode == FcaeTorMode::Off {
-            cfg.tor.mode = FcaeTorMode::Chain;
-        }
-        cfg.chain.clear();
-        // The carrier keeps no listener of its own in a chain either: the Tor
-        // listener the user dials is the session endpoint, exactly as in Chain
-        // mode, and the engine asks the OS for the port it dials itself.
-        cfg.socks_port = 0;
-        cfg.http_port = 0;
-        cfg.internal_socks = true;
-        cfg.internal_http = false;
-        log::info!("[session] tor rides inside the Aether carrier; one engine serves the whole route");
+        collapse_aether_layers(&mut cfg, leading)?;
     }
 
     // TUN
@@ -1353,6 +1339,203 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     }
 
     Ok(cfg)
+}
+
+/// One layer of a route, before it is folded into the single Aether engine that
+/// runs it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Tor,
+    Warp(FcaeProtocol, bool),
+}
+
+/// How a layer reads in a message.
+fn lane_label(lane: Lane) -> &'static str {
+    match lane {
+        Lane::Tor => "Tor",
+        Lane::Warp(protocol, _) => match protocol {
+            FcaeProtocol::Masque | FcaeProtocol::Auto | FcaeProtocol::Tor => "MASQUE",
+            FcaeProtocol::WireGuard => "WireGuard",
+            FcaeProtocol::Gool => "WARP-in-WARP",
+            FcaeProtocol::MasqueInMasque => "MASQUE-in-MASQUE",
+            FcaeProtocol::WarpInMasque => "WARP-in-MASQUE",
+        },
+    }
+}
+
+/// The route as the user built it, carrier first.
+fn route_label(lanes: &[Lane]) -> String {
+    lanes
+        .iter()
+        .map(|lane| lane_label(*lane))
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
+
+/// The route an Aether engine would have to run, in the order the engine runs
+/// it: Tor carrying the tunnel in front, the tunnel itself, then the hops over
+/// it, and finally Tor riding inside it.
+fn aether_lanes(cfg: &SessionConfig, leading: usize) -> Vec<Lane> {
+    let tor_alone = cfg.tor.mode == FcaeTorMode::Only || cfg.protocol == FcaeProtocol::Tor;
+    let mut lanes = Vec::with_capacity(leading + 2);
+    if cfg.backend == FcaeBackend::Aether {
+        lanes.push(if tor_alone {
+            Lane::Tor
+        } else {
+            Lane::Warp(cfg.protocol, cfg.obfuscation.h2_enabled)
+        });
+    }
+    for hop in &cfg.chain[..leading] {
+        lanes.push(if hop.protocol == FcaeProtocol::Tor {
+            Lane::Tor
+        } else {
+            Lane::Warp(hop.protocol, hop.h2_enabled)
+        });
+    }
+    // The engine's own Tor egress, where the engine puts it: in front of the
+    // tunnel when it carries it, directly behind the tunnel when it rides
+    // inside it, so a hop behind Tor reads as one and is refused with that
+    // reason rather than folded into a tunnel Tor cannot reach.
+    match cfg.tor.mode {
+        FcaeTorMode::Off | FcaeTorMode::Only => {}
+        FcaeTorMode::Reverse => lanes.insert(0, Lane::Tor),
+        FcaeTorMode::Chain => lanes.insert(1.min(lanes.len()), Lane::Tor),
+    }
+    lanes
+}
+
+/// Whether a tunnel's own transport answers on datagrams alone, which Tor --
+/// a TCP-only carrier -- can never reach.
+fn needs_udp_from_its_carrier(protocol: FcaeProtocol) -> bool {
+    matches!(protocol, FcaeProtocol::WireGuard | FcaeProtocol::Gool)
+}
+
+/// Rewrites a route that asks for more than one Aether layer into the one engine
+/// that runs it, and refuses the shapes it has no form for.
+///
+/// What the engine can do natively is exactly what stacking Aether hops means:
+/// Tor inside the tunnel (`Chain`) and the tunnel dialled through Tor
+/// (`Reverse`). Those three are the only rewrites made here, and each of them
+/// is a mode the user asked for by putting Tor in the route. Two WARP tunnels
+/// are *not* folded into one double-WARP protocol: the engine runs them as one
+/// protocol, not as two hops, so a route that adds a second Aether hop instead
+/// of choosing WARP-in-WARP or MASQUE-in-MASQUE is wrong and says so.
+fn collapse_aether_layers(cfg: &mut SessionConfig, leading: usize) -> Result<()> {
+    let aether_backend = cfg.backend == FcaeBackend::Aether;
+    let mut lanes = aether_lanes(cfg, leading);
+    // One Tor layer, however many times the route says it: a hop repeating the
+    // mode, or a mode repeating the hop, is one Tor.
+    let mut deduped: Vec<Lane> = Vec::with_capacity(lanes.len());
+    for lane in lanes.drain(..) {
+        if lane == Lane::Tor && deduped.last() == Some(&Lane::Tor) {
+            continue;
+        }
+        deduped.push(lane);
+    }
+    let lanes = deduped;
+    let route = route_label(&lanes);
+    if lanes.iter().filter(|lane| **lane == Lane::Tor).count() > 1 {
+        return Err(CoreError::InvalidConfig(format!(
+            "this route ({route}) uses Tor twice: a tunnel is either dialled through Tor or \
+             carries Tor, never both. Keep one Tor hop"
+        )));
+    }
+    let tor_at = lanes.iter().position(|lane| *lane == Lane::Tor);
+    if tor_at.is_some() && !aether_backend {
+        return Err(CoreError::InvalidConfig(format!(
+            "this route ({route}) puts Tor behind {}: Tor is an egress of the Aether engine, so it \
+             has to be the first element of the route, with an Aether hop behind it",
+            backend_label(cfg.backend)
+        )));
+    }
+    let warps: Vec<(FcaeProtocol, bool)> = lanes
+        .iter()
+        .filter_map(|lane| match lane {
+            Lane::Warp(protocol, h2) => Some((*protocol, *h2)),
+            Lane::Tor => None,
+        })
+        .collect();
+    if warps.len() > 1 {
+        return Err(CoreError::InvalidConfig(format!(
+            "this route ({route}) stacks {} Aether tunnels, and the engine runs both layers as one \
+             transport, not as two hops. Choose WARP-in-WARP, WARP-in-MASQUE or \
+             MASQUE-in-MASQUE instead of adding a second Aether hop",
+            warps.len()
+        )));
+    }
+    let carrier = warps.first().map(|layer| layer.0);
+    let mode = match tor_at {
+        None => FcaeTorMode::Off,
+        Some(_) if carrier.is_none() => FcaeTorMode::Only,
+        // Tor in front of the tunnel: the tunnel is dialled through it, so it
+        // has to be a tunnel Tor can pass.
+        Some(0) => {
+            let carrier = carrier.expect("a WARP layer is present");
+            if needs_udp_from_its_carrier(carrier) {
+                return Err(CoreError::InvalidConfig(format!(
+                    "this route ({route}) dials {} through Tor, and Tor carries TCP only: \
+                     WireGuard and WARP-in-WARP answer on UDP alone, so neither can be reached \
+                     through it. Use MASQUE or WARP-in-MASQUE for the layer Tor carries",
+                    lane_label(Lane::Warp(carrier, false))
+                )));
+            }
+            FcaeTorMode::Reverse
+        }
+        // Tor behind the only tunnel: it rides inside it.
+        Some(index) if index == lanes.len() - 1 => FcaeTorMode::Chain,
+        Some(_) => {
+            return Err(CoreError::InvalidConfig(format!(
+                "this route ({route}) puts Tor between two elements, and the engine runs Tor \
+                 either in front of its tunnel or inside it. Move Tor to one end"
+            )))
+        }
+    };
+    let protocol = carrier.unwrap_or(cfg.protocol);
+    // A tunnel Tor carries rides http/2, and so do the two-layer protocols.
+    let h2 = warps.iter().any(|layer| layer.1)
+        || matches!(protocol, FcaeProtocol::MasqueInMasque | FcaeProtocol::WarpInMasque)
+        || mode == FcaeTorMode::Reverse;
+    cfg.tor.mode = mode;
+    if aether_backend {
+        cfg.protocol = protocol;
+        cfg.obfuscation.h2_enabled = h2;
+        cfg.chain.drain(..leading).for_each(drop);
+        if mode == FcaeTorMode::Chain {
+            // The tunnel keeps no listener of its own: Tor's is the session
+            // endpoint, and the engine asks the OS for the port it dials itself.
+            cfg.socks_port = 0;
+            cfg.http_port = 0;
+            cfg.internal_socks = true;
+            cfg.internal_http = false;
+        }
+    } else {
+        // A saved config brings its own profile, so it is the one hop that
+        // cannot take a transport of the session's choosing.
+        if cfg.chain[0].core.is_some() {
+            return Err(CoreError::InvalidConfig(format!(
+                "this route ({route}) folds two Aether layers into one, but its first hop is a \
+                 saved config, which carries its own transport. Keep one Aether hop above it"
+            )));
+        }
+        let hop = &mut cfg.chain[0];
+        hop.protocol = protocol;
+        hop.h2_enabled = h2;
+        cfg.chain.drain(1..leading).for_each(drop);
+    }
+    log::info!(
+        "[session] {} Aether layer(s) run as one {}: {}, Tor {}, h2 {}",
+        usize::from(aether_backend) + leading,
+        if aether_backend { "engine" } else { "hop" },
+        lane_label(Lane::Warp(protocol, h2)),
+        match mode {
+            FcaeTorMode::Off => "off",
+            FcaeTorMode::Chain => "inside the tunnel",
+            FcaeTorMode::Reverse => "carrying the tunnel",
+            FcaeTorMode::Only => "alone",
+        },
+        h2
+    );
+    Ok(())
 }
 
 /// Whether a hop can carry datagrams for the hop behind it.
@@ -2352,35 +2535,85 @@ mod tests {
     }
 
     #[test]
-    fn tor_behind_an_aether_carrier_is_the_engines_own_chain_mode() {
-        let mut raw = raw_test_config();
-        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
-        raw.abi_version = FCAE_ABI_VERSION;
-        raw.socks_port = 1819;
-        raw.http_port = 1820;
-        let tor = [FcaeChainHop {
-            backend: FcaeBackend::Aether, protocol: FcaeProtocol::Tor, h2_enabled: false,
+    fn tor_in_a_route_becomes_the_engines_own_mode_and_two_tunnels_are_refused() {
+        let hop = |protocol: FcaeProtocol, h2: bool| FcaeChainHop {
+            backend: FcaeBackend::Aether,
+            protocol,
+            h2_enabled: h2,
             config_ref: std::ptr::null(),
-        }];
-        raw.chain.hops = tor.as_ptr();
-        raw.chain.hop_count = 1;
-        let cfg = unsafe { parse(&raw) }.expect("tor behind an Aether carrier is one engine");
+        };
+        let build = |protocol: FcaeProtocol, hops: &[FcaeChainHop]| {
+            let mut raw = raw_test_config();
+            raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+            raw.abi_version = FCAE_ABI_VERSION;
+            raw.protocol = protocol;
+            raw.socks_port = 1819;
+            raw.http_port = 1820;
+            raw.chain.hops = hops.as_ptr();
+            raw.chain.hop_count = hops.len() as u32;
+            unsafe { parse(&raw) }
+        };
+
+        // Tor behind the WARP carrier is the engine's own chain mode, and the
+        // carrier keeps no listener of its own that would leave around Tor.
+        let cfg = build(FcaeProtocol::Masque, &[hop(FcaeProtocol::Tor, false)])
+            .expect("tor behind a carrier is one engine");
         assert!(cfg.chain.is_empty());
         assert_eq!(cfg.tor.mode, FcaeTorMode::Chain);
-        // The carrier keeps no listener the user could dial around Tor.
         assert_eq!((cfg.socks_port, cfg.http_port), (0, 0));
         assert!(cfg.internal_socks);
 
-        // Two Aether layers have no single-engine form, and Aether cannot hold
-        // two upstreams in one process: the route has to be named and refused.
-        let masque = [tor[0], FcaeChainHop {
-            backend: FcaeBackend::Aether, protocol: FcaeProtocol::Masque, h2_enabled: false,
-            config_ref: std::ptr::null(),
-        }];
-        raw.chain.hops = masque.as_ptr();
-        raw.chain.hop_count = 2;
-        let error = unsafe { parse(&raw) }.expect_err("two Aether layers are refused");
-        assert!(error.to_string().contains("one engine per session"));
+        // Tor in front of it dials the tunnel through Tor: reverse mode, on the
+        // http/2 carrier Tor can pass.
+        let cfg = build(FcaeProtocol::Tor, &[hop(FcaeProtocol::Masque, false)])
+            .expect("the tunnel dialled through tor is one engine");
+        assert!(cfg.chain.is_empty());
+        assert_eq!(cfg.tor.mode, FcaeTorMode::Reverse);
+        assert_eq!(cfg.protocol, FcaeProtocol::Masque);
+        assert!(cfg.obfuscation.h2_enabled);
+
+        // A tunnel Tor carries has to ride TCP, and WireGuard does not.
+        let error = build(FcaeProtocol::Tor, &[hop(FcaeProtocol::WireGuard, false)])
+            .expect_err("wireguard cannot be reached through tor");
+        assert!(error.to_string().contains("UDP alone"), "{error}");
+        assert!(error.to_string().contains("MASQUE"), "{error}");
+
+        // Two WARP tunnels are one protocol, not two hops: the route is wrong
+        // and names the transports that express what it meant.
+        let error = build(FcaeProtocol::WireGuard, &[hop(FcaeProtocol::WireGuard, false)])
+            .expect_err("two wireguard layers are refused");
+        assert!(error.to_string().contains("WARP-in-WARP"), "{error}");
+        let error = build(FcaeProtocol::Masque, &[hop(FcaeProtocol::Masque, false)])
+            .expect_err("two masque layers are refused");
+        assert!(error.to_string().contains("MASQUE-in-MASQUE"), "{error}");
+        let error = build(
+            FcaeProtocol::Masque,
+            &[hop(FcaeProtocol::Masque, false), hop(FcaeProtocol::Tor, false)],
+        )
+        .expect_err("two tunnels behind tor are refused");
+        assert!(error.to_string().contains("stacks 2 Aether tunnels"), "{error}");
+
+        // The single-engine transports themselves are untouched: they arrive as
+        // one Aether layer and are not rewritten.
+        let cfg = build(FcaeProtocol::MasqueInMasque, &[])
+            .expect("masque in masque is one layer");
+        assert_eq!(cfg.protocol, FcaeProtocol::MasqueInMasque);
+        assert!(cfg.chain.is_empty());
+        assert_eq!(cfg.tor.mode, FcaeTorMode::Off);
+
+        // Shapes the engine has no form for are named, not run.
+        let error = build(
+            FcaeProtocol::Masque,
+            &[hop(FcaeProtocol::Tor, false), hop(FcaeProtocol::Masque, false)],
+        )
+        .expect_err("tor is never a middle hop");
+        assert!(error.to_string().contains("between two elements"), "{error}");
+        let error = build(
+            FcaeProtocol::Tor,
+            &[hop(FcaeProtocol::Masque, false), hop(FcaeProtocol::Tor, false)],
+        )
+        .expect_err("tor cannot be used twice");
+        assert!(error.to_string().contains("uses Tor twice"), "{error}");
     }
 
     #[test]
