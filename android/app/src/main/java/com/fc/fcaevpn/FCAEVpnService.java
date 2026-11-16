@@ -34,6 +34,32 @@ public class FCAEVpnService extends VpnService {
     /** MainActivity's settings store. */
     private static final String PREFS_MAIN = "fcae_vpn";
 
+    /**
+     * {@code 0.0.0.0/0} minus RFC1918 and carrier-grade NAT. VpnService
+     * routes are an allowlist -- whatever is missing here keeps using the
+     * physical network -- so "exclude private IPs" is spelled as the public
+     * remainder rather than as a list of blocks. Kept in step with
+     * {@code PRIVATE_PREFIXES} in the runtime's config.rs.
+     */
+    private static final String[] PUBLIC_V4_ROUTES = {
+            "0.0.0.0/5", "8.0.0.0/7", "11.0.0.0/8", "12.0.0.0/6",
+            "16.0.0.0/4", "32.0.0.0/3", "64.0.0.0/3", "96.0.0.0/6",
+            "100.0.0.0/10", "100.128.0.0/9", "101.0.0.0/8", "102.0.0.0/7",
+            "104.0.0.0/5", "112.0.0.0/4", "128.0.0.0/3", "160.0.0.0/5",
+            "168.0.0.0/6", "172.0.0.0/12", "172.32.0.0/11", "172.64.0.0/10",
+            "172.128.0.0/9", "173.0.0.0/8", "174.0.0.0/7", "176.0.0.0/4",
+            "192.0.0.0/9", "192.128.0.0/11", "192.160.0.0/13", "192.169.0.0/16",
+            "192.170.0.0/15", "192.172.0.0/14", "192.176.0.0/12", "192.192.0.0/10",
+            "193.0.0.0/8", "194.0.0.0/7", "196.0.0.0/6", "200.0.0.0/5",
+            "208.0.0.0/4", "224.0.0.0/3",
+    };
+
+    /**
+     * The IPv6 counterpart: global unicast only. Everything else -- unique
+     * local, link-local, loopback, multicast -- falls outside it.
+     */
+    private static final String[] PUBLIC_V6_ROUTES = { "2000::/3" };
+
         /** Keeps the Android TUN MTU at least 1280 for IPv6 and matches tun2socks to avoid dropped packets. */
     private volatile int sessionTunMtu = 1500;
     /** Psiphon is this session's exit. Set before the core requests the TUN interface. */
@@ -419,6 +445,14 @@ public class FCAEVpnService extends VpnService {
         }
     }
 
+    /** Adds each "a.b.c.d/len" entry to the interface's allowlist. */
+    private static void addRoutes(Builder builder, String[] cidrs) {
+        for (String cidr : cidrs) {
+            int slash = cidr.indexOf('/');
+            builder.addRoute(cidr.substring(0, slash), Integer.parseInt(cidr.substring(slash + 1)));
+        }
+    }
+
     /**
      * TUN DNS servers from the user's settings (comma separated per family):
      * blanks skipped, invalid addresses rejected by addDnsServer() and
@@ -519,8 +553,14 @@ public class FCAEVpnService extends VpnService {
             // tunnel MTU. Must stay in sync with cfg.tun_mtu on the native
             // side.
             builder.setMtu(sessionTunMtu);
+            boolean excludePrivate = getSharedPreferences(PREFS_MAIN, MODE_PRIVATE)
+                    .getBoolean("tunExcludePrivate", true);
             builder.addAddress("10.0.0.2", 32);
-            builder.addRoute("0.0.0.0", 0);
+            if (excludePrivate) {
+                addRoutes(builder, PUBLIC_V4_ROUTES);
+            } else {
+                builder.addRoute("0.0.0.0", 0);
+            }
                         // IPv6 on the interface only when the exit can carry it. With
                         // fd00::2 + ::/0 advertised, every app lookup asked for AAAA and
                         // connected to the v6 literal first — which a v4-only exit rejects
@@ -528,7 +568,11 @@ public class FCAEVpnService extends VpnService {
                         // Android treat the VPN as v4-only and AI_ADDRCONFIG suppress AAAA.
             if (!sessionPsiphonExit) {
                 builder.addAddress("fd00::2", 128);
-                builder.addRoute("::", 0);
+                if (excludePrivate) {
+                    addRoutes(builder, PUBLIC_V6_ROUTES);
+                } else {
+                    builder.addRoute("::", 0);
+                }
             }
             configureSplitTunnel(builder);
             configureTunDns(builder);

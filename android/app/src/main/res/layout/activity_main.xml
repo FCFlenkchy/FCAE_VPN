@@ -521,6 +521,20 @@
                     android:textColor="#FFE8ECF4"
                     android:textColorHint="#FF6B7280"
                     android:textSize="14sp" />
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchTunExcludePrivate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:checked="true"
+                    android:text="Exclude private IPs"
+                    android:textColor="#FFE8ECF4" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="LAN and carrier-grade NAT keep using the physical network"
+                    android:textColor="#FF6B7280"
+                    android:textSize="12sp" />
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

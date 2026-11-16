@@ -711,11 +711,9 @@ async fn run_session(
         // through the tunnel — and the Firefox bridge measures its CONNECT while
         // it dials.
         let chained = !config.chain.is_empty();
-        if exit_measures_rtt(config.exit_backend()) {
+        if let Some(measured) = rtt_handle(&handles, &config) {
             let mut counters = handles[0].counters();
-            if chained {
-                counters.rtt_ms = handles.last().map_or(0, |exit| exit.counters().rtt_ms);
-            }
+            counters.rtt_ms = measured.counters().rtt_ms;
             sink.set_counters(counters);
         }
         sink.set_state(
@@ -726,9 +724,7 @@ async fn run_session(
         let carrier_wait_handle = handles[0].clone();
         let carrier_ended = async move { carrier_wait_handle.wait().await };
         let pump_handle = handles[0].clone();
-        let exit_rtt = Arc::new(Mutex::new(
-            if chained && exit_measures_rtt(config.exit_backend()) { handles.last().cloned() } else { None }
-        ));
+        let exit_rtt = Arc::new(Mutex::new(rtt_handle(&handles, &config)));
         let pump_exit_rtt = exit_rtt.clone();
         let pump_sink = sink.clone();
         let pump_config = config.clone();
@@ -770,9 +766,7 @@ async fn run_session(
                     if !up {
                         log::info!("[session] chain hop {index} dropped; stopping its downstream exits");
                         stop_after(&mut handles, index, stop_timeout).await;
-                        if chained && exit_measures_rtt(config.exit_backend()) && handles.len() <= config.chain.len() {
-                            *exit_rtt.lock() = None;
-                        }
+                        *exit_rtt.lock() = rtt_handle(&handles, &config);
                         hop_up.truncate(handles.len());
                         let peer_ip = endpoints.peer_ip.clone();
                         endpoints = Endpoints { peer_ip, ..handles[index].endpoints() };
@@ -798,9 +792,7 @@ async fn run_session(
                     };
                     match restarted {
                         Ok(()) => {
-                            if chained && exit_measures_rtt(config.exit_backend()) {
-                                *exit_rtt.lock() = handles.last().cloned();
-                            }
+                            *exit_rtt.lock() = rtt_handle(&handles, &config);
                             let listener_changed = rebuilt.socks != previous.socks || rebuilt.http != previous.http;
                             if listener_changed && config.is_tun() {
                                 let _control = tun_control.lock();
@@ -1153,11 +1145,36 @@ async fn backoff(cancel: &CancelToken, attempt: u32) -> std::ops::ControlFlow<()
     }
 }
 
-/// Whether a chained session's latency is the exit's rather than the carrier's.
+/// The handle whose round trip the UI publishes: the deepest hop that measures
+/// one.
 ///
-/// The cores and Firefox each measure their own tunnel round trip, and on a
-/// chained session that measurement is the number the user is watching; every
-/// other backend leaves the carrier's sample in place.
+/// A chain's latency is its last leg's, because that leg travelled every hop
+/// above it -- and with two cores, or a core and a host, the number the user
+/// watches is the one the path ends on, not the carrier's. A hop that measures
+/// nothing of its own (Aether and Psiphon report none) leaves the deepest
+/// measuring hop above it as the answer instead of a blank.
+fn rtt_handle(
+    handles: &[Arc<dyn BackendHandle>],
+    config: &SessionConfig,
+) -> Option<Arc<dyn BackendHandle>> {
+    // handles[0] is the carrier; handles[i] is chain[i - 1].
+    (0..handles.len())
+        .rev()
+        .find(|index| {
+            let backend = match index {
+                0 => config.backend,
+                index => config.chain[index - 1].backend,
+            };
+            exit_measures_rtt(backend)
+        })
+        .map(|index| handles[index].clone())
+}
+
+/// Whether a backend measures its own round trip.
+///
+/// The cores and Firefox time their own tunnel, so a route ending on one of them
+/// publishes its number; Aether, Tor and Psiphon report none, and the deepest
+/// hop above them answers instead.
 fn exit_measures_rtt(exit: FcaeBackend) -> bool {
     matches!(
         exit,
@@ -1184,8 +1201,8 @@ async fn pump_counters(
     loop {
         tick.tick().await;
         let mut counters = handle.counters();
-        if !cfg.chain.is_empty() && exit_measures_rtt(cfg.exit_backend()) {
-            counters.rtt_ms = exit_rtt.lock().as_ref().map_or(0, |exit| exit.counters().rtt_ms);
+        if let Some(measured) = exit_rtt.lock().as_ref() {
+            counters.rtt_ms = measured.counters().rtt_ms;
         }
         sink.set_counters(counters);
         let Some(_control) = control.try_lock() else { continue; };

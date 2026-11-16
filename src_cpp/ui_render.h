@@ -216,6 +216,10 @@ struct AppState {
     // mirror the Android VpnService hardcode.
     char tun_dns4[96]  = "1.1.1.1,1.0.0.1";
     char tun_dns6[112] = "2606:4700:4700::1111,2606:4700:4700::1001";
+    // Keep RFC1918 and carrier-grade NAT on the physical interface, so a
+    // printer, a NAS or the router's admin page keeps answering while the
+    // tunnel is up. ON by default; the tunnel is for public traffic.
+    bool tun_exclude_private = true;
     // Zero Trust (Cloudflare Teams)
     char team_name[128] = {};
     char access_token[4096] = {};
@@ -739,6 +743,8 @@ struct AppState {
                                         ? 0 : tor_socks_port);
 
         if (mode == 1 && listener_http_enabled()) c._reserved[0] |= FCAE_CONFIG_TUN_HTTP;
+        // The bit means "route private ranges in"; the default leaves it clear.
+        if (mode == 1 && !tun_exclude_private) c._reserved[0] |= FCAE_CONFIG_TUN_ROUTE_PRIVATE;
 
         // Built in-process. Process-lifetime pointer is safe for fcae_start.
         static const char kDefaultPsiphonConfig[] =

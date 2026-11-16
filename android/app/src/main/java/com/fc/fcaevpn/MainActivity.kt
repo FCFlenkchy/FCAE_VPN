@@ -309,6 +309,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editTunTcpSndbuf: android.widget.EditText
     private lateinit var editTunTcpRcvbuf: android.widget.EditText
     private lateinit var switchTunTcpAutoTuning: SwitchMaterial
+    private lateinit var switchTunExcludePrivate: SwitchMaterial
     private lateinit var layoutTunSettings: android.view.View
     private lateinit var spinnerSplitTunnel: Spinner
     private lateinit var btnSplitTunnelApps: android.widget.Button
@@ -1467,6 +1468,7 @@ class MainActivity : AppCompatActivity() {
         editTunTcpSndbuf = findViewById(R.id.editTunTcpSndbuf)
         editTunTcpRcvbuf = findViewById(R.id.editTunTcpRcvbuf)
         switchTunTcpAutoTuning = findViewById(R.id.switchTunTcpAutoTuning)
+        switchTunExcludePrivate = findViewById(R.id.switchTunExcludePrivate)
         layoutTunSettings = findViewById(R.id.layoutTunSettings)
         spinnerSplitTunnel = findViewById(R.id.spinnerSplitTunnel)
         btnSplitTunnelApps = findViewById(R.id.btnSplitTunnelApps)
@@ -4359,6 +4361,7 @@ class MainActivity : AppCompatActivity() {
             switchDisableExtensionPermutation,
             switchFragmentSni,
             switchTunTcpAutoTuning,
+            switchTunExcludePrivate,
         ).forEach { it.setOnCheckedChangeListener { _, _ -> scheduleSettingsSave() } }
         listOf(
             spinnerMode,
@@ -4525,6 +4528,7 @@ class MainActivity : AppCompatActivity() {
             putString("tunTcpSndbuf", editTunTcpSndbuf.text.toString().trim())
             putString("tunTcpRcvbuf", editTunTcpRcvbuf.text.toString().trim())
             putBoolean("tunTcpAutoTuning", switchTunTcpAutoTuning.isChecked)
+            putBoolean("tunExcludePrivate", switchTunExcludePrivate.isChecked)
             putString("tunDnsV4", editTunDnsV4.text.toString().trim())
             putString("tunDnsV6", editTunDnsV6.text.toString().trim())
             putString("team", editTeam.text.toString().trim())
@@ -4666,6 +4670,7 @@ class MainActivity : AppCompatActivity() {
         editTunTcpSndbuf.setText(prefs.getString("tunTcpSndbuf", "256000"))
         editTunTcpRcvbuf.setText(prefs.getString("tunTcpRcvbuf", "256000"))
         switchTunTcpAutoTuning.isChecked = prefs.getBoolean("tunTcpAutoTuning", false)
+        switchTunExcludePrivate.isChecked = prefs.getBoolean("tunExcludePrivate", true)
         editTunDnsV4.setText(prefs.getString("tunDnsV4", FCAEVpnService.DEFAULT_TUN_DNS_V4))
         editTunDnsV6.setText(prefs.getString("tunDnsV6", FCAEVpnService.DEFAULT_TUN_DNS_V6))
         editTeam.setText(prefs.getString("team", ""))

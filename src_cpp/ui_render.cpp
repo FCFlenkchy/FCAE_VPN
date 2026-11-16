@@ -523,6 +523,7 @@ static uint64_t config_signature() {
     h = fnv_cstr(h, g_app.tun_tcp_sndbuf);
     h = fnv_cstr(h, g_app.tun_tcp_rcvbuf);
     h = fnv_value(h, g_app.tun_tcp_auto_tuning);
+    h = fnv_value(h, g_app.tun_exclude_private);
     h = fnv_cstr(h, g_app.tun_dns4);
     h = fnv_cstr(h, g_app.tun_dns6);
     h = fnv_value(h, g_app.logging_enabled.load());
@@ -628,6 +629,7 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.tun_tcp_sndbuf);
     h = fnv_cstr(h, g_app.tun_tcp_rcvbuf);
     h = fnv_value(h, g_app.tun_tcp_auto_tuning);
+    h = fnv_value(h, g_app.tun_exclude_private);
     h = fnv_cstr(h, g_app.tun_dns4);
     h = fnv_cstr(h, g_app.tun_dns6);
     h = fnv_cstr(h, g_app.noize_profile);
@@ -1246,6 +1248,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "tun_tcp_sndbuf") snprintf(g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf), "%s", val.c_str());
     else if (key == "tun_tcp_rcvbuf") snprintf(g_app.tun_tcp_rcvbuf, sizeof(g_app.tun_tcp_rcvbuf), "%s", val.c_str());
     else if (key == "tun_tcp_auto_tuning") g_app.tun_tcp_auto_tuning = atoi(val.c_str()) != 0;
+    else if (key == "tun_exclude_private") g_app.tun_exclude_private = atoi(val.c_str()) != 0;
     else if (key == "tun_dns4") snprintf(g_app.tun_dns4, sizeof(g_app.tun_dns4), "%s", val.c_str());
     else if (key == "tun_dns6") snprintf(g_app.tun_dns6, sizeof(g_app.tun_dns6), "%s", val.c_str());
     else if (key == "psiphon_region_list")
@@ -1489,6 +1492,7 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "tun_tcp_sndbuf=%s\n", g_app.tun_tcp_sndbuf);
     fprintf(f, "tun_tcp_rcvbuf=%s\n", g_app.tun_tcp_rcvbuf);
     fprintf(f, "tun_tcp_auto_tuning=%d\n", g_app.tun_tcp_auto_tuning ? 1 : 0);
+    fprintf(f, "tun_exclude_private=%d\n", g_app.tun_exclude_private ? 1 : 0);
     fprintf(f, "tun_dns4=%s\n", g_app.tun_dns4);
     fprintf(f, "tun_dns6=%s\n", g_app.tun_dns6);
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
@@ -5024,6 +5028,8 @@ void render_ui() {
                 ImGui::PushItemWidth(160);
                 ImGui::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
                 ImGui::PopItemWidth();
+                ImGui::Checkbox("Exclude private IPs", &g_app.tun_exclude_private);
+                ImGui::TextDisabled("The LAN and carrier-grade NAT keep using the physical interface");
                 if (g_app.parsed_tun_mtu() == 0xffffffffu)
                     ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
                 const char* t2s_logs[] = { "Silent", "Error", "Warn", "Info", "Debug" };

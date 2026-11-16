@@ -61,6 +61,10 @@ extern "C" {
 
 /* Opt in to an HTTP listener in TUN mode when http_port is nonzero. */
 #define FCAE_CONFIG_TUN_HTTP (UINT64_C(1) << 63)
+/* Route RFC1918 and carrier-grade NAT ranges into the tunnel. Unset (the
+ * default) keeps them on the physical interface: the device carries public
+ * traffic only. */
+#define FCAE_CONFIG_TUN_ROUTE_PRIVATE (UINT64_C(1) << 62)
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -407,7 +411,8 @@ typedef struct {
     uint32_t        tun_mtu;       /* 1280..9000, or 0 for 1500             */
     int32_t         tun_fd;        /* Android VpnService fd, else -1       */
 
-    uint64_t        _reserved[1]; /* legacy Psiphon chain flag; OR FCAE_CONFIG_TUN_HTTP to opt in */
+    uint64_t        _reserved[1]; /* legacy Psiphon chain flag; OR FCAE_CONFIG_TUN_HTTP to opt in,
+                                   * OR FCAE_CONFIG_TUN_ROUTE_PRIVATE to tunnel private ranges */
     uint32_t        tun_tcp_sndbuf; /* bytes; 0 = 256000; 4096..4194304 bytes */
     uint32_t        tun_tcp_rcvbuf; /* bytes; 0 = 256000; 4096..4194304 bytes */
     uint64_t        tun_tcp_auto_tuning; /* 0=default(off), 1=on, 2=off */

@@ -13,6 +13,7 @@
 //! meant to be deleted once the engine accepts a config argument.
 
 use std::ffi::CStr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::raw::c_char;
 use std::time::Duration;
 
@@ -300,6 +301,11 @@ pub struct TunConfig {
     pub ipv6: Option<String>,
     /// Android VpnService descriptor; `None` on desktop.
     pub fd: Option<i32>,
+    /// Keep private ranges off the device. On -- the default -- the LAN and
+    /// carrier-grade NAT keep using the physical interface, so a printer, a
+    /// NAS or the router's admin page stays reachable while the tunnel is up.
+    /// Off routes everything into the device, private ranges included.
+    pub exclude_private: bool,
 }
 
 impl Default for TunConfig {
@@ -315,6 +321,7 @@ impl Default for TunConfig {
             engine: TunEngine::Tun2socks,
             t2s_log_level: T2S_LOG_DEFAULT,
             name: "FCAE_VPN".into(),
+            exclude_private: true,
             mtu: 1500,
             ipv4: "198.18.0.1/24".into(),
             ipv6: Some("fc00::1/64".into()),
@@ -545,6 +552,33 @@ impl SessionConfig {
         };
         base + self.start_timeout()
     }
+}
+
+/// Ranges a TUN device leaves alone while [`TunConfig::exclude_private`] is on:
+/// the LAN itself (RFC1918) and carrier-grade NAT.
+///
+/// They keep using the physical interface instead of the device, which is what
+/// keeps a printer, a NAS, a router's admin page or a WireGuard endpoint
+/// reachable while the VPN is up. Link-local and loopback are absent on
+/// purpose: both scopes already have routes more specific than any the tunnel
+/// installs, and neither is reachable through a gateway.
+pub const PRIVATE_PREFIXES: &[(Ipv4Addr, u8)] = &[
+    (Ipv4Addr::new(10, 0, 0, 0), 8),
+    (Ipv4Addr::new(172, 16, 0, 0), 12),
+    (Ipv4Addr::new(192, 168, 0, 0), 16),
+    (Ipv4Addr::new(100, 64, 0, 0), 10),
+];
+
+/// The IPv6 half of [`PRIVATE_PREFIXES`]: unique local addresses.
+pub const PRIVATE_PREFIXES_V6: &[(Ipv6Addr, u8)] = &[(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7)];
+
+/// Every prefix a device must not capture, both families, when private ranges
+/// are excluded.
+pub fn excluded_prefixes() -> impl Iterator<Item = (IpAddr, u8)> {
+    PRIVATE_PREFIXES
+        .iter()
+        .map(|(network, bits)| (IpAddr::V4(*network), *bits))
+        .chain(PRIVATE_PREFIXES_V6.iter().map(|(network, bits)| (IpAddr::V6(*network), *bits)))
 }
 
 /// Insert `UpstreamProxyURL` into a Psiphon config object.
@@ -1325,6 +1359,9 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             0 | 2 => false,
             _ => return Err(CoreError::InvalidConfig("tun_tcp_auto_tuning must be 0, 1 or 2".into())),
         },
+        // Private ranges stay off the device unless the host asks for them:
+        // the bit is "route them in", so an absent bit is the default.
+        exclude_private: raw._reserved[0] & FCAE_CONFIG_TUN_ROUTE_PRIVATE == 0,
         t2s_log_level: match raw.tun2socks_log_level {
             v @ 0..=5 => v as u8,
             _ => {
@@ -2769,6 +2806,49 @@ mod tests {
         assert_eq!(cfg.http_port, 1820);
         assert_eq!(cfg.socks_port, 0);
         assert!(!cfg.psiphon.through_tunnel);
+    }
+
+    #[test]
+    fn private_ranges_stay_off_the_device_unless_asked_for() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.mode = FcaeMode::Tun;
+
+        let cfg = unsafe { parse(&raw) }.expect("default config parses");
+        assert!(cfg.tun.exclude_private, "private ranges are excluded unless the host opts in");
+
+        raw._reserved[0] = FCAE_CONFIG_TUN_ROUTE_PRIVATE;
+        let cfg = unsafe { parse(&raw) }.expect("config parses");
+        assert!(!cfg.tun.exclude_private);
+
+        // Three meanings share slot zero; none of them may claim another's bit.
+        assert_eq!(FCAE_CONFIG_TUN_ROUTE_PRIVATE & FCAE_CONFIG_TUN_HTTP, 0);
+        assert_eq!(FCAE_CONFIG_TUN_ROUTE_PRIVATE & 1, 0);
+    }
+
+    #[test]
+    fn private_prefixes_are_canonical_and_disjoint() {
+        let v4: Vec<(u32, u8)> = PRIVATE_PREFIXES.iter().map(|(network, bits)| (u32::from(*network), *bits)).collect();
+        for (index, (network, bits)) in v4.iter().enumerate() {
+            assert!((1..=32).contains(bits), "prefix length out of range: {network}/{bits}");
+            assert_eq!(network >> (32 - bits) << (32 - bits), *network, "prefix has host bits set");
+            for (other, other_bits) in &v4[index + 1..] {
+                let shared = *bits.min(other_bits);
+                assert_ne!(network >> (32 - shared), other >> (32 - shared), "private prefixes overlap");
+            }
+        }
+        let v6: Vec<(u128, u8)> = PRIVATE_PREFIXES_V6.iter().map(|(network, bits)| (u128::from(*network), *bits)).collect();
+        for (index, (network, bits)) in v6.iter().enumerate() {
+            assert!((1..=128).contains(bits));
+            assert_eq!(network >> (128 - bits) << (128 - bits), *network, "prefix has host bits set");
+            for (other, other_bits) in &v6[index + 1..] {
+                let shared = *bits.min(other_bits);
+                assert_ne!(network >> (128 - shared), other >> (128 - shared), "private prefixes overlap");
+            }
+        }
+        assert_eq!(excluded_prefixes().filter(|(network, _)| network.is_ipv4()).count(), v4.len());
+        assert_eq!(excluded_prefixes().filter(|(network, _)| network.is_ipv6()).count(), v6.len());
     }
 
     #[test]

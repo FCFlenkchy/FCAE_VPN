@@ -521,6 +521,18 @@ impl TunGuard {
         self.split_default(true, v6).map_err(|error| CoreError::Internal(
             format!("[tun] cannot establish IPv6 tunnel or reject routes; refusing to leave IPv6 outside the VPN: {error}")
         ))?;
+        // The LAN keeps the physical interface: a printer, a NAS or the
+        // router's admin page must not disappear because a VPN came up. Each
+        // prefix below is more specific than the two halves above, so it wins.
+        if cfg.tun.exclude_private {
+            for (network, bits) in crate::config::excluded_prefixes() {
+                if network.is_ipv6() && !v6 {
+                    continue;
+                }
+                self.bypass_prefix(network, bits);
+            }
+            log::info!("[tun] private ranges keep the physical interface");
+        }
         let mut dns_cfg = cfg.clone();
         if !v6 { dns_cfg.tun.ipv6 = None; }
         if tun_dns::servers(&dns_cfg)?.is_empty() {
@@ -576,6 +588,45 @@ impl TunGuard {
         }
         self.undo.push(del);
         Ok(())
+    }
+
+    /// Keep a whole range out of the device. `add`, never `replace`: a host
+    /// that already has a route for the prefix -- an on-link LAN, a split
+    /// tunnel -- keeps it, and that pre-existing route is more specific than
+    /// the tunnel's halves anyway. Only a prefix with nothing behind it gets a
+    /// row through the physical gateway.
+    #[cfg(target_os = "linux")]
+    fn bypass_prefix(&mut self, network: IpAddr, bits: u8) {
+        let family = if network.is_ipv4() { "-4" } else { "-6" };
+        let Some((via, dev)) = gateway(network.is_ipv6()) else {
+            log::debug!("[tun] no {family} default gateway; {network}/{bits} is not excluded");
+            return;
+        };
+        let prefix = format!("{network}/{bits}");
+        let mut args = vec!["ip", family, "route", "add", &prefix, "via", &via];
+        if let Some(dev) = &dev {
+            args.extend(["dev", dev]);
+        }
+        let del = ["ip", family, "route", "del", &prefix].map(str::to_owned).to_vec();
+        if let Err(e) = self.add(&args, del, true) {
+            log::debug!("[tun] {prefix} keeps its existing route: {e}");
+        }
+    }
+
+    /// The macOS half of [`Self::bypass_prefix`]; `route add` fails the same
+    /// way `ip route add` does when the prefix is already routed.
+    #[cfg(target_os = "macos")]
+    fn bypass_prefix(&mut self, network: IpAddr, bits: u8) {
+        let family = if network.is_ipv4() { "-inet" } else { "-inet6" };
+        let Some(via) = gateway(network.is_ipv6()) else {
+            log::debug!("[tun] no default gateway; {network}/{bits} is not excluded");
+            return;
+        };
+        let prefix = format!("{network}/{bits}");
+        let del = ["route", "-n", "delete", family, "-net", &prefix].map(str::to_owned).to_vec();
+        if let Err(e) = self.add(&["route", "-n", "add", family, "-net", &prefix, &via], del, true) {
+            log::debug!("[tun] {prefix} keeps its existing route: {e}");
+        }
     }
 
     #[cfg(target_os = "linux")]

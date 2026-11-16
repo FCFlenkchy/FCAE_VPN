@@ -23,6 +23,11 @@ use core::ffi::{c_char, c_void};
 pub const FCAE_ABI_VERSION: u32 = 26;
 /// Explicitly allow `http_port` to open an HTTP listener in TUN mode.
 pub const FCAE_CONFIG_TUN_HTTP: u64 = 0x8000_0000_0000_0000;
+/// `_reserved[0]` bit: route private ranges into the TUN device. Unset keeps
+/// RFC1918 and carrier-grade NAT off it, which is the default -- a tunnel is
+/// for public traffic, and a printer or a NAS on the LAN must keep answering
+/// while it is up.
+pub const FCAE_CONFIG_TUN_ROUTE_PRIVATE: u64 = 0x4000_0000_0000_0000;
 
 /// First protocol-list position that names a saved Xray/sing-box config (its
 /// position in [`FcaeCore::library`]) instead of one of the built-in
@@ -559,7 +564,9 @@ pub struct FcaeConfig {
     /// and never closes the original — Android's ParcelFileDescriptor owns it.
     pub tun_fd: i32,
 
-    pub _reserved: [u64; 1], // slot 0: legacy Psiphon chain flag and FCAE_CONFIG_TUN_HTTP
+    /// Slot 0: the legacy Psiphon chain flag, [`FCAE_CONFIG_TUN_HTTP`] and
+    /// [`FCAE_CONFIG_TUN_ROUTE_PRIVATE`].
+    pub _reserved: [u64; 1],
     /// TUN TCP defaults in bytes. 0 = 256000 bytes; valid range 4096..4194304 bytes.
     /// These two fields occupy former reserved slot 1.
     pub tun_tcp_sndbuf: u32,

@@ -244,6 +244,42 @@ impl TunGuard {
             guard.peers.push(PeerBypass { peer, luid: physical.InterfaceLuid, next_hop: ip_of(&physical.NextHop) });
         }
 
+        // The LAN keeps the interface it has today: these rows are read while
+        // the table still describes the physical world, and they are more
+        // specific than the /1 halves installed further down, so they stay in
+        // force. That is what keeps a printer, a NAS or the router's admin page
+        // answering while the device carries everything else.
+        if cfg.tun.exclude_private {
+            let outside_v6 = non_loopback_ipv6_present()?;
+            for (network, bits) in crate::config::excluded_prefixes() {
+                if network.is_ipv6() && !outside_v6 {
+                    continue;
+                }
+                let physical = match best_route(network) {
+                    Ok(physical) => physical,
+                    Err(error) => {
+                        log::debug!("[tun] no physical route for {network}/{bits}: {error}");
+                        continue;
+                    }
+                };
+                if unsafe { physical.InterfaceLuid.Value == luid.Value } {
+                    log::warn!("[tun] private range {network}/{bits} already routes through FCAE; skipping its exclusion");
+                    continue;
+                }
+                let mut bypass = MIB_IPFORWARD_ROW2::default();
+                unsafe { InitializeIpForwardEntry(&mut bypass); }
+                bypass.InterfaceLuid = physical.InterfaceLuid;
+                bypass.InterfaceIndex = physical.InterfaceIndex;
+                bypass.DestinationPrefix.Prefix = sockaddr(network);
+                bypass.DestinationPrefix.PrefixLength = bits;
+                bypass.NextHop = physical.NextHop;
+                bypass.Metric = 0;
+                bypass.Protocol = MIB_IPPROTO_NETMGMT;
+                guard.add_route(bypass, true)?;
+            }
+            log::info!("[tun] private ranges keep the physical interface");
+        }
+
         log::info!("[tun] configuring adapter interfaces and addresses");
         guard.configure_interface(luid, AF_INET, cfg.tun.mtu)?;
         let ipv6_available = guard.configure_interface(luid, AF_INET6, cfg.tun.mtu)?;
