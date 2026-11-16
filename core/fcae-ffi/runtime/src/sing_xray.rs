@@ -806,6 +806,9 @@ fn parse_vmess_uri(body: &str, remark: Option<String>) -> Result<Outbound, Strin
     }
     let (server, port) = split_host_port(target, None)?;
     let transport = parse_transport(&query)?;
+    // Settled before the struct takes `transport`: the name the security layer
+    // presents is the one the transport already puts on the wire.
+    let security = parse_security(&query, &server, &transport, false)?;
     Ok(Outbound {
         protocol: Protocol::Vmess {
             uuid,
@@ -813,7 +816,7 @@ fn parse_vmess_uri(body: &str, remark: Option<String>) -> Result<Outbound, Strin
             security: vmess_security(query.get("scy").unwrap_or_default())?,
         },
         transport,
-        security: parse_security(&query, &server, &transport, false)?,
+        security,
         finalmask: parse_finalmask(&query)?,
         server,
         port,
@@ -866,11 +869,14 @@ fn parse_trojan(rest: &str) -> Result<Outbound, String> {
     }
     let (server, port) = split_host_port(target, None)?;
     let transport = parse_transport(&query)?;
+    // Trojan is TLS by definition; links routinely omit `security=tls`. Settled
+    // before the struct takes `transport`: the name the security layer presents
+    // is the one the transport already puts on the wire.
+    let security = parse_security(&query, &server, &transport, true)?;
     Ok(Outbound {
         protocol: Protocol::Trojan { password },
         transport,
-        // Trojan is TLS by definition; links routinely omit `security=tls`.
-        security: parse_security(&query, &server, &transport, true)?,
+        security,
         finalmask: parse_finalmask(&query)?,
         server,
         port,
