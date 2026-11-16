@@ -19,7 +19,7 @@ use std::time::Duration;
 use fcae_abi::{FcaeBackend, FcaeMode, FcaeProtocol, FcaeState, FcaeTorMode};
 use parking_lot::Mutex;
 
-use crate::backend::{BackendContext, BackendHandle, CancelToken, Endpoints};
+use crate::backend::{Backend, BackendContext, BackendHandle, CancelToken, Counters, Endpoints};
 use crate::config::{backend_label, ChainHop, SessionConfig};
 use crate::error::{CoreError, Result};
 use crate::registry;
@@ -40,6 +40,14 @@ const CARRIER_POLL: Duration = Duration::from_millis(500);
 /// Margin past the chained Psiphon backend's own start deadline.
 const CHAIN_START_GRACE: Duration = Duration::from_secs(10);
 
+/// How long a session end may spend waiting for an engine to release itself.
+///
+/// The reclaim is a join, a controller stop and a heap hand-back, all of which
+/// finish in milliseconds when the engine was already stopped. The budget exists
+/// so that a wedged one cannot hold the only path to the next connect: this is
+/// the last step before the reaper clears the start barrier.
+const RECLAIM_BUDGET: Duration = Duration::from_secs(10);
+
 /// Hook that raises a TUN device on top of a backend's SOCKS endpoint.
 ///
 /// The supervisor stays independent of the tun2socks bridge crate (which
@@ -57,6 +65,21 @@ pub trait TunBridge: Send + Sync {
     }
     /// Stop forwarding and release the device. Must be idempotent.
     fn stop(&self, timeout: Duration);
+    /// Release the data-plane engine unconditionally: the last word of a
+    /// session, not a request from one.
+    ///
+    /// [`stop`] is what a live session calls, and every path that reaches it
+    /// knows a device is up. This is the net under those paths, and its whole
+    /// reason to exist is the case where nothing here believes one is: a start
+    /// that landed after its session was cancelled leaves the engine up with
+    /// every flag on this side saying down, and a gate on [`is_running`] is
+    /// what let such an engine outlive its session with its stack, its
+    /// goroutines and its memory. The bridge is the authority on its own
+    /// engine, so it is asked every time; implementations make this cheap when
+    /// there is nothing to release.
+    fn reclaim(&self, timeout: Duration) {
+        self.stop(timeout);
+    }
     /// Drop the TUN fds immediately. Must not wait on the data-plane engine.
     ///
     /// Default calls [`stop`] with a zero timeout. Bridges whose `stop`
@@ -95,6 +118,29 @@ impl TunBridge for NullTunBridge {
     fn is_running(&self) -> bool {
         false
     }
+}
+
+/// Every backend a session teardown has to reclaim, this session's own first.
+///
+/// The engines are process-global -- one Go runtime under both cores, one
+/// Aether engine, one Psiphon controller -- while reclaiming used to be scoped
+/// to the backends the ending session happened to name. Whatever an earlier
+/// session, a cancelled start or a stop that ran out of budget left resident was
+/// then only collected if the next session happened to use that same engine, so
+/// disconnecting a two-core chain and connecting one core could keep the other
+/// instance alive for the life of the process. Draining every registered backend
+/// is what makes "no engine outlives its session" a property of the process
+/// rather than a hope. A backend with nothing to release returns at once.
+fn reclaim_targets(own: Vec<Arc<dyn Backend>>) -> Vec<Arc<dyn Backend>> {
+    let mut targets = own;
+    for id in registry::available() {
+        let Ok(provider) = registry::resolve(id) else { continue };
+        if targets.iter().any(|present| present.id() == provider.id()) {
+            continue;
+        }
+        targets.push(provider);
+    }
+    targets
 }
 
 /// Platform privilege probe, injected for the same reason as `TunBridge`.
@@ -348,23 +394,36 @@ impl Supervisor {
                     ))
                 }));
 
-                // The attempt loop takes the bridge down on every exit path it
-                // has, so this is only the net for a teardown that a panic or a
-                // cancelled start left half done. Unconditional, it made every
-                // Disconnect tear the TUN down twice -- and the second pass is
-                // the one that pays a whole stack teardown again.
-                if tun_bridge.is_running() {
-                    tun_bridge.stop(stop_timeout);
-                }
+                // Every engine this process can run is reclaimed here, on the
+                // one path every session end goes through: the attempt loop
+                // takes down what it started, a panic or a cancelled start may
+                // not have, and a session that ended before it started
+                // anything still owes the process a clear one.
+                tun_bridge.reclaim(stop_timeout);
                 // A cancelled start may not have returned a BackendHandle.
                 // Drain every provider while its runtime is still alive, not
                 // just the carrier. Dropping the runtime early force-cancelled
                 // Tor despite the no-abort policy in BackendHandle::stop, and
                 // let the reaper release the next-start barrier too soon.
-                for provider in &drain_backends {
-                    rt.block_on(provider.drain());
+                for provider in reclaim_targets(drain_backends) {
+                    let released = rt.block_on(async {
+                        tokio::time::timeout(RECLAIM_BUDGET, provider.drain()).await
+                    });
+                    if released.is_err() {
+                        log::warn!(
+                            "[session] an engine did not release itself within {RECLAIM_BUDGET:?}"
+                        );
+                    }
                 }
-                drop(rt); // worker/reaper waits; stop() on the UI still returns promptly
+                // Bounded, because this thread *is* the next session's gate: the
+                // reaper clears the start barrier when it ends, so waiting here
+                // without a limit is how one stuck call kept a dead session's
+                // runtime -- its four workers, its blocking pool and whatever
+                // they were inside -- alive while the UI showed Disconnected and
+                // refused to connect again. A blocking task that outlives the
+                // budget is a Go stop nothing can interrupt; it is left detached
+                // rather than allowed to hold the process.
+                rt.shutdown_timeout(stop_timeout.max(Duration::from_secs(1)));
 
                 match outcome {
                     Ok(Ok(())) => {
@@ -711,10 +770,12 @@ async fn run_session(
         // through the tunnel — and the Firefox bridge measures its CONNECT while
         // it dials.
         let chained = !config.chain.is_empty();
-        if let Some(measured) = rtt_handle(&handles, &config) {
-            let mut counters = handles[0].counters();
-            counters.rtt_ms = measured.counters().rtt_ms;
-            sink.set_counters(counters);
+        let live = Arc::new(Mutex::new(LiveHops::new(&handles, &config)));
+        {
+            let live = live.lock();
+            if live.measures() {
+                sink.set_counters(live.counters());
+            }
         }
         sink.set_state(
             FcaeState::Connected,
@@ -723,9 +784,7 @@ async fn run_session(
 
         let carrier_wait_handle = handles[0].clone();
         let carrier_ended = async move { carrier_wait_handle.wait().await };
-        let pump_handle = handles[0].clone();
-        let exit_rtt = Arc::new(Mutex::new(rtt_handle(&handles, &config)));
-        let pump_exit_rtt = exit_rtt.clone();
+        let pump_live = live.clone();
         let pump_sink = sink.clone();
         let pump_config = config.clone();
         let pump_tun = tun_bridge.clone();
@@ -735,7 +794,7 @@ async fn run_session(
         let pump_peers = carrier_peers.clone();
         let pump = async move {
             pump_counters(
-                &*pump_handle,
+                &pump_live,
                 &pump_sink,
                 &pump_config,
                 &*pump_tun,
@@ -743,7 +802,6 @@ async fn run_session(
                 &pump_control,
                 &pump_settle,
                 pump_peers.as_deref(),
-                &pump_exit_rtt,
             ).await
         };
         tokio::pin!(carrier_ended, pump);
@@ -766,7 +824,7 @@ async fn run_session(
                     if !up {
                         log::info!("[session] chain hop {index} dropped; stopping its downstream exits");
                         stop_after(&mut handles, index, stop_timeout).await;
-                        *exit_rtt.lock() = rtt_handle(&handles, &config);
+                        *live.lock() = LiveHops::new(&handles, &config);
                         hop_up.truncate(handles.len());
                         let peer_ip = endpoints.peer_ip.clone();
                         endpoints = Endpoints { peer_ip, ..handles[index].endpoints() };
@@ -792,7 +850,7 @@ async fn run_session(
                     };
                     match restarted {
                         Ok(()) => {
-                            *exit_rtt.lock() = rtt_handle(&handles, &config);
+                            *live.lock() = LiveHops::new(&handles, &config);
                             let listener_changed = rebuilt.socks != previous.socks || rebuilt.http != previous.http;
                             if listener_changed && config.is_tun() {
                                 let _control = tun_control.lock();
@@ -865,14 +923,27 @@ async fn exits_ended(handles: Vec<Arc<dyn BackendHandle>>) -> (usize, Result<()>
 async fn stop_after(handles: &mut Vec<Arc<dyn BackendHandle>>, index: usize, timeout: Duration) {
     while handles.len() > index + 1 {
         if let Some(handle) = handles.pop() {
-            let _ = handle.stop(timeout).await;
+            stop_handle(handle.as_ref(), timeout).await;
         }
     }
 }
 
 async fn stop_all(handles: &mut Vec<Arc<dyn BackendHandle>>, timeout: Duration) {
     while let Some(handle) = handles.pop() {
-        let _ = handle.stop(timeout).await;
+        stop_handle(handle.as_ref(), timeout).await;
+    }
+}
+
+/// Stop one hop, and say so when it did not come down.
+///
+/// A stop that fails used to be dropped on the floor: the session ended, the UI
+/// said Disconnected, and whatever the hop still held -- a core instance, a
+/// listener, a controller -- stayed resident with nothing left that knew about
+/// it. The teardown still moves on (the net at the end of the worker reclaims
+/// the engines wholesale), but a hop that misses its budget is worth a line.
+async fn stop_handle(handle: &dyn BackendHandle, timeout: Duration) {
+    if let Err(error) = handle.stop(timeout).await {
+        log::warn!("[session] a hop did not release its engine within {timeout:?}: {error}");
     }
 }
 
@@ -925,7 +996,7 @@ async fn start_downstream(
             Ok(handle) => {
                 let next = handle.endpoints();
                 if (final_hop && config.is_tun() || !final_hop) && next.socks.is_none() {
-                    let _ = handle.stop(stop_timeout).await;
+                    stop_handle(handle.as_ref(), stop_timeout).await;
                     let required = if final_hop { "TUN mode" } else { "the next chain hop" };
                     return Err(CoreError::StartFailed(format!(
                         "chained {exit_name} has no SOCKS5 endpoint; enable SOCKS5 for {required}"
@@ -1182,9 +1253,95 @@ fn exit_measures_rtt(exit: FcaeBackend) -> bool {
     )
 }
 
+/// The handles a running session reads its traffic and latency from.
+///
+/// A chain is several backends, each metering its own leg, so no fixed hop can
+/// answer for the session: the carrier of a chained route may keep a listener
+/// nothing dials (its counters stay at zero for a session moving terabytes), and
+/// a hop that keeps no counters at all -- Aether, Tor, Psiphon -- reports zeros
+/// by construction. Held behind one lock and rebuilt whenever the hop set
+/// changes, so a published sample's bytes and round trip always describe the
+/// same session.
+struct LiveHops {
+    /// Every hop, carrier first: the order `handles` has.
+    hops: Vec<Arc<dyn BackendHandle>>,
+    /// The hop whose round trip is published, when one measured its own.
+    rtt: Option<Arc<dyn BackendHandle>>,
+}
+
+impl LiveHops {
+    fn new(handles: &[Arc<dyn BackendHandle>], config: &SessionConfig) -> Self {
+        Self {
+            hops: handles.to_vec(),
+            rtt: rtt_handle(handles, config),
+        }
+    }
+
+    /// Whether the session has a round trip to publish before it carries any
+    /// traffic at all.
+    fn measures(&self) -> bool {
+        self.rtt.is_some()
+    }
+
+    /// The session's counters.
+    ///
+    /// Totals are never summed: the same bytes cross every hop, so a sum would
+    /// multiply them by the chain's length. They are never read from a fixed hop
+    /// either: the deepest hop that is metering receives the session's traffic
+    /// directly, so a hop above it that reports nothing -- an unused listener, a
+    /// backend with no counters -- is passed over instead of blanking the
+    /// session's numbers.
+    fn counters(&self) -> Counters {
+        let mut sampled: Option<(&Arc<dyn BackendHandle>, Counters)> = None;
+        for handle in self.hops.iter().rev() {
+            let counters = handle.counters();
+            let metered = counters.total_rx != 0 || counters.total_tx != 0;
+            if sampled.is_none() || metered {
+                sampled = Some((handle, counters));
+            }
+            if metered {
+                break;
+            }
+        }
+        let Some((source, counters)) = sampled else {
+            return Counters::default();
+        };
+        self.latency(source, counters)
+    }
+
+    /// The carrier's outer endpoint, which the TUN's route exclusions were
+    /// built for.
+    #[cfg(windows)]
+    fn carrier_peer(&self) -> Option<String> {
+        self.hops
+            .first()
+            .and_then(|handle| handle.endpoints().peer_ip)
+    }
+
+    /// Put the published round trip on a sample taken from `source`.
+    ///
+    /// Zero is "not measured yet", never a latency, so a hop whose probe has not
+    /// answered must not blank the number a hop that did answer published.
+    fn latency(&self, source: &Arc<dyn BackendHandle>, mut counters: Counters) -> Counters {
+        let Some(measured) = self.rtt.as_ref() else {
+            return counters;
+        };
+        // Already this hop's own round trip: sampling it again would only
+        // recompute the same read.
+        if Arc::ptr_eq(measured, source) {
+            return counters;
+        }
+        let rtt_ms = measured.counters().rtt_ms;
+        if rtt_ms != 0 {
+            counters.rtt_ms = rtt_ms;
+        }
+        counters
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn pump_counters(
-    handle: &dyn BackendHandle,
+    live: &Mutex<LiveHops>,
     sink: &TelemetrySink,
     cfg: &SessionConfig,
     tun: &dyn TunBridge,
@@ -1192,7 +1349,6 @@ async fn pump_counters(
     control: &Mutex<()>,
     settle: &Mutex<Option<std::time::Instant>>,
     carrier_peers: Option<&str>,
-    exit_rtt: &Mutex<Option<Arc<dyn BackendHandle>>>,
 ) -> Result<()> {
     #[cfg(not(windows))]
     let _ = carrier_peers;
@@ -1200,11 +1356,7 @@ async fn pump_counters(
     let mut unhealthy: u32 = 0;
     loop {
         tick.tick().await;
-        let mut counters = handle.counters();
-        if let Some(measured) = exit_rtt.lock().as_ref() {
-            counters.rtt_ms = measured.counters().rtt_ms;
-        }
-        sink.set_counters(counters);
+        sink.set_counters(live.lock().counters());
         let Some(_control) = control.try_lock() else { continue; };
         if !cfg.is_tun() {
             continue;
@@ -1232,7 +1384,7 @@ async fn pump_counters(
             continue;
         }
         #[cfg(windows)]
-        if handle.endpoints().peer_ip.as_deref() != carrier_peers {
+        if live.lock().carrier_peer().as_deref() != carrier_peers {
             return Err(CoreError::Internal("outer endpoint changed; reconnecting TUN with fresh routes".into()));
         }
     }
@@ -1714,6 +1866,70 @@ mod tests {
         sup.stop().expect("stop");
     }
 
+    /// A hop that reports whatever counters a test sets, so a chain's published
+    /// sample can be read hop by hop.
+    struct SamplingHandle {
+        counters: Counters,
+    }
+
+    #[async_trait]
+    impl BackendHandle for SamplingHandle {
+        fn endpoints(&self) -> Endpoints {
+            Endpoints {
+                socks: Some("127.0.0.1:1080".parse().unwrap()),
+                http: None,
+                peer_ip: Some("203.0.113.9".into()),
+                udp: true,
+                psiphon_dns: false,
+            }
+        }
+        async fn wait(&self) -> Result<()> { std::future::pending().await }
+        async fn stop(&self, _: Duration) -> Result<()> { Ok(()) }
+        fn counters(&self) -> Counters { self.counters }
+    }
+
+    fn hop(tx: u64, rx: u64, rtt_ms: u32) -> Arc<dyn BackendHandle> {
+        Arc::new(SamplingHandle {
+            counters: Counters {
+                total_tx: tx,
+                total_rx: rx,
+                rx_bytes_sec: 0,
+                tx_bytes_sec: 0,
+                rtt_ms,
+            },
+        })
+    }
+
+    #[test]
+    fn a_chain_repeating_a_core_publishes_the_hop_that_carries_the_bytes() {
+        // direct-reality -> warp-reality: two Xray instances in one process. The
+        // carrier's listener is not what the session dials, so it meters nothing
+        // while the exit carries every byte; reading the carrier alone is how a
+        // two-core chain came to show no traffic at all.
+        let mut cfg = SessionConfig::default();
+        cfg.backend = FcaeBackend::Xray;
+        let exit = ChainHop::new(FcaeBackend::Xray, cfg.protocol, cfg.obfuscation.h2_enabled);
+        cfg.chain = vec![exit];
+
+        let hops = [hop(0, 0, 0), hop(1_500, 9_000, 84)];
+        let counters = LiveHops::new(&hops, &cfg).counters();
+        assert_eq!((counters.total_tx, counters.total_rx), (1_500, 9_000));
+        assert_eq!(counters.rtt_ms, 84, "the exit measured the leg the user watches");
+
+        // Both hops metering the same bytes must not add up: every byte crosses
+        // each hop, so a sum would read as twice the session.
+        let hops = [hop(1_500, 9_000, 40), hop(1_500, 9_000, 84)];
+        let counters = LiveHops::new(&hops, &cfg).counters();
+        assert_eq!((counters.total_tx, counters.total_rx), (1_500, 9_000));
+
+        // Zero means "not measured yet", never a latency: a hop whose probe has
+        // not answered must not blank the number another hop did publish.
+        let hops = [hop(700, 4_000, 40), hop(0, 0, 0)];
+        let counters = LiveHops::new(&hops, &cfg).counters();
+        assert_eq!((counters.total_tx, counters.total_rx), (700, 4_000));
+        assert_eq!(counters.rtt_ms, 40);
+    }
+
     #[test]
     fn health_checks_skip_tun_transitions_but_detect_real_failures() {
         // A transition (control held, or the settle window) never blames the
@@ -1738,6 +1954,8 @@ mod tests {
         let sink = TelemetrySink::new(Arc::new(TelemetryCell::new()));
         let mut cfg = SessionConfig::default();
         cfg.mode = FcaeMode::Tun;
+        let any_hop: Arc<dyn BackendHandle> = Arc::new(handle);
+        let live = Mutex::new(LiveHops::new(&[any_hop], &cfg));
         let paused = AtomicBool::new(false);
         let control = Mutex::new(());
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1750,7 +1968,7 @@ mod tests {
             let _transition = control.lock();
             let result = runtime.block_on(async {
                 tokio::time::timeout(Duration::from_millis(10), pump_counters(
-                    &handle, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(), &Mutex::new(None),
+                    &live, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(),
                 )).await
             });
             assert!(result.is_err());
@@ -1761,7 +1979,7 @@ mod tests {
             *settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
             let result = runtime.block_on(async {
                 tokio::time::timeout(Duration::from_millis(300), pump_counters(
-                    &handle, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(), &Mutex::new(None),
+                    &live, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(),
                 )).await
             });
             assert!(result.is_err(), "settle window must outlast the probe");
@@ -1770,7 +1988,7 @@ mod tests {
 
         *settle.lock() = None;
         let result = runtime.block_on(pump_counters(
-            &handle, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(), &Mutex::new(None),
+            &live, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(),
         ));
         assert!(result.is_err());
         assert!(bridge.0.load(Ordering::SeqCst) >= TUN_HEALTH_FAIL_TICKS as usize);

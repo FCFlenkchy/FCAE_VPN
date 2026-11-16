@@ -744,6 +744,10 @@ func psi_stop() C.int {
 	psiMu.Lock()
 	if !psiRunning {
 		psiMu.Unlock()
+		// The controller is down, so this engine's run count is settled rather
+		// than decremented: a stop that arrives after one already ran is still
+		// the last word on it, and the heap release hangs off that count.
+		engineReclaimed(enginePsiphon)
 		return 0
 	}
 	psiRunning = false
@@ -765,7 +769,7 @@ func psi_stop() C.int {
 	atomic.StoreUint64(&psiBytesDown, 0)
 	psiMu.Unlock()
 
-	engineStopped(enginePsiphon)
+	engineReclaimed(enginePsiphon)
 	psiEmit(psiLogInfo, "[psiphon] controller stopped")
 	return 0
 }

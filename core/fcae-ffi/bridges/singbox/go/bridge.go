@@ -157,8 +157,13 @@ func sb_stop_all() {
 	sbMu.Unlock()
 	for _, core := range cores {
 		_ = core.box.Close()
-		engineStopped(engineSingBox)
 	}
+
+	// Every instance this engine had is closed above, so its run count is
+	// settled rather than decremented: one that outlived its instances would
+	// keep the idle scrub armed for the life of the process and suppress the
+	// heap release that runs once the last engine is gone.
+	engineReclaimed(engineSingBox)
 }
 
 //export sb_running

@@ -1245,21 +1245,50 @@ func engineStopped(engine int) {
 	if engines.runs[engine] > 0 {
 		engines.runs[engine]--
 	}
-	live := false
+	released := settleIdleLocked()
+	engines.mu.Unlock()
+	if released {
+		scrubHeap()
+	}
+}
+
+// engineReclaimed settles one engine's count when its shim has just closed every
+// instance it holds.
+//
+// A count left behind -- by a stop that was swallowed, by an instance that went
+// away through a path that could not report it -- does not merely lie: the idle
+// scrub is armed exactly while some count is non-zero, so one stale count keeps
+// a thirty-second ticker alive for the life of the process and suppresses the
+// last-stop heap release. That is what "the cores stayed in memory after a
+// disconnect" looks like from the outside. A shim calling this has closed
+// everything of that engine, so its count is zero by construction, not by
+// arithmetic.
+func engineReclaimed(engine int) {
+	engines.mu.Lock()
+	engines.runs[engine] = 0
+	released := settleIdleLocked()
+	engines.mu.Unlock()
+	if released {
+		scrubHeap()
+	}
+}
+
+// settleIdleLocked retires the idle scrub when nothing is running and reports
+// whether the caller should hand the heap back. The caller holds engines.mu and
+// unlocks before scrubbing: the scrub takes the runtime's own locks and must not
+// run under this one.
+func settleIdleLocked() bool {
 	for _, runs := range engines.runs {
 		if runs > 0 {
-			live = true
-			break
+			return false
 		}
 	}
-	if live || engines.idle == nil {
-		engines.mu.Unlock()
-		return
+	if engines.idle == nil {
+		return false
 	}
 	close(engines.idle)
 	engines.idle = nil
-	engines.mu.Unlock()
-	scrubHeap()
+	return true
 }
 
 // The idle scrub: what a burst of traffic cost stays resident after it ends.
@@ -1569,6 +1598,11 @@ func t2s_stop() C.int {
 	mu.Lock()
 	if !running {
 		mu.Unlock()
+		// Nothing of this engine is up, so its run count is settled rather
+		// than decremented: a teardown that arrives after one already ran is
+		// still the last word on the engine, and the heap release hangs off
+		// the count reaching zero.
+		engineReclaimed(engineTun2Socks)
 		return 0
 	}
 
@@ -1583,7 +1617,7 @@ func t2s_stop() C.int {
 	// The stack's heap is garbage as soon as it is closed, and on a phone the
 	// pages are worth returning -- but only once nothing else is using the
 	// heap, which is what the engine set tracks.
-	engineStopped(engineTun2Socks)
+	engineReclaimed(engineTun2Socks)
 	return 0
 }
 

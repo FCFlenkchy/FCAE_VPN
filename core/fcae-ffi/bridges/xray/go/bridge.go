@@ -159,8 +159,13 @@ func xray_stop_all() {
 	xrayMu.Unlock()
 	for _, core := range cores {
 		_ = core.instance.Close()
-		engineStopped(engineXray)
 	}
+
+	// Every instance this engine had is closed above, so its run count is
+	// settled rather than decremented: one that outlived its instances would
+	// keep the idle scrub armed for the life of the process and suppress the
+	// heap release that runs once the last engine is gone.
+	engineReclaimed(engineXray)
 }
 
 //export xray_running
@@ -192,11 +197,10 @@ func xray_stats(id C.uint64_t, uplink *C.int64_t, downlink *C.int64_t) C.int {
 	if !ok {
 		return 0
 	}
-	var inboundUp, inboundDown, outboundUp, outboundDown, inbounds int64
+	var inboundUp, inboundDown, outboundUp, outboundDown int64
 	counters.VisitCounters(func(name string, counter featurestats.Counter) bool {
 		switch {
 		case strings.HasPrefix(name, "inbound>>>"):
-			inbounds++
 			switch {
 			case strings.HasSuffix(name, xrayUplinkSuffix):
 				inboundUp += counter.Value()
@@ -215,11 +219,14 @@ func xray_stats(id C.uint64_t, uplink *C.int64_t, downlink *C.int64_t) C.int {
 	})
 	// Inbound counters are the client's own traffic: one connection enters one
 	// listener, so they never overlap. Xray registers none for an untagged
-	// inbound, and a native config may leave its listeners untagged -- the
-	// outbound counters are then the only totals. The two are never summed: a
+	// inbound, so a native config that leaves its socks inbound untagged has no
+	// inbound counter on the very listener a chained hop dials, while a tagged
+	// one nothing routes through keeps a counter pinned at zero: a registered
+	// counter is no evidence of metering. The outbound counters are the totals
+	// when the inbound ones add up to nothing. The two are never summed -- a
 	// chained session counts the same bytes once per outbound hop.
 	totalUp, totalDown := inboundUp, inboundDown
-	if inbounds == 0 {
+	if inboundUp == 0 && inboundDown == 0 {
 		totalUp, totalDown = outboundUp, outboundDown
 	}
 	*uplink = C.int64_t(totalUp)
