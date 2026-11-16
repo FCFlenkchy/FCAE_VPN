@@ -1237,6 +1237,57 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         pt_path: cstr_opt(t.pt_path),
     };
 
+    // One Aether engine per session.
+    //
+    // The engine reads its settings from process-wide variables and resolves
+    // AETHER_UPSTREAM again on every connection it makes, so two engines in one
+    // process cannot hold two upstreams: the second start rewrites the first
+    // one's dial-out address, and the first then reaches the network through
+    // the SOCKS listener the second was pointed at -- its own. A route that
+    // asks for two Aether layers therefore cannot run. The one arrangement with
+    // a faithful single-engine form is a Tor hop directly behind an Aether
+    // carrier: the engine runs exactly that as its Chain mode, bootstrapping
+    // Tor through the carrier's own SOCKS server and serving the listener the
+    // user dials.
+    let aether_layers = usize::from(cfg.backend == FcaeBackend::Aether)
+        + cfg.chain.iter().filter(|hop| hop.backend == FcaeBackend::Aether).count();
+    if aether_layers > 1 {
+        let tor_behind_carrier = cfg.backend == FcaeBackend::Aether
+            && cfg.chain.len() == 1
+            && cfg.chain[0].backend == FcaeBackend::Aether
+            && cfg.chain[0].protocol == FcaeProtocol::Tor;
+        if !tor_behind_carrier {
+            return Err(CoreError::InvalidConfig(format!(
+                "this route asks for {aether_layers} Aether layers, and Aether is one engine per \
+                 session: its upstream proxy is a process-wide setting, so the second layer would \
+                 dial the first one through its own SOCKS listener. Chain Tor directly behind an \
+                 Aether carrier, or use WARP-in-WARP / MASQUE-in-MASQUE for two WARP layers"
+            )));
+        }
+        let carried_by_tor = match cfg.tor.mode {
+            FcaeTorMode::Only => Some("tor only"),
+            FcaeTorMode::Reverse => Some("tor reverse"),
+            FcaeTorMode::Off | FcaeTorMode::Chain => None,
+        };
+        if let Some(how) = carried_by_tor {
+            return Err(CoreError::InvalidConfig(format!(
+                "a Tor hop cannot ride a carrier that is already tor ({how}); keep one of the two"
+            )));
+        }
+        if cfg.tor.mode == FcaeTorMode::Off {
+            cfg.tor.mode = FcaeTorMode::Chain;
+        }
+        cfg.chain.clear();
+        // The carrier keeps no listener of its own in a chain either: the Tor
+        // listener the user dials is the session endpoint, exactly as in Chain
+        // mode, and the engine asks the OS for the port it dials itself.
+        cfg.socks_port = 0;
+        cfg.http_port = 0;
+        cfg.internal_socks = true;
+        cfg.internal_http = false;
+        log::info!("[session] tor rides inside the Aether carrier; one engine serves the whole route");
+    }
+
     // TUN
     let mtu = match raw.tun_mtu {
         0 => 1500,
@@ -1471,12 +1522,18 @@ pub mod env_compat {
         // binds one, and AETHER_SOCKS_DISABLED was never read. Port 0 asks the
         // OS for an ephemeral port, which is what "no public listener" means
         // here -- the supervisor's TUN bridge still needs somewhere to dial.
+        //
+        // In Chain mode this listener is Tor's uplink and nothing else: it
+        // carries the tunnel and no client ever dials it, so it stays on the
+        // loopback even when LAN sharing is on. Sharing it would publish a
+        // listener that leaves around Tor instead of through it.
+        let socks_host = if cfg.tor.mode == FcaeTorMode::Chain { "127.0.0.1" } else { host };
         if cfg.tor.mode == FcaeTorMode::Only {
             set("AETHER_SOCKS", cfg.tor.bind.clone());
         } else if cfg.socks_port != 0 {
-            set("AETHER_SOCKS", Some(format!("{host}:{}", cfg.socks_port)));
+            set("AETHER_SOCKS", Some(format!("{socks_host}:{}", cfg.socks_port)));
         } else {
-            set("AETHER_SOCKS", Some(format!("{host}:0")));
+            set("AETHER_SOCKS", Some(format!("{socks_host}:0")));
         }
         // The engine reads exactly one variable for the HTTP proxy:
         // AETHER_HTTP_PROXY, an ip:port it parses with SocketAddr::parse.
@@ -1680,6 +1737,25 @@ pub mod env_compat {
             set("AETHER_TOR_DIR", None::<&str>);
             set("AETHER_TOR_PT", None::<&str>);
             set("AETHER_TOR_BRIDGES", None::<&str>);
+        }
+
+        // Psiphon.
+        //
+        // FCAE runs its own Psiphon -- tunnel-core's `psi` package compiled into
+        // bridges/psiphon, chained like any other hop -- and the engine's, a
+        // launcher for an external `psiphon-tunnel-core` that FCAE does not
+        // build, is not compiled at all: upstream gates it behind its `psiphon`
+        // feature and this workspace never enables it. Until the pinned submodule
+        // carries that gate the module is still linked, so the switch it answers
+        // to is cleared here as well -- AETHER_PSIPHON* is the only input its
+        // mode has, and a host exporting it would turn the session into an
+        // install hint instead of a tunnel.
+        let engine_psiphon: Vec<String> = std::env::vars_os()
+            .filter_map(|(key, _)| key.into_string().ok())
+            .filter(|key| key.starts_with("AETHER_PSIPHON"))
+            .collect();
+        for key in engine_psiphon {
+            std::env::remove_var(key);
         }
     }
 }
@@ -2070,6 +2146,41 @@ mod tests {
         env_compat::apply(&cfg);
         assert_eq!(std::env::var("AETHER_UPSTREAM").unwrap(), "http://u:p@10.0.0.1:3128");
         std::env::remove_var("AETHER_UPSTREAM");
+
+        // The engine's own Psiphon is never used -- it would exec an external
+        // client FCAE does not ship -- so an inherited switch must not survive
+        // into the engine, where it would replace our bridge with that failure.
+        for key in [
+            "AETHER_PSIPHON",
+            "AETHER_PSIPHON_MODE",
+            "AETHER_PSIPHON_BIND",
+            "AETHER_PSIPHON_CONFIG",
+        ] {
+            std::env::set_var(key, "chain");
+        }
+        env_compat::apply(&cfg);
+        for key in [
+            "AETHER_PSIPHON",
+            "AETHER_PSIPHON_MODE",
+            "AETHER_PSIPHON_BIND",
+            "AETHER_PSIPHON_CONFIG",
+        ] {
+            assert!(std::env::var(key).is_err(), "{key} must not reach the engine");
+        }
+
+        // Tor inside the tunnel means the engine's SOCKS is Tor's uplink and
+        // nothing else, so it stays on the loopback even when the session
+        // shares its own listeners.
+        cfg.tor = TorConfig {
+            mode: FcaeTorMode::Chain,
+            bridges: FcaeTorBridges::None,
+            bind: Some("127.0.0.1:9150".into()),
+            ..Default::default()
+        };
+        cfg.lan_sharing = true;
+        cfg.socks_port = 9000;
+        env_compat::apply(&cfg);
+        assert_eq!(std::env::var("AETHER_SOCKS").unwrap(), "127.0.0.1:9000");
     }
 
     #[test]
@@ -2153,21 +2264,23 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_chain_preserves_full_transport_hops_without_a_slot_limit() {
+    fn dynamic_chain_preserves_every_hop_without_a_slot_limit() {
         let mut raw: FcaeConfig = raw_test_config();
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
         raw.abi_version = FCAE_ABI_VERSION;
+        // Aether runs one engine per session, so a long route is built out of
+        // the bridges that each own their own process-wide state.
         let hops = [
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false, config_ref: std::ptr::null() },
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false, config_ref: std::ptr::null() },
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::Masque, h2_enabled: true, config_ref: std::ptr::null() },
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::Gool, h2_enabled: false, config_ref: std::ptr::null() },
-            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::MasqueInMasque, h2_enabled: true, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Firefox, protocol: FcaeProtocol::Auto, h2_enabled: false, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Psiphon, protocol: FcaeProtocol::Auto, h2_enabled: false, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Firefox, protocol: FcaeProtocol::Auto, h2_enabled: true, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Psiphon, protocol: FcaeProtocol::Auto, h2_enabled: true, config_ref: std::ptr::null() },
+            FcaeChainHop { backend: FcaeBackend::Firefox, protocol: FcaeProtocol::Auto, h2_enabled: false, config_ref: std::ptr::null() },
         ];
         raw.chain.hops = hops.as_ptr();
         raw.chain.hop_count = hops.len() as u32;
 
-        let cfg = unsafe { parse(&raw) }.expect("five explicit transport hops parse");
+        let cfg = unsafe { parse(&raw) }.expect("five explicit hops parse, in order");
         assert_eq!(cfg.chain.len(), hops.len());
         for (actual, expected) in cfg.chain.iter().zip(hops) {
             assert_eq!(actual.backend, expected.backend);
@@ -2215,31 +2328,59 @@ mod tests {
     }
 
     #[test]
-    fn a_hop_behind_tor_rides_http2_and_an_udp_only_one_is_refused() {
+    fn a_hop_behind_a_stream_only_carrier_rides_http2_and_an_udp_only_one_is_refused() {
         let mut raw = raw_test_config();
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
         raw.abi_version = FCAE_ABI_VERSION;
-        let tor = FcaeChainHop {
-            backend: FcaeBackend::Aether, protocol: FcaeProtocol::Tor, h2_enabled: false,
-            config_ref: std::ptr::null(),
-        };
-        let masque = FcaeChainHop {
+        // Psiphon carries CONNECT streams only, exactly as a Tor carrier does.
+        raw.backend = FcaeBackend::Psiphon;
+        let masque = [FcaeChainHop {
             backend: FcaeBackend::Aether, protocol: FcaeProtocol::Masque, h2_enabled: false,
             config_ref: std::ptr::null(),
-        };
-        let hops = [tor, masque];
-        raw.chain.hops = hops.as_ptr();
-        raw.chain.hop_count = hops.len() as u32;
-        let cfg = unsafe { parse(&raw) }.expect("a MASQUE hop behind tor runs over http/2");
-        assert!(cfg.chain[1].h2_enabled);
+        }];
+        raw.chain.hops = masque.as_ptr();
+        raw.chain.hop_count = 1;
+        let cfg = unsafe { parse(&raw) }.expect("a MASQUE hop behind a stream-only carrier runs over http/2");
+        assert!(cfg.chain[0].h2_enabled);
 
-        let wireguard = FcaeChainHop {
+        let wireguard = [FcaeChainHop {
             backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false,
             config_ref: std::ptr::null(),
-        };
-        let only_udp = [tor, wireguard];
-        raw.chain.hops = only_udp.as_ptr();
+        }];
+        raw.chain.hops = wireguard.as_ptr();
         assert!(unsafe { parse(&raw) }.is_err());
+    }
+
+    #[test]
+    fn tor_behind_an_aether_carrier_is_the_engines_own_chain_mode() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.socks_port = 1819;
+        raw.http_port = 1820;
+        let tor = [FcaeChainHop {
+            backend: FcaeBackend::Aether, protocol: FcaeProtocol::Tor, h2_enabled: false,
+            config_ref: std::ptr::null(),
+        }];
+        raw.chain.hops = tor.as_ptr();
+        raw.chain.hop_count = 1;
+        let cfg = unsafe { parse(&raw) }.expect("tor behind an Aether carrier is one engine");
+        assert!(cfg.chain.is_empty());
+        assert_eq!(cfg.tor.mode, FcaeTorMode::Chain);
+        // The carrier keeps no listener the user could dial around Tor.
+        assert_eq!((cfg.socks_port, cfg.http_port), (0, 0));
+        assert!(cfg.internal_socks);
+
+        // Two Aether layers have no single-engine form, and Aether cannot hold
+        // two upstreams in one process: the route has to be named and refused.
+        let masque = [tor[0], FcaeChainHop {
+            backend: FcaeBackend::Aether, protocol: FcaeProtocol::Masque, h2_enabled: false,
+            config_ref: std::ptr::null(),
+        }];
+        raw.chain.hops = masque.as_ptr();
+        raw.chain.hop_count = 2;
+        let error = unsafe { parse(&raw) }.expect_err("two Aether layers are refused");
+        assert!(error.to_string().contains("one engine per session"));
     }
 
     #[test]

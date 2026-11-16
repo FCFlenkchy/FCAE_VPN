@@ -1116,18 +1116,22 @@ fn route_name(config: &SessionConfig) -> String {
     // A saved config is named by the user, and that name is what they picked
     // out of the protocol list: showing "Xray" instead would leave a route of
     // three saved configs unreadable.
-    // A Tor carrier is read as Tor rather than as the engine running it: what a
-    // route of Tor and then MASQUE says is two names, not one.
-    let tor_carrier = config.backend == FcaeBackend::Aether
-        && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain);
-    let first = config
-        .core
-        .selection_name()
-        .unwrap_or(if tor_carrier { "Tor" } else { backend_label(config.backend) });
+    // Tor with no tunnel under it is read as Tor rather than as the engine
+    // running it. Tor inside the tunnel is two names, not one: the carrier is
+    // still there, and the route says so.
+    let aether_tor = (config.backend == FcaeBackend::Aether)
+        .then_some(config.tor.mode)
+        .filter(|mode| matches!(mode, FcaeTorMode::Only | FcaeTorMode::Chain));
+    let named = config.core.selection_name();
+    let carrier = named.unwrap_or_else(|| backend_label(config.backend));
+    let mut names: Vec<String> = match aether_tor {
+        Some(FcaeTorMode::Only) => vec!["Tor".into()],
+        Some(_) => vec![carrier.to_string(), "Tor".into()],
+        None => vec![carrier.to_string()],
+    };
     if config.chain.is_empty() && !config.psiphon.through_tunnel {
-        return first.into();
+        return names.join(" → ");
     }
-    let mut names = vec![first.to_string()];
     if config.chain.is_empty() && config.psiphon.through_tunnel {
         names.push("Psiphon".into());
     } else {
@@ -1311,15 +1315,19 @@ mod tests {
     }
 
     #[test]
-    fn routing_label_names_the_exit_not_the_carrier() {
+    fn routing_label_names_every_engine_in_the_route() {
         let mut cfg = SessionConfig::default();
         assert_eq!(route_name(&cfg), "Aether");
+        // Tor inside the tunnel still rides a carrier, and the route says so;
+        // Tor with no tunnel under it is the whole route.
         cfg.tor.mode = FcaeTorMode::Chain;
-        assert_eq!(route_name(&cfg), "Tor");
+        assert_eq!(route_name(&cfg), "Aether → Tor");
         cfg.tor.mode = FcaeTorMode::Reverse;
         assert_eq!(route_name(&cfg), "Aether");
         cfg.tor.mode = FcaeTorMode::Only;
         assert_eq!(route_name(&cfg), "Tor");
+        // Back to a plain Aether route: the rest of the test names the carrier.
+        cfg.tor.mode = FcaeTorMode::Off;
         cfg.psiphon.through_tunnel = true;
         assert_eq!(route_name(&cfg), "Aether → Psiphon");
         cfg.psiphon.through_tunnel = false;

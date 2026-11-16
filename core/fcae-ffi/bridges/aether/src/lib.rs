@@ -56,8 +56,19 @@ const UPSTREAM_MISSES: u32 = 3;
 /// job this bridge starts is registered here first, so `drain()` and the
 /// teardown reaper can finish what a cancelled start or an impatient caller
 /// left behind. The entry is dropped only once the listener is provably gone.
-static LIVE_JOBS: LazyLock<Mutex<HashMap<u64, SocketAddr>>> =
+static LIVE_JOBS: LazyLock<Mutex<HashMap<u64, EngineJob>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A job the engine owns, and whether its handle has been handed out.
+///
+/// Only an unclaimed job may be retired by a later start: a claimed one backs a
+/// live handle, and cancelling it would take that session's tunnel down behind
+/// its back. Two Aether hops in one process is what made that visible -- the
+/// second hop's start retired the carrier the first was serving from.
+struct EngineJob {
+    addr: SocketAddr,
+    claimed: bool,
+}
 
 struct PendingTeardown {
     job: u64,
@@ -171,7 +182,7 @@ impl Backend for AetherBackend {
 
         cx.report(FcaeState::Connecting, "Establishing tunnel…");
         let job = ffi_start()?;
-        LIVE_JOBS.lock().insert(job, socks_addr);
+        LIVE_JOBS.lock().insert(job, EngineJob { addr: socks_addr, claimed: false });
 
         let timeout = if cfg.tor.is_enabled() { cfg.tor_start_timeout() } else { cfg.start_timeout() };
         let ready = match wait_for_socks(socks_addr, timeout, job).await {
@@ -199,6 +210,7 @@ impl Backend for AetherBackend {
                 peers
             );
         }
+        claim(job);
         Ok(Box::new(AetherHandle {
             rates: Mutex::new(rates::RateMeter::new(baseline)),
             baseline_rx,
@@ -236,7 +248,18 @@ impl Backend for AetherBackend {
 
 /// Cancels every job this bridge opened and never handed to a handle.
 fn retire_outstanding_jobs() {
-    let outstanding: Vec<(u64, SocketAddr)> = LIVE_JOBS.lock().drain().collect();
+    let outstanding: Vec<(u64, SocketAddr)> = {
+        let mut live = LIVE_JOBS.lock();
+        let unclaimed: Vec<u64> = live
+            .iter()
+            .filter(|(_, job)| !job.claimed)
+            .map(|(id, _)| *id)
+            .collect();
+        unclaimed
+            .into_iter()
+            .filter_map(|id| live.remove(&id).map(|job| (id, job.addr)))
+            .collect()
+    };
     for (job, addr) in outstanding {
         log::debug!("[aether] retiring job {job} left behind by a cancelled start");
         retire_job(job, addr);
@@ -397,6 +420,14 @@ fn ffi_poll(job: u64) -> std::result::Result<Option<std::result::Result<(), Stri
 
 fn ffi_cancel(job: u64) { let _ = ffi_reply(aether_engine::ffi::aether_job_cancel(job)); }
 fn ffi_free(job: u64) { let _ = ffi_reply(aether_engine::ffi::aether_job_free(job)); }
+
+/// Marks a job as owned by the handle this start is about to return, so no
+/// later start retires it.
+fn claim(job: u64) {
+    if let Some(entry) = LIVE_JOBS.lock().get_mut(&job) {
+        entry.claimed = true;
+    }
+}
 
 /// Cancels a job and hands it to the reaper, which keeps polling until the
 /// engine reports it finished and its listener stops answering. Freeing the
@@ -727,6 +758,21 @@ impl BackendHandle for AetherHandle {
             tx_bytes_sec: tx,
             rtt_ms: 0,
         }
+    }
+}
+
+/// A start that is dropped before its handle is stopped -- the caller's
+/// cancellation landing on the same turn, a panic on the way back -- would
+/// otherwise leave a claimed job holding its listeners with nothing left that
+/// knows to retire it. Cancelling and queueing the teardown is synchronous, so
+/// the reaper can finish it off this thread.
+impl Drop for AetherHandle {
+    fn drop(&mut self) {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        drop(self.relay.lock().take());
+        retire_job(self.job, self.socks_addr);
     }
 }
 

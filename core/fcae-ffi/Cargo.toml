@@ -43,7 +43,12 @@ fcae-bridge-hev-socks5-tunnel = { path = "bridges/hev-socks5-tunnel" }
 fcae-bridge-xray = { path = "bridges/xray" }
 fcae-bridge-singbox = { path = "bridges/singbox" }
 fcae-firefox-bridge = { path = "bridges/firefox" }
-aether-engine = { package = "aether", path = "../aether/aether" }
+# Nothing of the engine is switched on implicitly. Today its only default is
+# `default = []`, so this pins the intent: Tor is asked for by name (the
+# `tor` feature of bridges/aether), and Psiphon never -- FCAE links
+# tunnel-core itself, so the engine's `psiphon` launcher (which execs an
+# external psiphon-tunnel-core, a binary FCAE does not ship) stays unbuilt.
+aether-engine = { package = "aether", path = "../aether/aether", default-features = false }
 
 
 anyhow = "1"

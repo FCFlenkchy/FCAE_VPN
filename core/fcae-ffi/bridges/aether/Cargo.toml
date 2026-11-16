@@ -17,6 +17,9 @@ default = []
 # register -- enabling this only makes the engine's tor.rs compile for real
 # instead of returning "this build has no tor support".
 tor = ["aether-engine/tor"]
+# `aether-engine/psiphon` is deliberately not forwarded: FCAE runs its own
+# Psiphon (bridges/psiphon, tunnel-core in process), and the engine's module is
+# a launcher for an external binary this project does not build.
 
 [dependencies]
 fcae-abi.workspace = true
