@@ -774,4 +774,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x0bd781298ae6abad */
+/* fcae-abi-fingerprint: 0x21d7b0a78192d81f */
