@@ -2273,27 +2273,38 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     };
 
     // Starting a core parses its config and binds its listeners, which can take
-    // a second or two, so it runs on the blocking pool: a long Go call must not
-    // stall a Tokio worker the rest of the session shares.
+    // a second or two, so it runs on a thread of its own: a long Go call must
+    // not stall a Tokio worker the rest of the session shares.
     let ffi = D::FFI;
     // The sink goes in before the core runs, not after: binding listeners,
     // resolving the server and failing a config all happen during start, and
     // that is exactly what a user needs in the console.
     unsafe { (ffi.set_log)(Some(D::LOG_SINK), log_gate(Level::of(config.core.log_level))) };
-    let started = tokio::task::spawn_blocking(move || {
-        // Unpacks the embedded cronet DLL where sing-box's loader can find it,
-        // if this build embedded one. It has to happen before the core starts:
-        // the Go side caches its first load attempt, failures included.
-        crate::cronet::prepare();
-        call_start(ffi, body)
-    })
-        .await
+    // The start blocks in Go, so it runs on its own thread, and the guard owns
+    // that thread: see [`CoreStart`] for what a cancelled start would otherwise
+    // leave behind.
+    let (answered, started) = tokio::sync::oneshot::channel();
+    let worker = std::thread::Builder::new()
+        .name("fcae-core-start".into())
+        .spawn(move || {
+            // Unpacks the embedded cronet DLL where sing-box's loader can find
+            // it, if this build embedded one. It has to happen before the core
+            // starts: the Go side caches its first load attempt, failures
+            // included.
+            crate::cronet::prepare();
+            let _ = answered.send(call_start(ffi, body));
+        })
         .map_err(|error| {
-            CoreError::Internal(format!("the {} start task failed: {error}", D::DISPLAY))
+            CoreError::Internal(format!("cannot run the {} start: {error}", D::DISPLAY))
         })?;
+    let mut owner = CoreStart { worker: Some(worker), ffi, armed: true };
+    let started = started.await.map_err(|_| {
+        CoreError::Internal(format!("the {} start ended without answering", D::DISPLAY))
+    })?;
     match started {
         Ok(()) => {}
         Err(CallError::Config) => {
+            owner.armed = false;
             return Err(CoreError::Internal(format!(
                 "the generated {} config contains a NUL byte",
                 D::DISPLAY
@@ -2301,11 +2312,15 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
         }
         Err(CallError::Core(text)) => {
             halt(ffi).await;
+            owner.armed = false;
             return Err(CoreError::StartFailed(format!("{}: {text}", D::DISPLAY)));
         }
     }
 
     let rtt_probe = RttProbe::plan(profile, config.upstream_proxy.clone(), &endpoints);
+    // From here the handle owns the core: dropping the handle is what stops a
+    // core whose start was abandoned, so the guard has nothing left to do.
+    owner.armed = false;
     let running = Running {
         ffi,
         display: D::DISPLAY,
@@ -2329,7 +2344,7 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
         format!("Verifying the {} tunnel…", D::DISPLAY),
     );
     if let Err(error) = running.spawn_rtt() {
-        halt(running.ffi).await;
+        running.halt().await;
         return Err(error);
     }
     running.await_tunnel().await?;
@@ -2362,12 +2377,66 @@ fn call_start(ffi: CoreFfi, body: String) -> std::result::Result<(), CallError> 
 }
 
 /// Stop the core off the async workers. Blocking, idempotent.
-async fn halt(ffi: CoreFfi) {
+pub async fn halt(ffi: CoreFfi) {
     let _ = tokio::task::spawn_blocking(move || unsafe { (ffi.stop)() }).await;
 }
 
-/// A started core. Dropping it is not the teardown path — [`BackendHandle::stop`]
-/// is, because it is the only one that can report a timeout.
+/// Stop the core from a caller that cannot await -- a `Drop`, which is where an
+/// abandoned start ends up.
+fn halt_detached(ffi: CoreFfi) {
+    // The Go stop joins the core's own goroutines, so it must not run on the
+    // thread that is dropping: on the session worker that would hold a
+    // disconnect open, and on the UI thread it would freeze the window.
+    let _ = std::thread::Builder::new()
+        .name("fcae-core-halt".into())
+        .spawn(move || unsafe { (ffi.stop)() });
+}
+
+/// A core start that is in flight, and the promise that the core it brings up
+/// does not outlive this session.
+///
+/// `call_start` blocks inside Go, so it runs on its own thread -- and the future
+/// awaiting it can be dropped at any moment: a Disconnect during a connect, a
+/// chain hop cancelled between two awaits. Dropping the awaiter discards the
+/// *answer*, not the work. The core still comes up, keeps its listeners, its
+/// goroutines and its whole heap, and nothing is left that knows it exists --
+/// which is why every later start of that core was refused with "a core is
+/// already running", and why the process kept the memory of a core the user had
+/// disconnected from.
+///
+/// [`Drop`] is the answer: wait for the start to finish, then stop what came up.
+/// The wait is on another thread, because the start is blocking and this may be
+/// dropped where nothing may block. Disarmed once a handle owns the core.
+struct CoreStart {
+    worker: Option<std::thread::JoinHandle<()>>,
+    ffi: CoreFfi,
+    armed: bool,
+}
+
+impl Drop for CoreStart {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        let ffi = self.ffi;
+        let _ = std::thread::Builder::new()
+            .name("fcae-core-halt".into())
+            .spawn(move || {
+                let _ = worker.join();
+                // The stop has to follow the join, not race it: a stop that
+                // arrived while the core was still coming up would find nothing
+                // to close and leave the instance running.
+                unsafe { (ffi.stop)() };
+            });
+    }
+}
+
+/// A started core. [`BackendHandle::stop`] is the teardown path — it is the one
+/// that can report a timeout — and [`Drop`] is the backstop for a handle that is
+/// dropped instead (an abandoned start), which stops the core off-thread.
 pub struct Running {
     ffi: CoreFfi,
     /// What this core calls itself in the text a user reads. `Running` is not
@@ -2395,7 +2464,7 @@ impl Running {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             if !self.alive() {
-                halt(self.ffi).await;
+                self.halt().await;
                 return Err(CoreError::StartFailed(
                     "the core exited while starting".to_string(),
                 ));
@@ -2414,7 +2483,7 @@ impl Running {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                halt(self.ffi).await;
+                self.halt().await;
                 return Err(CoreError::StartFailed(format!(
                     "the core did not accept connections within {}s",
                     READY_TIMEOUT.as_secs()
@@ -2491,14 +2560,14 @@ impl Running {
                 return Ok(());
             }
             if !self.alive() {
-                halt(self.ffi).await;
+                self.halt().await;
                 return Err(CoreError::StartFailed(format!(
                     "{} exited before its tunnel carried anything",
                     self.display
                 )));
             }
             if tokio::time::Instant::now() >= deadline {
-                halt(self.ffi).await;
+                self.halt().await;
                 let through = probe
                     .listener()
                     .map(|listener| format!(" through {listener}"))
@@ -3122,9 +3191,8 @@ impl BackendHandle for Running {
     }
 
     async fn stop(&self, timeout: Duration) -> CoreResult<()> {
-        self.stopping.store(true, Ordering::SeqCst);
         self.rtt_stop.store(true, Ordering::Release);
-        halt(self.ffi).await;
+        self.halt().await;
         let deadline = tokio::time::Instant::now() + timeout;
         while self.alive() {
             if tokio::time::Instant::now() >= deadline {
@@ -3136,11 +3204,30 @@ impl BackendHandle for Running {
     }
 }
 
+impl Running {
+    /// Stop the core and record that this handle asked for it, so its [`Drop`]
+    /// does not stop it twice.
+    async fn halt(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        halt(self.ffi).await;
+    }
+}
+
 impl Drop for Running {
-    /// A handle dropped instead of stopped still owns the measurement loop, so
-    /// it is told to retire here as well.
+    /// A handle dropped instead of stopped still owns the core and the
+    /// measurement loop, so both are retired here.
+    ///
+    /// The handle is dropped without a stop whenever the start it belongs to is
+    /// abandoned: the supervisor's cancellation can drop the future inside
+    /// `await_ready` or `await_tunnel`, after the core is already up. Leaving
+    /// the core behind there is the leak of a whole engine per cancelled
+    /// connect, so it is stopped -- off this thread, and only when no stop was
+    /// asked for.
     fn drop(&mut self) {
         self.rtt_stop.store(true, Ordering::Release);
+        if !self.stopping.load(Ordering::SeqCst) {
+            halt_detached(self.ffi);
+        }
     }
 }
 
@@ -3171,6 +3258,74 @@ mod tests {
     use base64::Engine as _;
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
+
+    /// Stop calls seen by the counting shim below.
+    static STOPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    /// The counter is process-wide, so the two guard tests take turns.
+    static GUARD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A shim whose entry points do nothing but count a stop, so a guard can be
+    /// exercised without a Go archive behind it.
+    fn counting_ffi() -> CoreFfi {
+        unsafe extern "C" fn start(_: *const c_char) -> *mut c_char {
+            std::ptr::null_mut()
+        }
+        unsafe extern "C" fn stop() {
+            STOPS.fetch_add(1, Ordering::SeqCst);
+        }
+        unsafe extern "C" fn running() -> c_int {
+            0
+        }
+        unsafe extern "C" fn string_free(_: *mut c_char) {}
+        unsafe extern "C" fn stats(_: *mut i64, _: *mut i64) -> c_int {
+            0
+        }
+        unsafe extern "C" fn set_log(_: Option<unsafe extern "C" fn(c_int, *const c_char)>, _: c_int) {}
+        CoreFfi { start, stop, running, string_free, stats, set_log }
+    }
+
+    fn await_stops(total: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (STOPS.load(Ordering::SeqCst)) < total {
+            assert!(Instant::now() < deadline, "the abandoned start was never stopped");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The regression behind "sing-box stayed in memory after a disconnect":
+    /// dropping the future that awaits a core's start discards the answer, not
+    /// the work, so the core comes up with nothing left holding it -- and every
+    /// later start of that core was refused as already running.
+    #[test]
+    fn an_abandoned_start_stops_the_core_it_would_have_left_running() {
+        let _turn = GUARD_TESTS.lock().unwrap_or_else(|held| held.into_inner());
+        STOPS.store(0, Ordering::SeqCst);
+        let guard = CoreStart {
+            worker: Some(std::thread::spawn(|| std::thread::sleep(Duration::from_millis(20)))),
+            ffi: counting_ffi(),
+            armed: true,
+        };
+        drop(guard);
+        // The stop follows the start, never races it: a stop that arrived first
+        // would find no instance and the core would run unowned.
+        await_stops(1);
+    }
+
+    /// Once a handle owns the core, the guard must not stop it behind the
+    /// session's back.
+    #[test]
+    fn a_disarmed_start_leaves_the_core_alone() {
+        let _turn = GUARD_TESTS.lock().unwrap_or_else(|held| held.into_inner());
+        STOPS.store(0, Ordering::SeqCst);
+        let guard = CoreStart {
+            worker: Some(std::thread::spawn(|| {})),
+            ffi: counting_ffi(),
+            armed: false,
+        };
+        drop(guard);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(STOPS.load(Ordering::SeqCst), 0, "a claimed core must survive the guard");
+    }
 
     fn link(profile: &str) -> Outbound {
         match CoreProfile::parse(profile).expect("profile parses") {

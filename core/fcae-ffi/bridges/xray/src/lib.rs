@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fcae_abi::FcaeBackend;
 use fcae_runtime::backend::{Backend, BackendContext, BackendHandle, BackendId, Capabilities};
-use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, start};
+use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, halt, start};
 use fcae_runtime::Result;
 
 // Exported by `bridges/xray/go/bridge.go` through the shared archive. The
@@ -87,6 +87,18 @@ impl Backend for XrayBackend {
 
     async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
         Ok(Box::new(start::<XrayDialect>(&cx).await?))
+    }
+
+    /// No core outlives its session.
+    ///
+    /// A start already stops the instance it abandoned, and a handle stops the
+    /// one it owns, so this is the net under the paths that cannot: a stop the
+    /// supervisor could not await, a handle dropped where only the guard ran.
+    /// The shim's stop is idempotent -- nil instance, immediate return -- and it
+    /// is what tells the shared Go runtime an engine is gone, which is what
+    /// hands the heap back between sessions.
+    async fn drain(&self) {
+        halt(XrayDialect::FFI).await;
     }
 }
 

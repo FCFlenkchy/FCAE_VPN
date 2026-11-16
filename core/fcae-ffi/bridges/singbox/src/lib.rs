@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fcae_abi::FcaeBackend;
 use fcae_runtime::backend::{Backend, BackendContext, BackendHandle, BackendId, Capabilities};
-use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, start};
+use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, halt, start};
 use fcae_runtime::Result;
 
 // Exported by `bridges/singbox/go/bridge.go` through the shared archive. The
@@ -86,6 +86,12 @@ impl Backend for SingBoxBackend {
 
     async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
         Ok(Box::new(start::<SingBoxDialect>(&cx).await?))
+    }
+
+    /// No core outlives its session; see the Xray bridge's `drain` for why the
+    /// net is here as well as on the stop paths.
+    async fn drain(&self) {
+        halt(SingBoxDialect::FFI).await;
     }
 }
 
