@@ -2674,7 +2674,8 @@ struct RttTarget {
     server: String,
     port: u16,
     /// The proxy this core dials through: the hop above it in a chain, or the
-    /// user's own upstream proxy.
+    /// user's own upstream proxy -- only ever one off this machine, because a
+    /// local front answers the CONNECT itself.
     via: Option<UpstreamProxy>,
 }
 
@@ -2694,6 +2695,15 @@ impl RttTarget {
         }
         Some(Self { server: outbound.server.clone(), port: outbound.port, via })
     }
+
+    /// Whether the handshake this target describes is fronted by a proxy on this
+    /// machine -- a chain hop's own listener, or a client the user runs locally.
+    ///
+    /// Such a proxy acknowledges the CONNECT from the request alone, so timing it
+    /// measures a loopback round trip rather than the tunnel's.
+    fn local_via(&self) -> bool {
+        self.via.as_ref().is_some_and(UpstreamProxy::is_loopback)
+    }
 }
 
 /// A session's own listener, which is where the tunnel can be exercised from
@@ -2708,13 +2718,15 @@ struct Through {
 #[derive(Clone)]
 enum RttSample {
     /// Time the handshake the session's last leg makes with the server the
-    /// config names: a SYN when the outbound dials directly, the hop's CONNECT
-    /// when it is chained. No application request leaves the host.
+    /// config names: a SYN when the outbound dials directly, the CONNECT a
+    /// proxy on the network performs when it is chained. No application request
+    /// leaves the host. Never used for a hop whose front is local -- that
+    /// CONNECT is answered from this machine.
     Handshake(RttTarget),
     /// Time a real answer fetched through the core's own listener, for the
     /// outbounds a TCP handshake cannot describe: hysteria2 and tuic are QUIC
-    /// end to end, mKCP rides UDP, and a native config has no single remote at
-    /// all.
+    /// end to end, mKCP rides UDP, a native config has no single remote at all,
+    /// and a hop behind a local proxy is acknowledged by that proxy alone.
     Through(Through),
 }
 
@@ -2752,14 +2764,19 @@ impl RttProbe {
                     .http
                     .map(|listener| Through { listener, socks: false })
             });
-        if let Some(target) = RttTarget::new(profile, upstream) {
+        // A hop fronted by a proxy on this machine has no handshake to time: the
+        // CONNECT comes back from the front itself, before it has dialled
+        // anything, which is how a chained hop came to publish 2-3ms. It is
+        // measured the way a QUIC outbound is -- a real answer fetched through
+        // its own listener, which covers the whole chain by construction.
+        if let Some(target) = RttTarget::new(profile, upstream).filter(|target| !target.local_via()) {
             return Some(Self {
                 sample: RttSample::Handshake(target),
                 verify: through,
             });
         }
-        // No TCP handshake describes this outbound, so the round trip through
-        // the listener is the measurement itself; without a listener there is
+        // No handshake describes this outbound, so the round trip through the
+        // listener is the measurement itself; without a listener there is
         // nothing to measure and nothing is invented.
         let through = through?;
         Some(Self {
@@ -2829,8 +2846,9 @@ fn handshake_direct(server: &str, port: u16) -> Option<u32> {
 fn handshake_via(proxy: &UpstreamProxy, target: &RttTarget) -> Option<u32> {
     use std::io::{Read, Write};
 
-    // Includes the hop's own connection: on a loopback hop it costs nothing,
-    // and on the user's proxy it is a leg their traffic really takes.
+    // The connection to the proxy is a leg the traffic really takes, and the
+    // proxy is off this machine by construction ([`RttTarget::local_via`]), so
+    // timing it here measures the path rather than a loopback greeting.
     let started = Instant::now();
     let mut stream = open(proxy)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
@@ -4580,6 +4598,44 @@ mod tests {
             }
             None => panic!("without a listener the handshake stands alone"),
         }
+    }
+
+    #[test]
+    fn a_hop_behind_a_local_proxy_is_measured_through_the_tunnel() {
+        // The hop above a chained core is this app's own listener, and both
+        // cores acknowledge a CONNECT as soon as they have parsed it: timing
+        // that would publish a loopback round trip -- the 2-3ms a chained hop
+        // used to report.
+        let listener = std::net::SocketAddr::from(([127, 0, 0, 1], 1830));
+        let endpoints = Endpoints {
+            socks: Some(listener),
+            http: None,
+            peer_ip: None,
+            udp: true,
+            psiphon_dns: false,
+        };
+        let profile =
+            CoreProfile::parse(&format!("vless://{UUID}@example.com:443#tcp")).expect("parses");
+        let front = UpstreamProxy::loopback(std::net::SocketAddr::from(([127, 0, 0, 1], 1827)));
+        match RttProbe::plan(&profile, Some(front), &endpoints) {
+            Some(probe) => {
+                let RttSample::Through(through) = probe.sample else {
+                    panic!("a local front cannot be timed by a handshake");
+                };
+                assert_eq!(through.listener, listener);
+                assert!(through.socks);
+                // The request that travels the whole chain is the measurement.
+                assert!(probe.verify.is_none());
+            }
+            None => panic!("the hop's own listener is measurable"),
+        }
+        // A proxy off this machine is on the traffic's path, so the handshake it
+        // performs stands as the number.
+        let remote = proxy(ProxyKind::Socks5, std::net::SocketAddr::from(([203, 0, 113, 9], 1080)));
+        assert!(matches!(
+            RttProbe::plan(&profile, Some(remote), &endpoints).map(|probe| probe.sample),
+            Some(RttSample::Handshake(_))
+        ));
     }
 
     #[test]

@@ -35,28 +35,34 @@ public class FCAEVpnService extends VpnService {
     private static final String PREFS_MAIN = "fcae_vpn";
 
     /**
-     * {@code 0.0.0.0/0} minus RFC1918 and carrier-grade NAT. VpnService
-     * routes are an allowlist -- whatever is missing here keeps using the
-     * physical network -- so "exclude private IPs" is spelled as the public
-     * remainder rather than as a list of blocks. Kept in step with
-     * {@code PRIVATE_PREFIXES} in the runtime's config.rs.
+     * {@code 0.0.0.0/0} minus every block the runtime leaves alone: RFC1918,
+     * carrier-grade NAT, this-network, loopback, link-local, multicast and the
+     * reserved top quarter. VpnService routes are an allowlist -- whatever is
+     * missing here keeps using the physical network -- so "exclude private IPs"
+     * is spelled as the globally reachable remainder rather than as a list of
+     * blocks. Exactly the complement of {@code PRIVATE_PREFIXES} in the
+     * runtime's config.rs; there is no route here that overlaps one of them.
      */
     private static final String[] PUBLIC_V4_ROUTES = {
-            "0.0.0.0/5", "8.0.0.0/7", "11.0.0.0/8", "12.0.0.0/6",
-            "16.0.0.0/4", "32.0.0.0/3", "64.0.0.0/3", "96.0.0.0/6",
-            "100.0.0.0/10", "100.128.0.0/9", "101.0.0.0/8", "102.0.0.0/7",
-            "104.0.0.0/5", "112.0.0.0/4", "128.0.0.0/3", "160.0.0.0/5",
-            "168.0.0.0/6", "172.0.0.0/12", "172.32.0.0/11", "172.64.0.0/10",
-            "172.128.0.0/9", "173.0.0.0/8", "174.0.0.0/7", "176.0.0.0/4",
-            "192.0.0.0/9", "192.128.0.0/11", "192.160.0.0/13", "192.169.0.0/16",
-            "192.170.0.0/15", "192.172.0.0/14", "192.176.0.0/12", "192.192.0.0/10",
-            "193.0.0.0/8", "194.0.0.0/7", "196.0.0.0/6", "200.0.0.0/5",
-            "208.0.0.0/4", "224.0.0.0/3",
+            "1.0.0.0/8", "2.0.0.0/7", "4.0.0.0/6", "8.0.0.0/7",
+            "11.0.0.0/8", "12.0.0.0/6", "16.0.0.0/4", "32.0.0.0/3",
+            "64.0.0.0/3", "96.0.0.0/6", "100.0.0.0/10", "100.128.0.0/9",
+            "101.0.0.0/8", "102.0.0.0/7", "104.0.0.0/5", "112.0.0.0/5",
+            "120.0.0.0/6", "124.0.0.0/7", "126.0.0.0/8", "128.0.0.0/3",
+            "160.0.0.0/5", "168.0.0.0/8", "169.0.0.0/9", "169.128.0.0/10",
+            "169.192.0.0/11", "169.224.0.0/12", "169.240.0.0/13", "169.248.0.0/14",
+            "169.252.0.0/15", "169.255.0.0/16", "170.0.0.0/7", "172.0.0.0/12",
+            "172.32.0.0/11", "172.64.0.0/10", "172.128.0.0/9", "173.0.0.0/8",
+            "174.0.0.0/7", "176.0.0.0/4", "192.0.0.0/9", "192.128.0.0/11",
+            "192.160.0.0/13", "192.169.0.0/16", "192.170.0.0/15", "192.172.0.0/14",
+            "192.176.0.0/12", "192.192.0.0/10", "193.0.0.0/8", "194.0.0.0/7",
+            "196.0.0.0/6", "200.0.0.0/5", "208.0.0.0/4",
     };
 
     /**
-     * The IPv6 counterpart: global unicast only. Everything else -- unique
-     * local, link-local, loopback, multicast -- falls outside it.
+     * The IPv6 counterpart: global unicast only, which is the complement of
+     * {@code PRIVATE_PREFIXES_V6} -- unique local, link-local, the deprecated
+     * site-local scope, multicast and loopback all fall outside it.
      */
     private static final String[] PUBLIC_V6_ROUTES = { "2000::/3" };
 

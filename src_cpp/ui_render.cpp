@@ -3573,23 +3573,13 @@ static void render_core_configs() {
         g_app.refresh_core_listeners();
     }
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Listener");
-    ImGui::TextWrapped(
-        "The session's final hop uses one of these pairs. A saved config serves the inbounds "
-        "it declares, so a SOCKS5-only config leaves its HTTP listener off whatever the switch "
-        "says, and a port the config names is kept until you choose one.");
     core_listener_block(0);
     core_listener_block(1);
     ImGui::Spacing();
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Logging");
-    ImGui::TextWrapped(
-        "How much the core writes to the console, through its own logger. Both cores write a "
-        "line per connection at info, so they stay silent until asked otherwise; a core that "
-        "will not start reports why either way.");
     ImGui::PushItemWidth(200);
     const char* core_logs[] = { "Silent", "Error", "Warn", "Info", "Debug", "Trace" };
-    ImGui::Combo("Core log level", &g_app.core_log, core_logs, 6);
+    ImGui::Combo("Xray & sing-box log level", &g_app.core_log, core_logs, 6);
     ImGui::PopItemWidth();
     ImGui::Spacing();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
@@ -5029,7 +5019,6 @@ void render_ui() {
                 ImGui::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
                 ImGui::PopItemWidth();
                 ImGui::Checkbox("Exclude private IPs", &g_app.tun_exclude_private);
-                ImGui::TextDisabled("The LAN and carrier-grade NAT keep using the physical interface");
                 if (g_app.parsed_tun_mtu() == 0xffffffffu)
                     ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
                 const char* t2s_logs[] = { "Silent", "Error", "Warn", "Info", "Debug" };

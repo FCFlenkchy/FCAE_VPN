@@ -239,6 +239,17 @@ impl UpstreamProxy {
         Self { kind: ProxyKind::Socks5, host: addr.ip().to_string(), port: addr.port(), user: None, password: None }
     }
 
+    /// Whether this proxy is on this machine: a chain hop's own listener, or a
+    /// client the user runs locally.
+    ///
+    /// Both cores acknowledge a CONNECT as soon as they have parsed it, before
+    /// they have dialled anything, so a handshake timed through such a proxy is
+    /// a loopback round trip and says nothing about the path beyond it.
+    pub fn is_loopback(&self) -> bool {
+        self.host.eq_ignore_ascii_case("localhost")
+            || self.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    }
+
     pub fn endpoint(&self) -> String {
         if self.host.contains(':') {
             format!("[{}]:{}", self.host, self.port)

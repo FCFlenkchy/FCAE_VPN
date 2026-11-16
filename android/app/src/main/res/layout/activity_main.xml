@@ -532,12 +532,6 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="LAN and carrier-grade NAT keep using the physical network"
-                    android:textColor="#FF6B7280"
-                    android:textSize="12sp" />
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
                     android:text="TUN engine log"
                     android:textColor="#FF9AA3B5"
@@ -790,22 +784,6 @@
 
             <Spinner
                 android:id="@+id/spinnerEngineLog"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:popupBackground="#FF1E1E2C" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="Xray / sing-box log level"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
-            <Spinner
-                android:id="@+id/spinnerCoreLog"
                 android:layout_width="match_parent"
                 android:layout_height="48dp"
                 android:layout_marginTop="4dp"

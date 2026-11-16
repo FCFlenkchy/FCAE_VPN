@@ -215,7 +215,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerTorBridges: Spinner
     private lateinit var editTorBridgeLines: android.widget.EditText
     private lateinit var spinnerEngineLog: Spinner
-    private lateinit var spinnerCoreLog: Spinner
     private lateinit var spinnerT2sLog: Spinner
     private lateinit var spinnerTunEngine: Spinner
     private lateinit var textTunEngineLabel: android.widget.TextView
@@ -282,6 +281,13 @@ class MainActivity : AppCompatActivity() {
     // Aether's answer.
     /** The listener rows of the open Xray / sing-box dialog, when there is one. */
     private var coreListenerRows: LinearLayout? = null
+    /**
+     * Verbosity of the route core itself (Xray, sing-box). The dialog that owns
+     * the spinner is transient, so the choice lives here and is persisted the
+     * moment it changes. Index 0 is silent, because both cores write a line per
+     * connection at info.
+     */
+    private var coreLogLevel = 0
     private var xraySocksEnabled = true
     private var xrayHttpEnabled = true
     private var singBoxSocksEnabled = true
@@ -1350,7 +1356,6 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges = findViewById(R.id.spinnerTorBridges)
         editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
         spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
-        spinnerCoreLog = findViewById(R.id.spinnerCoreLog)
         spinnerT2sLog = findViewById(R.id.spinnerT2sLog)
         spinnerTunEngine = findViewById(R.id.spinnerTunEngine)
         textTunEngineLabel = findViewById(R.id.textTunEngineLabel)
@@ -1627,13 +1632,6 @@ class MainActivity : AppCompatActivity() {
         spinnerEngineLog.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("Off", "Error", "Warn", "Info", "Debug", "Trace"),
-        )
-        // Verbosity of the route core itself (Xray, sing-box). Positions map
-        // 1:1 onto FcaeEngineLog; index 0 = silent is the default, because both
-        // cores write a line per connection at info.
-        spinnerCoreLog.adapter = ArrayAdapter(
-            this, R.layout.spinner_dark_item,
-            listOf("Silent", "Error", "Warn", "Info", "Debug", "Trace"),
         )
         // Verbosity of the tun2socks data plane. Position p maps onto
         // FcaeT2sLog value p+1 (see t2sLogValue/t2sLogPosition): the ABI's
@@ -3125,20 +3123,38 @@ class MainActivity : AppCompatActivity() {
         }
         renderList()
 
-        // Listeners last: the library above decides what they can answer on.
-        dialogLabel(box, "Listener")
-        box.addView(TextView(this).apply {
-            text = "The session's final hop uses one of these pairs. A saved config " +
-                "serves the inbounds it declares, so a SOCKS5-only config leaves its " +
-                "HTTP listener off whatever the switch says."
-            setTextColor(Color.parseColor("#FF9AA3B5"))
-            textSize = 13f
-            setPadding(0, 0, 0, dp(4))
-        })
+        // Listeners next: the library above decides what they can answer on.
         val listenerRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         box.addView(listenerRows)
         coreListenerRows = listenerRows
         refreshCoreListenerRows()
+
+        // The core's own verbosity, one row like every other core setting. It
+        // is written through the moment it changes, so closing the dialog never
+        // has to ask what the value was.
+        addDialogInputRow(box, "Xray & sing-box log level") {
+            android.widget.Spinner(this).apply {
+                adapter = ArrayAdapter(
+                    this@MainActivity, R.layout.spinner_dark_item, CORE_LOG_LABELS,
+                )
+                setBackgroundColor(Color.parseColor("#FF1E1E2C"))
+                setSelection(coreLogLevel.coerceIn(0, CORE_LOG_LABELS.lastIndex), false)
+                onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: android.widget.AdapterView<*>?,
+                        view: android.view.View?,
+                        position: Int,
+                        id: Long
+                    ) {
+                        if (position == coreLogLevel) return
+                        coreLogLevel = position
+                        scheduleSettingsSave()
+                    }
+
+                    override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+                }
+            }
+        }
 
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("XRAY & SING-BOX SETTINGS")
@@ -3237,25 +3253,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun addDialogInput(box: LinearLayout, label: String, value: String = "", password: Boolean = false): android.widget.EditText {
+    /** A captioned row: the label above whatever `field` builds. */
+    private fun <T : android.view.View> addDialogInputRow(box: LinearLayout, label: String, field: () -> T): T {
         box.addView(TextView(this).apply {
             text = label
             setTextColor(Color.parseColor("#FF9AA3B5"))
             setPadding(0, dp(12), 0, dp(3))
         })
-        val input = android.widget.EditText(this).apply {
-            setText(value)
-            setSingleLine(true)
-            textSize = 14f
-            setTextColor(Color.parseColor("#FFE8ECF4"))
-            setHintTextColor(Color.parseColor("#FF6B7280"))
-            setBackgroundColor(Color.parseColor("#FF1E1E2C"))
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            if (password) inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        box.addView(input)
-        return input
+        val view = field()
+        box.addView(view)
+        return view
     }
+
+    private fun addDialogInput(box: LinearLayout, label: String, value: String = "", password: Boolean = false): android.widget.EditText =
+        addDialogInputRow(box, label) {
+            android.widget.EditText(this).apply {
+                setText(value)
+                setSingleLine(true)
+                textSize = 14f
+                setTextColor(Color.parseColor("#FFE8ECF4"))
+                setHintTextColor(Color.parseColor("#FF6B7280"))
+                setBackgroundColor(Color.parseColor("#FF1E1E2C"))
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                if (password) inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+        }
 
     private fun addDialogButton(box: LinearLayout, label: String, action: () -> Unit): MaterialButton {
         val button = MaterialButton(this).apply {
@@ -4371,7 +4393,6 @@ class MainActivity : AppCompatActivity() {
             spinnerNoize,
             spinnerTorBridges,
             spinnerEngineLog,
-            spinnerCoreLog,
             spinnerT2sLog,
             spinnerSysprofile,
             spinnerSplitTunnel,
@@ -4446,7 +4467,7 @@ class MainActivity : AppCompatActivity() {
             putInt("torBridges", spinnerTorBridges.selectedItemPosition)
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
-            putInt("coreLog", spinnerCoreLog.selectedItemPosition)
+            putInt("coreLog", coreLogLevel)
             putInt("t2sLog", t2sLogValue())
             putInt("backend", backendFromSelection())
             // The saved config a core protocol runs, by its position in the
@@ -4588,7 +4609,7 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
-        spinnerCoreLog.setSelection(prefs.getInt("coreLog", 0))
+        coreLogLevel = prefs.getInt("coreLog", 0).coerceIn(0, CORE_LOG_LABELS.lastIndex)
         spinnerT2sLog.setSelection(t2sLogPosition(prefs.getInt("t2sLog", 0)))
         editTorSocksPort.setText(prefs.getString("torSocksPort", "1821"))
         editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", PsiphonTunnelService.DEFAULT_SOCKS_PORT.toString()))
@@ -5019,7 +5040,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("torBridges", spinnerTorBridges.selectedItemPosition)
         i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
         i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
-        i.putExtra("coreLog", spinnerCoreLog.selectedItemPosition)
+        i.putExtra("coreLog", coreLogLevel)
         i.putExtra("t2sLog", t2sLogValue())
         i.putExtra("backend", backendFromSelection())
         i.putExtra("torSocksPort", deferredTorSocksPort())
@@ -5123,7 +5144,7 @@ class MainActivity : AppCompatActivity() {
         val torBridges = spinnerTorBridges.selectedItemPosition
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
         val engineLog = spinnerEngineLog.selectedItemPosition
-        val coreLog = spinnerCoreLog.selectedItemPosition
+        val coreLog = coreLogLevel
         val t2sLog = t2sLogValue()
         // TUN mode only consumes it, but pass it in every mode so the native
         // side always sees one consistent session description.
@@ -6575,6 +6596,8 @@ class MainActivity : AppCompatActivity() {
         private const val SING_BOX_HTTP_PORT = 1830
         /** Saved-config backends, indexed the way the stored tag is. */
         private val CORE_BACKEND_LABELS = listOf("Xray", "sing-box")
+        /** Core verbosity, 1:1 with FcaeEngineLog; index 0 is silent. */
+        private val CORE_LOG_LABELS = listOf("Silent", "Error", "Warn", "Info", "Debug", "Trace")
         /**
          * The tag a saved config's row carries: the core's own name, lower case
          * and unparenthesised, because it is a label and not a sentence.

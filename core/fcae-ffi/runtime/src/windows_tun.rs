@@ -275,7 +275,13 @@ impl TunGuard {
                 bypass.NextHop = physical.NextHop;
                 bypass.Metric = 0;
                 bypass.Protocol = MIB_IPPROTO_NETMGMT;
-                guard.add_route(bypass, true)?;
+                // One prefix that cannot be programmed is not a reason to refuse
+                // the session: the scopes that always have a route of their own
+                // (loopback, link-local, multicast) are on this list too, and the
+                // other platforms treat a failed exclusion the same way.
+                if let Err(error) = guard.add_route(bypass, true) {
+                    log::debug!("[tun] {network}/{bits} keeps its existing route: {error}");
+                }
             }
             log::info!("[tun] private ranges keep the physical interface");
         }

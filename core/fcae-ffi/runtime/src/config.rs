@@ -555,22 +555,42 @@ impl SessionConfig {
 }
 
 /// Ranges a TUN device leaves alone while [`TunConfig::exclude_private`] is on:
-/// the LAN itself (RFC1918) and carrier-grade NAT.
+/// every IPv4 block the IANA special-purpose registry marks as not globally
+/// reachable.
 ///
 /// They keep using the physical interface instead of the device, which is what
 /// keeps a printer, a NAS, a router's admin page or a WireGuard endpoint
-/// reachable while the VPN is up. Link-local and loopback are absent on
-/// purpose: both scopes already have routes more specific than any the tunnel
-/// installs, and neither is reachable through a gateway.
+/// reachable while the VPN is up, and what keeps multicast and link-local
+/// traffic off a gateway that could not route it anyway.
+///
+/// The installs are add-only, so a block that already has a more specific route
+/// of its own — loopback, link-local, multicast — keeps it; nothing here is ever
+/// overwritten, and an address in one of these blocks can only leave through the
+/// interface it already uses.
 pub const PRIVATE_PREFIXES: &[(Ipv4Addr, u8)] = &[
-    (Ipv4Addr::new(10, 0, 0, 0), 8),
-    (Ipv4Addr::new(172, 16, 0, 0), 12),
-    (Ipv4Addr::new(192, 168, 0, 0), 16),
-    (Ipv4Addr::new(100, 64, 0, 0), 10),
+    (Ipv4Addr::new(0, 0, 0, 0), 8),      // this network
+    (Ipv4Addr::new(10, 0, 0, 0), 8),     // RFC 1918
+    (Ipv4Addr::new(100, 64, 0, 0), 10),  // shared address space, carrier-grade NAT
+    (Ipv4Addr::new(127, 0, 0, 0), 8),    // loopback
+    (Ipv4Addr::new(169, 254, 0, 0), 16), // link-local
+    (Ipv4Addr::new(172, 16, 0, 0), 12),  // RFC 1918
+    (Ipv4Addr::new(192, 168, 0, 0), 16), // RFC 1918
+    (Ipv4Addr::new(224, 0, 0, 0), 4),    // multicast
+    (Ipv4Addr::new(240, 0, 0, 0), 4),    // reserved, broadcast included
 ];
 
-/// The IPv6 half of [`PRIVATE_PREFIXES`]: unique local addresses.
-pub const PRIVATE_PREFIXES_V6: &[(Ipv6Addr, u8)] = &[(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7)];
+/// The IPv6 half of [`PRIVATE_PREFIXES`]: unique local addresses, link-local,
+/// the deprecated site-local scope, multicast, and loopback.
+///
+/// A global unicast address is the only IPv6 destination a tunnel can carry, so
+/// everything else on this list is a scope no gateway is allowed to forward.
+pub const PRIVATE_PREFIXES_V6: &[(Ipv6Addr, u8)] = &[
+    (Ipv6Addr::LOCALHOST, 128),                        // loopback
+    (Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),   // unique local
+    (Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),  // link-local
+    (Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0), 10),  // site-local, deprecated
+    (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),   // multicast
+];
 
 /// Every prefix a device must not capture, both families, when private ranges
 /// are excluded.
