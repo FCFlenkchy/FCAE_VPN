@@ -64,12 +64,25 @@ const (
 	xrayLogDebug = 4
 )
 
+// xrayCore is one running instance: the core itself and the stats manager its
+// own config registered.
+//
+// A session can chain Xray to Xray -- two saved configs, two hops -- and this
+// shim hosts both. One slot for the process meant the second hop was refused
+// with "a core is already running" and the session retried until it gave up, so
+// instances are kept in a registry and every entry point carries the handle a
+// start handed back.
+type xrayCore struct {
+	instance *xcore.Instance
+	// Nil when this config carries no `stats` app; the core then keeps no
+	// traffic totals at all.
+	stats featurestats.Manager
+}
+
 var (
-	xrayMu       sync.Mutex
-	xrayInstance *xcore.Instance
-	// Nil when the running config carries no `stats` app; the core then keeps
-	// no traffic totals at all.
-	xrayStats featurestats.Manager
+	xrayMu     sync.Mutex
+	xrayCores  = make(map[uint64]*xrayCore)
+	xrayNextID uint64
 
 	// xrayLogMu guards the host sink and its level gate, and is DELIBERATELY
 	// separate from xrayMu: the core logs while xrayMu is held, and Go's
@@ -93,47 +106,69 @@ func init() {
 }
 
 //export xray_start
-func xray_start(config *C.char) *C.char {
+//
+// Brings one instance up and writes its handle to `handle`. The build happens
+// outside the registry lock: it parses a config and binds the core's inbounds,
+// which is per-instance work that a second hop must not be serialised behind.
+func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 	text := C.GoString(config)
-	xrayMu.Lock()
-	defer xrayMu.Unlock()
-	if xrayInstance != nil {
-		return C.CString("xray: a core is already running")
-	}
 	// "json" is the format `main/distro/all` registers through serial.
 	// StartInstance starts the instance as well as building it.
 	created, err := xcore.StartInstance("json", []byte(text))
 	if err != nil {
 		return C.CString("xray: " + err.Error())
 	}
-	xrayInstance = created
-	// Absent when the config carries no `stats` app, which is the only way a
-	// core keeps traffic totals at all.
+	core := &xrayCore{instance: created}
 	if manager, ok := created.GetFeature(featurestats.ManagerType()).(featurestats.Manager); ok {
-		xrayStats = manager
+		core.stats = manager
 	}
+	xrayMu.Lock()
+	xrayNextID++
+	id := xrayNextID
+	xrayCores[id] = core
+	xrayMu.Unlock()
 	engineStarted(engineXray)
+	*handle = C.uint64_t(id)
 	return nil
 }
 
 //export xray_stop
-func xray_stop() {
+//
+// Closes one instance. The registry entry goes first, so a stop that races a
+// stop of the same handle closes the core exactly once.
+func xray_stop(id C.uint64_t) {
 	xrayMu.Lock()
-	defer xrayMu.Unlock()
-	if xrayInstance == nil {
+	core := xrayCores[uint64(id)]
+	delete(xrayCores, uint64(id))
+	xrayMu.Unlock()
+	if core == nil {
 		return
 	}
-	_ = xrayInstance.Close()
-	xrayInstance = nil
-	xrayStats = nil
+	_ = core.instance.Close()
 	engineStopped(engineXray)
 }
 
-//export xray_running
-func xray_running() C.int {
+//export xray_stop_all
+//
+// The session teardown net: closes every instance this shim still holds,
+// including one whose start was abandoned before its handle reached the caller.
+func xray_stop_all() {
 	xrayMu.Lock()
-	defer xrayMu.Unlock()
-	if xrayInstance == nil || !xrayInstance.IsRunning() {
+	cores := xrayCores
+	xrayCores = make(map[uint64]*xrayCore)
+	xrayMu.Unlock()
+	for _, core := range cores {
+		_ = core.instance.Close()
+		engineStopped(engineXray)
+	}
+}
+
+//export xray_running
+func xray_running(id C.uint64_t) C.int {
+	xrayMu.Lock()
+	core := xrayCores[uint64(id)]
+	xrayMu.Unlock()
+	if core == nil || !core.instance.IsRunning() {
 		return 0
 	}
 	return 1
@@ -144,17 +179,16 @@ func xray_running() C.int {
 // Cumulative tunnelled bytes as (uplink, downlink). Returns 0 when the core
 // keeps no counters, which is what a config without the `stats` app or the
 // policy flags gets.
-func xray_stats(uplink *C.int64_t, downlink *C.int64_t) C.int {
+func xray_stats(id C.uint64_t, uplink *C.int64_t, downlink *C.int64_t) C.int {
 	xrayMu.Lock()
-	running := xrayInstance != nil
-	manager := xrayStats
+	core := xrayCores[uint64(id)]
 	xrayMu.Unlock()
-	if !running || manager == nil {
+	if core == nil || core.stats == nil {
 		return 0
 	}
 	// VisitCounters is on the concrete manager only; the feature interface has
 	// no way to enumerate what the handlers registered.
-	counters, ok := manager.(*appstats.Manager)
+	counters, ok := core.stats.(*appstats.Manager)
 	if !ok {
 		return 0
 	}

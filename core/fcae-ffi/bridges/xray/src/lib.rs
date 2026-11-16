@@ -13,17 +13,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fcae_abi::FcaeBackend;
 use fcae_runtime::backend::{Backend, BackendContext, BackendHandle, BackendId, Capabilities};
-use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, halt, start};
+use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, halt_all, start};
 use fcae_runtime::Result;
 
 // Exported by `bridges/xray/go/bridge.go` through the shared archive. The
 // prefix is per core: one Go package cannot export `start` twice.
 extern "C" {
-    fn xray_start(config: *const c_char) -> *mut c_char;
-    fn xray_stop();
-    fn xray_running() -> c_int;
+    fn xray_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
+    fn xray_stop(handle: u64);
+    fn xray_stop_all();
+    fn xray_running(handle: u64) -> c_int;
     fn xray_string_free(value: *mut c_char);
-    fn xray_stats(uplink: *mut i64, downlink: *mut i64) -> c_int;
+    fn xray_stats(handle: u64, uplink: *mut i64, downlink: *mut i64) -> c_int;
     fn xray_set_log(sink: LogSink, gate: c_int);
 }
 
@@ -42,6 +43,7 @@ impl Dialect for XrayDialect {
     const FFI: CoreFfi = CoreFfi {
         start: xray_start,
         stop: xray_stop,
+        stop_all: xray_stop_all,
         running: xray_running,
         string_free: xray_string_free,
         stats: xray_stats,
@@ -89,16 +91,17 @@ impl Backend for XrayBackend {
         Ok(Box::new(start::<XrayDialect>(&cx).await?))
     }
 
-    /// No core outlives its session.
+    /// No instance outlives its session.
     ///
     /// A start already stops the instance it abandoned, and a handle stops the
     /// one it owns, so this is the net under the paths that cannot: a stop the
-    /// supervisor could not await, a handle dropped where only the guard ran.
-    /// The shim's stop is idempotent -- nil instance, immediate return -- and it
-    /// is what tells the shared Go runtime an engine is gone, which is what
+    /// supervisor could not await, a handle dropped where only the guard ran. It
+    /// closes every instance of this core, which is what a chained session --
+    /// two Xray hops -- needs from it. The shim's stops are idempotent, and they
+    /// are what tells the shared Go runtime an engine is gone, which is what
     /// hands the heap back between sessions.
     async fn drain(&self) {
-        halt(XrayDialect::FFI).await;
+        halt_all(XrayDialect::FFI).await;
     }
 }
 

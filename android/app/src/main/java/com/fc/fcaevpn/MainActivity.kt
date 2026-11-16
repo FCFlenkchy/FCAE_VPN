@@ -3183,11 +3183,10 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * One core listener: a switch and a port field, the pair the other backends
-     * have. Both stay on screen and both stay live whatever the library holds —
-     * a control that greys out because no config exists yet is a control the
-     * user cannot set before saving one, and the value is stored either way.
-     * Whether a listener can actually answer is the engine's call at start time,
-     * so the row says what the saved configs declare instead of locking itself.
+     * have. Both stay live whatever the library holds — a control that greys out
+     * because no config exists yet is a control the user cannot set before
+     * saving one, and the value is stored either way. Whether a listener can
+     * actually answer is the engine's call at start time.
      *
      * Ports follow the config: a native config pins its own, so the field opens
      * where the config put it and a stored value is never overwritten. A link
@@ -3196,9 +3195,6 @@ class MainActivity : AppCompatActivity() {
     private fun coreListenerRow(rows: LinearLayout, backend: Int, http: Boolean) {
         val label = CORE_BACKEND_LABELS[backend]
         val field = corePortField(backend, http)
-        val finalConfig = finalCoreConfig()?.takeIf { it.backend == backend }
-        val served = finalConfig?.let { coreConfigServes(it, http) }
-            ?: coreConfigEntries().any { it.backend == backend && coreConfigServes(it, http) }
         val stored = when {
             backend == 0 && http -> xrayHttpEnabled
             backend == 0 -> xraySocksEnabled
@@ -3233,23 +3229,6 @@ class MainActivity : AppCompatActivity() {
         watchSettingsText(port) {
             field.setText(port.text.toString())
             validate()
-        }
-
-        if (!served) {
-            // A note, not a lock: the switch above still stores what the user
-            // picks, and the engine tells the session the truth once a config
-            // that declares this inbound is selected.
-            rows.addView(TextView(this).apply {
-                text = if (finalConfig != null)
-                    "\"${finalConfig.name}\" declares no ${if (http) "HTTP" else "SOCKS5"} " +
-                        "inbound, so this listener stays off for it."
-                else
-                    "No saved $label config declares ${if (http) "HTTP" else "SOCKS5"} yet, " +
-                        "so this listener waits for one."
-                setTextColor(Color.parseColor("#FF6B7280"))
-                textSize = 12f
-                setPadding(0, dp(4), 0, 0)
-            })
         }
     }
 

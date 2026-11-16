@@ -3410,38 +3410,21 @@ static void core_config_check(int row) {
     snprintf(s_core_status, sizeof(s_core_status), "Valid %s config.", core);
 }
 
-/// What a core backend's listener can answer on while it runs the session: the
-/// resolved config's own answer when the final hop is that backend, otherwise
-/// anything its saved configs could serve.
-static uint32_t core_backend_listener_kinds(int backend) {
-    if (const AppState::CoreConfigEntry* entry = g_app.final_core_config())
-        if (entry->backend == backend) return entry->kinds;
-    uint32_t kinds = 0;
-    for (const AppState::CoreConfigEntry& entry : g_app.core_configs)
-        if (entry.backend == backend) kinds |= entry.kinds;
-    return kinds ? kinds : (FCAE_CORE_LISTENER_SOCKS | FCAE_CORE_LISTENER_HTTP);
-}
-
 /// One core's listener: the same switches and ports Aether and Firefox have.
-/// Both stay on screen when the resolved config cannot answer on them — the
-/// switch is disabled and the block says why, because a control that vanishes
-/// with the current selection is one the user cannot reason about.
+/// Every control stays live whatever the library holds — a switch that greys out
+/// because no saved config declares that inbound is one the user cannot set
+/// before saving the config that needs it, and what a listener actually answers
+/// on is the engine's call at start time.
 static void core_listener_block(int backend) {
     const char* label = backend == 1 ? "sing-box" : "Xray";
     bool& socks_enabled = backend == 1 ? g_app.singbox_socks_enabled : g_app.xray_socks_enabled;
     bool& http_enabled  = backend == 1 ? g_app.singbox_http_enabled : g_app.xray_http_enabled;
     uint16_t& socks_port = backend == 1 ? g_app.singbox_socks_port : g_app.xray_socks_port;
     uint16_t& http_port  = backend == 1 ? g_app.singbox_http_port : g_app.xray_http_port;
-    const uint32_t kinds = core_backend_listener_kinds(backend);
-    const bool serves_socks = (kinds & FCAE_CORE_LISTENER_SOCKS) != 0;
-    const bool serves_http = (kinds & FCAE_CORE_LISTENER_HTTP) != 0;
 
     // Both pairs stay live whatever the library holds. The switch is a stored
-    // preference and the port is a stored value either way, so greying them out
-    // because no config declares that inbound only stops the user from setting
-    // them before saving the config that needs them; what a listener can answer
-    // on is decided at start time, and the note below says what the saved
-    // configs declare today.
+    // preference and the port is a stored value either way; what a listener can
+    // answer on is decided at start time, by the config the session runs.
     ImGui::Spacing();
     ImGui::TextDisabled("%s listener", label);
     ImGui::PushItemWidth(120);
@@ -3454,10 +3437,6 @@ static void core_listener_block(int backend) {
     ImGui::InputScalar(backend == 1 ? "port##singbox-http-port" : "port##xray-http-port",
                        ImGuiDataType_U16, &http_port);
     ImGui::PopItemWidth();
-    if (!serves_socks)
-        ImGui::TextDisabled("No saved %s config declares a SOCKS5 inbound yet.", label);
-    if (!serves_http)
-        ImGui::TextDisabled("No saved %s config declares an HTTP inbound yet.", label);
 }
 
 static void render_core_configs() {

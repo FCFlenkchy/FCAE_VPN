@@ -13,17 +13,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fcae_abi::FcaeBackend;
 use fcae_runtime::backend::{Backend, BackendContext, BackendHandle, BackendId, Capabilities};
-use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, halt, start};
+use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, halt_all, start};
 use fcae_runtime::Result;
 
 // Exported by `bridges/singbox/go/bridge.go` through the shared archive. The
 // prefix is per core: one Go package cannot export `start` twice.
 extern "C" {
-    fn sb_start(config: *const c_char) -> *mut c_char;
-    fn sb_stop();
-    fn sb_running() -> c_int;
+    fn sb_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
+    fn sb_stop(handle: u64);
+    fn sb_stop_all();
+    fn sb_running(handle: u64) -> c_int;
     fn sb_string_free(value: *mut c_char);
-    fn sb_stats(uplink: *mut i64, downlink: *mut i64) -> c_int;
+    fn sb_stats(handle: u64, uplink: *mut i64, downlink: *mut i64) -> c_int;
     fn sb_set_log(sink: LogSink, gate: c_int);
 }
 
@@ -42,6 +43,7 @@ impl Dialect for SingBoxDialect {
     const FFI: CoreFfi = CoreFfi {
         start: sb_start,
         stop: sb_stop,
+        stop_all: sb_stop_all,
         running: sb_running,
         string_free: sb_string_free,
         stats: sb_stats,
@@ -88,10 +90,11 @@ impl Backend for SingBoxBackend {
         Ok(Box::new(start::<SingBoxDialect>(&cx).await?))
     }
 
-    /// No core outlives its session; see the Xray bridge's `drain` for why the
-    /// net is here as well as on the stop paths.
+    /// No instance outlives its session; see the Xray bridge's `drain` for why
+    /// the net is here as well as on the stop paths, and why it closes every
+    /// instance rather than one.
     async fn drain(&self) {
-        halt(SingBoxDialect::FFI).await;
+        halt_all(SingBoxDialect::FFI).await;
     }
 }
 

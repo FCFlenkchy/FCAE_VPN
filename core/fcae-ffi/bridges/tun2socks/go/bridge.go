@@ -1201,64 +1201,65 @@ func applyHeapPolicy() {
 	})
 }
 
-// The engines a session can run, as a set: the idle scrub below is per process,
-// so it has to know whether anything still needs the heap it watches.
+// The engines a session can run: the idle scrub below is per process, so it has
+// to know whether anything still needs the heap it watches.
 const (
-	engineTun2Socks uint32 = 1 << iota
+	engineTun2Socks = iota
 	engineXray
 	engineSingBox
 	enginePsiphon
+	engineKindCount
 )
 
-var engineMask atomic.Uint32
+// engines holds a run count per engine plus the one idle-scrub goroutine.
+//
+// A count and not a bit: one session can run two instances of the same core
+// (Xray chained to Xray, sing-box to sing-box), and a set cleared by the first
+// stop retired the scrub while the other instance was still carrying traffic.
+// Both live behind one lock, because the scrub exists exactly while at least one
+// run does, and two locks for that invariant is a deadlock waiting for its turn.
+var engines struct {
+	mu   sync.Mutex
+	runs [engineKindCount]int
+	// Non-nil while the scrub goroutine runs.
+	idle chan struct{}
+}
 
 // engineStarted records a run and arms the scrub on the first one.
-func engineStarted(engine uint32) {
-	if engineMask.Or(engine) == 0 {
-		startIdleGuard()
+func engineStarted(engine int) {
+	engines.mu.Lock()
+	defer engines.mu.Unlock()
+	engines.runs[engine]++
+	if engines.idle != nil {
+		return
 	}
+	stop := make(chan struct{})
+	engines.idle = stop
+	go runIdleGuard(stop)
 }
 
 // engineStopped clears a run and, when it was the last one, retires the scrub
 // and hands back what the teardown just freed.
-func engineStopped(engine uint32) {
-	if engineMask.And(^engine) != 0 {
+func engineStopped(engine int) {
+	engines.mu.Lock()
+	if engines.runs[engine] > 0 {
+		engines.runs[engine]--
+	}
+	live := false
+	for _, runs := range engines.runs {
+		if runs > 0 {
+			live = true
+			break
+		}
+	}
+	if live || engines.idle == nil {
+		engines.mu.Unlock()
 		return
 	}
-	stopIdleGuard()
+	close(engines.idle)
+	engines.idle = nil
+	engines.mu.Unlock()
 	scrubHeap()
-}
-
-// scrubGuard owns the one idle-scrub goroutine.
-//
-// The mask is re-read under the lock in both directions so the two calls cannot
-// leave a scrub running with nothing to watch, or a running engine without one:
-// whoever takes the lock last sees the other side's mask write.
-var scrubGuard struct {
-	mu      sync.Mutex
-	running bool
-	stop    chan struct{}
-}
-
-func startIdleGuard() {
-	scrubGuard.mu.Lock()
-	defer scrubGuard.mu.Unlock()
-	if scrubGuard.running || engineMask.Load() == 0 {
-		return
-	}
-	stop := make(chan struct{})
-	scrubGuard.running, scrubGuard.stop = true, stop
-	go runIdleGuard(stop)
-}
-
-func stopIdleGuard() {
-	scrubGuard.mu.Lock()
-	defer scrubGuard.mu.Unlock()
-	if !scrubGuard.running || engineMask.Load() != 0 {
-		return
-	}
-	close(scrubGuard.stop)
-	scrubGuard.running, scrubGuard.stop = false, nil
 }
 
 // The idle scrub: what a burst of traffic cost stays resident after it ends.

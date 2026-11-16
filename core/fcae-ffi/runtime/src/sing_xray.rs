@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -2119,17 +2119,26 @@ fn preferred_address(addresses: impl Iterator<Item = IpAddr>) -> Option<IpAddr> 
 ///
 /// Every core exports the same shapes under its own prefix; holding them in
 /// one struct is what lets [`start`] be written once for both cores.
+///
+/// A shim holds one instance per handle, not one per process: a session can
+/// chain a core to itself — two saved Xray configs, two hops — so every call
+/// that acts on an instance takes the handle its start wrote back.
 #[derive(Clone, Copy)]
 pub struct CoreFfi {
-    pub start: unsafe extern "C" fn(*const c_char) -> *mut c_char,
-    pub stop: unsafe extern "C" fn(),
-    pub running: unsafe extern "C" fn() -> c_int,
+    /// Starts one instance and writes its handle to the second argument.
+    pub start: unsafe extern "C" fn(*const c_char, *mut u64) -> *mut c_char,
+    /// Closes one instance by handle.
+    pub stop: unsafe extern "C" fn(u64),
+    /// Closes every instance this core still holds: the teardown net under a
+    /// start that was abandoned before its handle reached the caller.
+    pub stop_all: unsafe extern "C" fn(),
+    pub running: unsafe extern "C" fn(u64) -> c_int,
     /// Frees a message the shim returned, with the shim's own allocator.
     pub string_free: unsafe extern "C" fn(*mut c_char),
-    /// Cumulative `(uplink, downlink)` bytes through the core. Returns 1 when
-    /// the core reported a sample and 0 when it has none to report — the
+    /// Cumulative `(uplink, downlink)` bytes through one instance. Returns 1
+    /// when the core reported a sample and 0 when it has none to report — the
     /// counters are optional, so a config without them is not an error.
-    pub stats: unsafe extern "C" fn(*mut i64, *mut i64) -> c_int,
+    pub stats: unsafe extern "C" fn(u64, *mut i64, *mut i64) -> c_int,
     /// Installs the host log sink (NULL clears it) and its level gate, from the
     /// scale [`log_gate`] produces.
     pub set_log: unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>, c_int),
@@ -2284,6 +2293,10 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     // that thread: see [`CoreStart`] for what a cancelled start would otherwise
     // leave behind.
     let (answered, started) = tokio::sync::oneshot::channel();
+    // The handle is published the moment the shim assigns it, so a guard that
+    // has to stop an abandoned start knows the instance it owns.
+    let handle_slot = Arc::new(AtomicU64::new(0));
+    let published = Arc::clone(&handle_slot);
     let worker = std::thread::Builder::new()
         .name("fcae-core-start".into())
         .spawn(move || {
@@ -2292,30 +2305,47 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
             // starts: the Go side caches its first load attempt, failures
             // included.
             crate::cronet::prepare();
-            let _ = answered.send(call_start(ffi, body));
+            let result = call_start(ffi, body);
+            if let Ok(id) = &result {
+                published.store(*id, Ordering::Release);
+            }
+            let _ = answered.send(result);
         })
         .map_err(|error| {
             CoreError::Internal(format!("cannot run the {} start: {error}", D::DISPLAY))
         })?;
-    let mut owner = CoreStart { worker: Some(worker), ffi, armed: true };
+    let mut owner = CoreStart {
+        worker: Some(worker),
+        ffi,
+        handle: Arc::clone(&handle_slot),
+        armed: true,
+    };
     let started = started.await.map_err(|_| {
         CoreError::Internal(format!("the {} start ended without answering", D::DISPLAY))
     })?;
-    match started {
-        Ok(()) => {}
+    let handle = match started {
+        // A shim that claims success without a handle would leave an instance
+        // nothing here can stop; the session teardown's `stop_all` is what picks
+        // it up, so the refusal still costs no core.
+        Ok(0) => {
+            return Err(CoreError::Internal(format!(
+                "the {} start reported success without an instance handle",
+                D::DISPLAY
+            )));
+        }
+        Ok(id) => id,
         Err(CallError::Config) => {
             owner.armed = false;
             return Err(CoreError::Internal(format!(
                 "the generated {} config contains a NUL byte",
                 D::DISPLAY
-            )))
+            )));
         }
         Err(CallError::Core(text)) => {
-            halt(ffi).await;
             owner.armed = false;
             return Err(CoreError::StartFailed(format!("{}: {text}", D::DISPLAY)));
         }
-    }
+    };
 
     let rtt_probe = RttProbe::plan(profile, config.upstream_proxy.clone(), &endpoints);
     // From here the handle owns the core: dropping the handle is what stops a
@@ -2323,6 +2353,7 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     owner.armed = false;
     let running = Running {
         ffi,
+        handle,
         display: D::DISPLAY,
         endpoints,
         stopping: AtomicBool::new(false),
@@ -2359,16 +2390,21 @@ enum CallError {
     Core(String),
 }
 
-/// Enter the core's shim and start it. Blocking.
-fn call_start(ffi: CoreFfi, body: String) -> std::result::Result<(), CallError> {
+/// Enter the core's shim and start one instance. Blocking.
+///
+/// The handle is written by the shim only on success; the `Err` arm means no
+/// instance came up, so there is nothing of ours left to stop.
+fn call_start(ffi: CoreFfi, body: String) -> std::result::Result<u64, CallError> {
     let json = CString::new(body).map_err(|_| CallError::Config)?;
+    let mut handle: u64 = 0;
     // SAFETY: `json` outlives the call and the shim copies it before returning;
     // a non-NULL result is a string the shim allocated, freed by its own
-    // allocator through `string_free`.
+    // allocator through `string_free`. `handle` is a live local the shim writes
+    // only after the instance is up.
     unsafe {
-        let error = (ffi.start)(json.as_ptr());
+        let error = (ffi.start)(json.as_ptr(), &mut handle);
         if error.is_null() {
-            return Ok(());
+            return Ok(handle);
         }
         let text = CStr::from_ptr(error).to_string_lossy().into_owned();
         (ffi.string_free)(error);
@@ -2376,20 +2412,26 @@ fn call_start(ffi: CoreFfi, body: String) -> std::result::Result<(), CallError> 
     }
 }
 
-/// Stop the core off the async workers. Blocking, idempotent.
-pub async fn halt(ffi: CoreFfi) {
-    let _ = tokio::task::spawn_blocking(move || unsafe { (ffi.stop)() }).await;
+/// Stop one instance off the async workers. Blocking, idempotent.
+pub async fn halt(ffi: CoreFfi, handle: u64) {
+    let _ = tokio::task::spawn_blocking(move || unsafe { (ffi.stop)(handle) }).await;
 }
 
-/// Stop the core from a caller that cannot await -- a `Drop`, which is where an
-/// abandoned start ends up.
-fn halt_detached(ffi: CoreFfi) {
+/// Stop every instance of one core: the net a session teardown leaves under the
+/// paths that could not stop what they started.
+pub async fn halt_all(ffi: CoreFfi) {
+    let _ = tokio::task::spawn_blocking(move || unsafe { (ffi.stop_all)() }).await;
+}
+
+/// Stop one instance from a caller that cannot await -- a `Drop`, which is where
+/// an abandoned start ends up.
+fn halt_detached(ffi: CoreFfi, handle: u64) {
     // The Go stop joins the core's own goroutines, so it must not run on the
     // thread that is dropping: on the session worker that would hold a
     // disconnect open, and on the UI thread it would freeze the window.
     let _ = std::thread::Builder::new()
         .name("fcae-core-halt".into())
-        .spawn(move || unsafe { (ffi.stop)() });
+        .spawn(move || unsafe { (ffi.stop)(handle) });
 }
 
 /// A core start that is in flight, and the promise that the core it brings up
@@ -2406,10 +2448,13 @@ fn halt_detached(ffi: CoreFfi) {
 ///
 /// [`Drop`] is the answer: wait for the start to finish, then stop what came up.
 /// The wait is on another thread, because the start is blocking and this may be
-/// dropped where nothing may block. Disarmed once a handle owns the core.
+/// dropped where nothing may block. Disarmed once a handle owns the instance.
 struct CoreStart {
     worker: Option<std::thread::JoinHandle<()>>,
     ffi: CoreFfi,
+    /// The handle the shim assigned, published by the worker thread. Zero until
+    /// the instance is up, which is the one case where there is nothing to stop.
+    handle: Arc<AtomicU64>,
     armed: bool,
 }
 
@@ -2422,14 +2467,19 @@ impl Drop for CoreStart {
             return;
         };
         let ffi = self.ffi;
+        let handle = Arc::clone(&self.handle);
         let _ = std::thread::Builder::new()
             .name("fcae-core-halt".into())
             .spawn(move || {
                 let _ = worker.join();
                 // The stop has to follow the join, not race it: a stop that
                 // arrived while the core was still coming up would find nothing
-                // to close and leave the instance running.
-                unsafe { (ffi.stop)() };
+                // to close and leave the instance running. Reading the handle
+                // after the join is what makes it complete.
+                let handle = handle.load(Ordering::Acquire);
+                if handle != 0 {
+                    unsafe { (ffi.stop)(handle) };
+                }
             });
     }
 }
@@ -2439,6 +2489,9 @@ impl Drop for CoreStart {
 /// dropped instead (an abandoned start), which stops the core off-thread.
 pub struct Running {
     ffi: CoreFfi,
+    /// This instance's handle in its shim. Two hops of one core in a session
+    /// hold different handles, which is what keeps their counters apart.
+    handle: u64,
     /// What this core calls itself in the text a user reads. `Running` is not
     /// generic over the dialect, and the messages below are shared by both.
     display: &'static str,
@@ -2496,7 +2549,7 @@ impl Running {
     fn alive(&self) -> bool {
         // SAFETY: the shim is linked into this binary for the whole process
         // lifetime, so the pointer is always valid.
-        unsafe { (self.ffi.running)() == 1 }
+        unsafe { (self.ffi.running)(self.handle) == 1 }
     }
 
     /// Cumulative `(tx, rx)` bytes from the core, or `None` when it keeps no
@@ -2506,7 +2559,7 @@ impl Running {
         let mut downlink: i64 = 0;
         // SAFETY: the shim writes both values through the pointers, and it is
         // linked into this binary for the whole process lifetime.
-        let reported = unsafe { (self.ffi.stats)(&mut uplink, &mut downlink) };
+        let reported = unsafe { (self.ffi.stats)(self.handle, &mut uplink, &mut downlink) };
         (reported == 1).then(|| (uplink.max(0) as u64, downlink.max(0) as u64))
     }
 
@@ -3227,7 +3280,7 @@ impl Running {
     /// does not stop it twice.
     async fn halt(&self) {
         self.stopping.store(true, Ordering::SeqCst);
-        halt(self.ffi).await;
+        halt(self.ffi, self.handle).await;
     }
 }
 
@@ -3244,7 +3297,7 @@ impl Drop for Running {
     fn drop(&mut self) {
         self.rtt_stop.store(true, Ordering::Release);
         if !self.stopping.load(Ordering::SeqCst) {
-            halt_detached(self.ffi);
+            halt_detached(self.ffi, self.handle);
         }
     }
 }
@@ -3279,27 +3332,39 @@ mod tests {
 
     /// Stop calls seen by the counting shim below.
     static STOPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    /// The handle the last stop was called with, so a stop of the wrong instance
+    /// (or of the whole core) cannot pass as the right one.
+    static LAST_STOP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// The handle the counting shim hands back from a start.
+    const HANDLE: u64 = 7;
     /// The counter is process-wide, so the two guard tests take turns.
     static GUARD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// A shim whose entry points do nothing but count a stop, so a guard can be
     /// exercised without a Go archive behind it.
     fn counting_ffi() -> CoreFfi {
-        unsafe extern "C" fn start(_: *const c_char) -> *mut c_char {
+        unsafe extern "C" fn start(_: *const c_char, handle: *mut u64) -> *mut c_char {
+            *handle = HANDLE;
             std::ptr::null_mut()
         }
-        unsafe extern "C" fn stop() {
+        unsafe extern "C" fn stop(handle: u64) {
+            LAST_STOP.store(handle, Ordering::SeqCst);
             STOPS.fetch_add(1, Ordering::SeqCst);
         }
-        unsafe extern "C" fn running() -> c_int {
+        unsafe extern "C" fn stop_all() {
+            // Distinct from a stop: the teardown net must never pass for one.
+            LAST_STOP.store(0, Ordering::SeqCst);
+            STOPS.fetch_add(1, Ordering::SeqCst);
+        }
+        unsafe extern "C" fn running(_: u64) -> c_int {
             0
         }
         unsafe extern "C" fn string_free(_: *mut c_char) {}
-        unsafe extern "C" fn stats(_: *mut i64, _: *mut i64) -> c_int {
+        unsafe extern "C" fn stats(_: u64, _: *mut i64, _: *mut i64) -> c_int {
             0
         }
         unsafe extern "C" fn set_log(_: Option<unsafe extern "C" fn(c_int, *const c_char)>, _: c_int) {}
-        CoreFfi { start, stop, running, string_free, stats, set_log }
+        CoreFfi { start, stop, stop_all, running, string_free, stats, set_log }
     }
 
     fn await_stops(total: usize) {
@@ -3321,12 +3386,18 @@ mod tests {
         let guard = CoreStart {
             worker: Some(std::thread::spawn(|| std::thread::sleep(Duration::from_millis(20)))),
             ffi: counting_ffi(),
+            handle: Arc::new(AtomicU64::new(HANDLE)),
             armed: true,
         };
         drop(guard);
         // The stop follows the start, never races it: a stop that arrived first
         // would find no instance and the core would run unowned.
         await_stops(1);
+        assert_eq!(
+            LAST_STOP.load(Ordering::SeqCst),
+            HANDLE,
+            "the guard stopped something other than the instance it started"
+        );
     }
 
     /// Once a handle owns the core, the guard must not stop it behind the
@@ -3338,6 +3409,7 @@ mod tests {
         let guard = CoreStart {
             worker: Some(std::thread::spawn(|| {})),
             ffi: counting_ffi(),
+            handle: Arc::new(AtomicU64::new(HANDLE)),
             armed: false,
         };
         drop(guard);

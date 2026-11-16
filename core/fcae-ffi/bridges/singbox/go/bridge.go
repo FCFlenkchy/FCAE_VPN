@@ -55,12 +55,23 @@ const (
 	sbLogDebug = 4
 )
 
+// sbCore is one running instance and the router tracker behind its byte totals.
+//
+// A session can chain sing-box to sing-box -- two saved configs, two hops -- and
+// this shim hosts both. One slot for the process meant the second hop was
+// refused with "a core is already running", so instances are kept in a registry
+// and every entry point carries the handle a start handed back.
+type sbCore struct {
+	box *box.Box
+	// Nil only if the tracker could not be attached; the core then reports no
+	// traffic totals.
+	traffic *trafficcontrol.Manager
+}
+
 var (
-	sbMu sync.Mutex
-	// Non-nil exactly between a successful Start and Close.
-	sbInstance *box.Box
-	// Router connection tracker behind the byte totals; nil with sbInstance.
-	sbTraffic *trafficcontrol.Manager
+	sbMu     sync.Mutex
+	sbCores  = make(map[uint64]*sbCore)
+	sbNextID uint64
 
 	// sbLogMu guards the host sink and its level gate, and is DELIBERATELY
 	// separate from sbMu: sing-box logs while sbMu is held, and Go's
@@ -71,13 +82,12 @@ var (
 )
 
 //export sb_start
-func sb_start(config *C.char) *C.char {
+//
+// Brings one instance up and writes its handle to `handle`. The build happens
+// outside the registry lock: it parses a config and binds the core's inbounds,
+// which is per-instance work that a second hop must not be serialised behind.
+func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 	text := C.GoString(config)
-	sbMu.Lock()
-	defer sbMu.Unlock()
-	if sbInstance != nil {
-		return C.CString("sing-box: a core is already running")
-	}
 	// include.Context registers every protocol, transport and service this
 	// build carries; box.New refuses to run without those registries and fails
 	// with "missing ... registry in context" for an empty one.
@@ -109,30 +119,54 @@ func sb_start(config *C.char) *C.char {
 		_ = created.Close()
 		return C.CString("sing-box: " + err.Error())
 	}
-	sbInstance = created
-	sbTraffic = traffic
+	core := &sbCore{box: created, traffic: traffic}
+	sbMu.Lock()
+	sbNextID++
+	id := sbNextID
+	sbCores[id] = core
+	sbMu.Unlock()
 	engineStarted(engineSingBox)
+	*handle = C.uint64_t(id)
 	return nil
 }
 
 //export sb_stop
-func sb_stop() {
+//
+// Closes one instance. The registry entry goes first, so a stop that races a
+// stop of the same handle closes the box exactly once.
+func sb_stop(id C.uint64_t) {
 	sbMu.Lock()
-	defer sbMu.Unlock()
-	if sbInstance == nil {
+	core := sbCores[uint64(id)]
+	delete(sbCores, uint64(id))
+	sbMu.Unlock()
+	if core == nil {
 		return
 	}
-	_ = sbInstance.Close()
-	sbInstance = nil
-	sbTraffic = nil
+	_ = core.box.Close()
 	engineStopped(engineSingBox)
 }
 
-//export sb_running
-func sb_running() C.int {
+//export sb_stop_all
+//
+// The session teardown net: closes every instance this shim still holds,
+// including one whose start was abandoned before its handle reached the caller.
+func sb_stop_all() {
 	sbMu.Lock()
-	defer sbMu.Unlock()
-	if sbInstance == nil {
+	cores := sbCores
+	sbCores = make(map[uint64]*sbCore)
+	sbMu.Unlock()
+	for _, core := range cores {
+		_ = core.box.Close()
+		engineStopped(engineSingBox)
+	}
+}
+
+//export sb_running
+func sb_running(id C.uint64_t) C.int {
+	sbMu.Lock()
+	core := sbCores[uint64(id)]
+	sbMu.Unlock()
+	if core == nil {
 		return 0
 	}
 	return 1
@@ -142,14 +176,14 @@ func sb_running() C.int {
 //
 // Cumulative tunnelled bytes as (uplink, downlink); 0 when no tracker is
 // attached.
-func sb_stats(uplink *C.int64_t, downlink *C.int64_t) C.int {
+func sb_stats(id C.uint64_t, uplink *C.int64_t, downlink *C.int64_t) C.int {
 	sbMu.Lock()
-	traffic := sbTraffic
+	core := sbCores[uint64(id)]
 	sbMu.Unlock()
-	if traffic == nil {
+	if core == nil || core.traffic == nil {
 		return 0
 	}
-	up, down := traffic.Total()
+	up, down := core.traffic.Total()
 	*uplink = C.int64_t(up)
 	*downlink = C.int64_t(down)
 	return 1
