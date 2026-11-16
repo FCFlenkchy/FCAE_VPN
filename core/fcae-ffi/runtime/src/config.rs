@@ -1246,32 +1246,50 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // the SOCKS listener the second was pointed at -- its own. A route that
     // stacks Aether on Aether therefore has to become the one engine that
     // expresses it, or be refused with the reason.
-    let aether_hops = cfg.chain.iter().filter(|hop| hop.backend == FcaeBackend::Aether).count();
-    let aether_layers = usize::from(cfg.backend == FcaeBackend::Aether) + aether_hops;
+    let aether_hops: Vec<usize> = cfg
+        .chain
+        .iter()
+        .enumerate()
+        .filter(|(_, hop)| hop.backend == FcaeBackend::Aether)
+        .map(|(index, _)| index)
+        .collect();
+    let aether_layers = usize::from(cfg.backend == FcaeBackend::Aether) + aether_hops.len();
     if aether_layers > 1 {
-        // A host is dialled before the hops behind it, so the layers one engine
-        // runs are the ones directly in front of the route. Aether on both
-        // sides of another hop would be two engines.
-        let leading = cfg
-            .chain
-            .iter()
-            .take_while(|hop| hop.backend == FcaeBackend::Aether)
-            .count();
-        if aether_hops != leading {
+        // The layers one engine runs are a single run of Aether hops. A hop on
+        // both sides of another one would be two engines.
+        let start = aether_hops[0];
+        let contiguous = aether_hops[aether_hops.len() - 1] == start + aether_hops.len() - 1;
+        if !contiguous {
             let route = cfg
                 .chain
                 .iter()
                 .map(|hop| hop.label())
                 .collect::<Vec<_>>()
-                .join(" → ");
+                .join("→");
             return Err(CoreError::InvalidConfig(format!(
                 "this route ({route}) has another hop between its Aether layers, and Aether is one \
                  engine per session: its upstream proxy is a process-wide setting, so a second \
                  engine would dial the first one through its own SOCKS listener. Keep the Aether \
-                 hops next to each other at the front of the route"
+                 hops next to each other"
             )));
         }
-        collapse_aether_layers(&mut cfg, leading)?;
+        // A route whose own engine is Aether starts there: a second Aether layer
+        // behind another hop would be the second engine again.
+        if cfg.backend == FcaeBackend::Aether && start != 0 {
+            let route = cfg
+                .chain
+                .iter()
+                .map(|hop| hop.label())
+                .collect::<Vec<_>>()
+                .join("→");
+            return Err(CoreError::InvalidConfig(format!(
+                "this route ({route}) puts a second Aether layer behind {}, and Aether is one \
+                 engine per session: its upstream proxy is a process-wide setting, so the second \
+                 engine would dial the first one through its own SOCKS listener",
+                cfg.chain[0].label()
+            )));
+        }
+        collapse_aether_layers(&mut cfg, start, aether_hops.len())?;
     }
 
     // TUN
@@ -1375,9 +1393,9 @@ fn route_label(lanes: &[Lane]) -> String {
 /// The route an Aether engine would have to run, in the order the engine runs
 /// it: Tor carrying the tunnel in front, the tunnel itself, then the hops over
 /// it, and finally Tor riding inside it.
-fn aether_lanes(cfg: &SessionConfig, leading: usize) -> Vec<Lane> {
+fn aether_lanes(cfg: &SessionConfig, block: std::ops::Range<usize>) -> Vec<Lane> {
     let tor_alone = cfg.tor.mode == FcaeTorMode::Only || cfg.protocol == FcaeProtocol::Tor;
-    let mut lanes = Vec::with_capacity(leading + 2);
+    let mut lanes = Vec::with_capacity(block.len() + 2);
     if cfg.backend == FcaeBackend::Aether {
         lanes.push(if tor_alone {
             Lane::Tor
@@ -1385,7 +1403,7 @@ fn aether_lanes(cfg: &SessionConfig, leading: usize) -> Vec<Lane> {
             Lane::Warp(cfg.protocol, cfg.obfuscation.h2_enabled)
         });
     }
-    for hop in &cfg.chain[..leading] {
+    for hop in &cfg.chain[block] {
         lanes.push(if hop.protocol == FcaeProtocol::Tor {
             Lane::Tor
         } else {
@@ -1420,9 +1438,10 @@ fn needs_udp_from_its_carrier(protocol: FcaeProtocol) -> bool {
 /// are *not* folded into one double-WARP protocol: the engine runs them as one
 /// protocol, not as two hops, so a route that adds a second Aether hop instead
 /// of choosing WARP-in-WARP or MASQUE-in-MASQUE is wrong and says so.
-fn collapse_aether_layers(cfg: &mut SessionConfig, leading: usize) -> Result<()> {
+fn collapse_aether_layers(cfg: &mut SessionConfig, start: usize, len: usize) -> Result<()> {
     let aether_backend = cfg.backend == FcaeBackend::Aether;
-    let mut lanes = aether_lanes(cfg, leading);
+    let block = start..start + len;
+    let mut lanes = aether_lanes(cfg, block.clone());
     // One Tor layer, however many times the route says it: a hop repeating the
     // mode, or a mode repeating the hop, is one Tor.
     let mut deduped: Vec<Lane> = Vec::with_capacity(lanes.len());
@@ -1441,10 +1460,15 @@ fn collapse_aether_layers(cfg: &mut SessionConfig, leading: usize) -> Result<()>
         )));
     }
     let tor_at = lanes.iter().position(|lane| *lane == Lane::Tor);
-    if tor_at.is_some() && !aether_backend {
+    // Tor in front of the route is a mode of the engine that dials the tunnel,
+    // so it is only expressible while Aether is that engine. Tor behind the
+    // route is a mode of the Aether layer it rides inside, and that layer is as
+    // validly a hop -- a WARP hop behind Xray carries Tor just as well.
+    if tor_at == Some(0) && !aether_backend {
         return Err(CoreError::InvalidConfig(format!(
-            "this route ({route}) puts Tor behind {}: Tor is an egress of the Aether engine, so it \
-             has to be the first element of the route, with an Aether hop behind it",
+            "this route ({route}) dials through Tor in front of {}: Tor carrying a route is a mode \
+             of the Aether engine that dials it, so the route has to start from Aether. Select an \
+             Aether transport as the protocol, or put Tor behind one of the Aether hops",
             backend_label(cfg.backend)
         )));
     }
@@ -1499,7 +1523,7 @@ fn collapse_aether_layers(cfg: &mut SessionConfig, leading: usize) -> Result<()>
     if aether_backend {
         cfg.protocol = protocol;
         cfg.obfuscation.h2_enabled = h2;
-        cfg.chain.drain(..leading).for_each(drop);
+        cfg.chain.drain(block).for_each(drop);
         if mode == FcaeTorMode::Chain {
             // The tunnel keeps no listener of its own: Tor's is the session
             // endpoint, and the engine asks the OS for the port it dials itself.
@@ -1509,22 +1533,24 @@ fn collapse_aether_layers(cfg: &mut SessionConfig, leading: usize) -> Result<()>
             cfg.internal_http = false;
         }
     } else {
-        // A saved config brings its own profile, so it is the one hop that
-        // cannot take a transport of the session's choosing.
-        if cfg.chain[0].core.is_some() {
+        // The engine the route ends in is a hop behind the hosts above it, and
+        // the run of Aether hops it replaces starts at `start`. A saved config
+        // brings its own transport, so it is the one hop that cannot take one
+        // of the session's choosing.
+        if cfg.chain[start].core.is_some() {
             return Err(CoreError::InvalidConfig(format!(
-                "this route ({route}) folds two Aether layers into one, but its first hop is a \
-                 saved config, which carries its own transport. Keep one Aether hop above it"
+                "this route ({route}) folds two Aether layers into one, but the first of them is a \
+                 saved config, which carries its own transport. Keep one Aether hop there"
             )));
         }
-        let hop = &mut cfg.chain[0];
+        let hop = &mut cfg.chain[start];
         hop.protocol = protocol;
         hop.h2_enabled = h2;
-        cfg.chain.drain(1..leading).for_each(drop);
+        cfg.chain.drain(start + 1..start + len).for_each(drop);
     }
     log::info!(
         "[session] {} Aether layer(s) run as one {}: {}, Tor {}, h2 {}",
-        usize::from(aether_backend) + leading,
+        usize::from(aether_backend) + len,
         if aether_backend { "engine" } else { "hop" },
         lane_label(Lane::Warp(protocol, h2)),
         match mode {
@@ -2614,6 +2640,74 @@ mod tests {
         )
         .expect_err("tor cannot be used twice");
         assert!(error.to_string().contains("uses Tor twice"), "{error}");
+
+        // A route that starts on another backend still gets its Aether layers
+        // folded: the WARP hop carries Tor, and the host above it never sees it.
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.backend = FcaeBackend::Xray;
+        raw.socks_port = 1819;
+        raw.http_port = 1820;
+        let hops = [
+            hop(FcaeProtocol::WireGuard, false),
+            hop(FcaeProtocol::Tor, false),
+        ];
+        raw.chain.hops = hops.as_ptr();
+        raw.chain.hop_count = hops.len() as u32;
+        let cfg = unsafe { parse(&raw) }.expect("a warp hop behind the host carries tor");
+        assert_eq!(cfg.chain.len(), 1);
+        assert_eq!(cfg.chain[0].backend, FcaeBackend::Aether);
+        assert_eq!(cfg.chain[0].protocol, FcaeProtocol::WireGuard);
+        assert_eq!(cfg.tor.mode, FcaeTorMode::Chain);
+
+        // Tor in front of the route needs the Aether engine to dial it, and
+        // the host here is Xray.
+        let hops = [
+            hop(FcaeProtocol::Tor, false),
+            hop(FcaeProtocol::Masque, false),
+        ];
+        raw.chain.hops = hops.as_ptr();
+        let error = unsafe { parse(&raw) }.expect_err("tor cannot dial a non-Aether host");
+        assert!(error.to_string().contains("in front of Xray"), "{error}");
+
+        // A run of Aether hops behind hosts that are not Aether is still one
+        // engine: two saved cores carry it, and Tor rides inside it.
+        let core = |backend: FcaeBackend| FcaeChainHop {
+            backend,
+            protocol: FcaeProtocol::Auto,
+            h2_enabled: false,
+            config_ref: std::ptr::null(),
+        };
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.backend = FcaeBackend::Xray;
+        raw.socks_port = 1819;
+        raw.http_port = 1820;
+        let hops = [
+            core(FcaeBackend::SingBox),
+            hop(FcaeProtocol::WireGuard, false),
+            hop(FcaeProtocol::Tor, false),
+        ];
+        raw.chain.hops = hops.as_ptr();
+        raw.chain.hop_count = hops.len() as u32;
+        let cfg = unsafe { parse(&raw) }.expect("two cores carry one Aether engine and its tor");
+        assert_eq!(cfg.chain.len(), 2);
+        assert_eq!(cfg.chain[0].backend, FcaeBackend::SingBox);
+        assert_eq!(cfg.chain[1].backend, FcaeBackend::Aether);
+        assert_eq!(cfg.chain[1].protocol, FcaeProtocol::WireGuard);
+        assert_eq!(cfg.tor.mode, FcaeTorMode::Chain);
+
+        // The same hosts, with the Aether layers apart: two engines.
+        let hops = [
+            hop(FcaeProtocol::WireGuard, false),
+            core(FcaeBackend::SingBox),
+            hop(FcaeProtocol::Tor, false),
+        ];
+        raw.chain.hops = hops.as_ptr();
+        let error = unsafe { parse(&raw) }.expect_err("aether on both sides of a hop");
+        assert!(error.to_string().contains("another hop between"), "{error}");
     }
 
     #[test]
