@@ -121,11 +121,23 @@
                     android:gravity="center"
                     android:orientation="horizontal">
 
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnConnect"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_weight="2"
+                        android:text="CONNECT"
+                        android:textAllCaps="false"
+                        android:textSize="14sp" />
+
+                    <!-- Pause and resume sit after CONNECT, the way the desktop
+                         row reads: the session's own button first, the TUN
+                         switch beside it. -->
                     <LinearLayout
                         android:id="@+id/layoutTunPauseResume"
                         android:layout_width="0dp"
                         android:layout_height="match_parent"
-                        android:layout_marginEnd="6dp"
+                        android:layout_marginStart="6dp"
                         android:layout_weight="1"
                         android:orientation="horizontal"
                         android:visibility="gone">
@@ -148,15 +160,6 @@
                             android:textSize="13sp"
                             android:visibility="gone" />
                     </LinearLayout>
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnConnect"
-                        android:layout_width="0dp"
-                        android:layout_height="match_parent"
-                        android:layout_weight="2"
-                        android:text="CONNECT"
-                        android:textAllCaps="false"
-                        android:textSize="14sp" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -773,6 +776,22 @@
 
             <Spinner
                 android:id="@+id/spinnerEngineLog"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:popupBackground="#FF1E1E2C" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Xray / sing-box log level"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <Spinner
+                android:id="@+id/spinnerCoreLog"
                 android:layout_width="match_parent"
                 android:layout_height="48dp"
                 android:layout_marginTop="4dp"
@@ -1632,19 +1651,12 @@
                 android:textSize="16sp"
                 android:textStyle="bold" />
             <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="Tor routing"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-            <Spinner
-                android:id="@+id/spinnerTor"
                 android:layout_width="match_parent"
-                android:layout_height="48dp"
+                android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:popupBackground="#FF1E1E2C" />
+                android:text="Tor runs when the route contains it: pick the Tor protocol, or add Tor as an exit in the chain. Below is how its own listeners and bridges are set up."
+                android:textColor="#FF9AA3B5"
+                android:textSize="12sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

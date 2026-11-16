@@ -351,7 +351,7 @@ typedef struct {
  * UI owns that document; positions in it are what `config_ref` points at. */
 typedef struct {
     const char     *profile;      /* share link or native config JSON       */
-    FcaeEngineLog   log_level;    /* the core's own log verbosity           */
+    FcaeEngineLog   log_level;    /* the core's own log verbosity; 0=silent */
     const char     *library;      /* saved configs JSON array, or NULL      */
     const char     *config_ref;   /* "#<index>" or a saved config's name    */
 } FcaeCore;

@@ -638,6 +638,7 @@ mod tests {
             level: Level::Warn,
             upstream,
             routing,
+            dial: None,
         }
     }
 

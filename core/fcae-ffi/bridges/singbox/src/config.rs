@@ -13,6 +13,7 @@ use fcae_runtime::sing_xray::Rules;
 use fcae_runtime::sing_xray::Level;
 use fcae_runtime::sing_xray::{CoreProfile, Outbound, Protocol, Security, Transport};
 use serde_json::{Map, Value, json};
+use std::net::IpAddr;
 
 const PROXY_TAG: &str = "proxy";
 const DIRECT_TAG: &str = "direct";
@@ -60,7 +61,7 @@ fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Result<Value, 
     }
 
     let mut outbounds = Vec::with_capacity(4);
-    outbounds.push(outbound_config(outbound, plan.upstream.is_some())?);
+    outbounds.push(outbound_config(outbound, plan.upstream.is_some(), plan.dial)?);
     if let Some(upstream) = plan.upstream {
         outbounds.push(upstream_config(upstream));
     }
@@ -95,7 +96,19 @@ fn level_name(level: Level) -> &'static str {
     }
 }
 
-fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> {
+/// One outbound. `dial` is the address the platform resolved for the profile's
+/// server: the core is given that address to connect to, while every name the
+/// hostname stood in for — SNI, Host header, gRPC authority — stays as the link
+/// spelled it.
+fn outbound_config(
+    outbound: &Outbound,
+    chained: bool,
+    dial: Option<IpAddr>,
+) -> Result<Value, String> {
+    let server = match dial {
+        Some(address) => address.to_string(),
+        None => outbound.server.clone(),
+    };
     let mut value = match &outbound.protocol {
         // `generate` refuses a link carrying Xray's VLESS encryption before this
         // point, and sing-box's grammar has no field to put it in.
@@ -103,7 +116,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
             let mut value = json!({
                 "type": "vless",
                 "tag": PROXY_TAG,
-                "server": outbound.server,
+                "server": server,
                 "server_port": outbound.port,
                 "uuid": uuid,
                 "packet_encoding": "xudp",
@@ -120,7 +133,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
         } => json!({
             "type": "vmess",
             "tag": PROXY_TAG,
-            "server": outbound.server,
+            "server": server,
             "server_port": outbound.port,
             "uuid": uuid,
             "security": security,
@@ -130,7 +143,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
         Protocol::Trojan { password } => json!({
             "type": "trojan",
             "tag": PROXY_TAG,
-            "server": outbound.server,
+            "server": server,
             "server_port": outbound.port,
             "password": password,
         }),
@@ -142,7 +155,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
             let mut value = json!({
                 "type": "shadowsocks",
                 "tag": PROXY_TAG,
-                "server": outbound.server,
+                "server": server,
                 "server_port": outbound.port,
                 "method": method,
                 "password": password,
@@ -159,7 +172,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
             let mut value = json!({
                 "type": "socks",
                 "tag": PROXY_TAG,
-                "server": outbound.server,
+                "server": server,
                 "server_port": outbound.port,
                 "version": "5",
             });
@@ -170,7 +183,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
             let mut value = json!({
                 "type": "http",
                 "tag": PROXY_TAG,
-                "server": outbound.server,
+                "server": server,
                 "server_port": outbound.port,
             });
             with_credentials(&mut value, user.as_deref(), password.as_deref());
@@ -188,7 +201,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
             let mut value = json!({
                 "type": "hysteria2",
                 "tag": PROXY_TAG,
-                "server": outbound.server,
+                "server": server,
                 "server_port": outbound.port,
                 "password": password,
             });
@@ -229,7 +242,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
             let mut value = json!({
                 "type": "tuic",
                 "tag": PROXY_TAG,
-                "server": outbound.server,
+                "server": server,
                 "server_port": outbound.port,
                 "uuid": uuid,
                 "password": password,
@@ -248,7 +261,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
         Protocol::AnyTls { password } => json!({
             "type": "anytls",
             "tag": PROXY_TAG,
-            "server": outbound.server,
+            "server": server,
             "server_port": outbound.port,
             "password": password,
         }),
@@ -262,7 +275,18 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
             // said `security=none` still gets TLS rather than a core that exits
             // at startup.
             if is_tls_by_contract(&outbound.protocol) {
-                value["tls"] = json!({"enabled": true});
+                // These protocols handshake in TLS whatever the link said, and
+                // the certificate is the name's: with an address in place of the
+                // hostname, the name has to be spelled out or the core would
+                // present the address as the SNI.
+                let mut tls = Map::new();
+                tls.insert("enabled".into(), json!(true));
+                if dial.is_some() {
+                    if let Some(name) = host_of(&outbound.server) {
+                        tls.insert("server_name".into(), json!(name));
+                    }
+                }
+                value["tls"] = Value::Object(tls);
             }
         }
     }
@@ -270,7 +294,7 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
         value["tls"]["certificate_public_key_sha256"] = json!([pin]);
     }
 
-    if let Some(transport) = transport_config(outbound)? {
+    if let Some(transport) = transport_config(outbound, dial.is_some())? {
         value["transport"] = transport;
     }
     if chained {
@@ -346,7 +370,10 @@ fn tls_config(security: &Security, server: &str) -> Option<Value> {
 }
 
 /// The outbound's `transport` block, or `None` when it speaks over plain TCP.
-fn transport_config(outbound: &Outbound) -> Result<Option<Value>, String> {
+fn transport_config(outbound: &Outbound, dialled: bool) -> Result<Option<Value>, String> {
+    // With an address in place of the hostname, a Host header the link left out
+    // has to name the host itself: the core would otherwise send the address.
+    let name = dialled.then(|| host_of(&outbound.server)).flatten();
     let transport = match &outbound.transport {
         Transport::Tcp => return Ok(None),
         Transport::Ws {
@@ -358,7 +385,7 @@ fn transport_config(outbound: &Outbound) -> Result<Option<Value>, String> {
             // sing-box's WebSocket block has no `host` field: the Host header
             // is one of the headers it sends.
             let mut headers = Map::new();
-            if let Some(host) = host {
+            if let Some(host) = host.clone().or_else(|| name.clone()) {
                 headers.insert("Host".into(), json!(host));
             }
             let mut ws = Map::new();
@@ -382,7 +409,7 @@ fn transport_config(outbound: &Outbound) -> Result<Option<Value>, String> {
             // inside the path's query by that core alone — so the path goes out
             // as the link spelled it and nothing pretends to set one here.
             upgrade.insert("path".into(), json!(path));
-            if let Some(host) = host {
+            if let Some(host) = host.clone().or_else(|| name.clone()) {
                 upgrade.insert("host".into(), json!(host));
             }
             Value::Object(upgrade)
@@ -391,7 +418,7 @@ fn transport_config(outbound: &Outbound) -> Result<Option<Value>, String> {
             let mut http = Map::new();
             http.insert("type".into(), json!("http"));
             http.insert("path".into(), json!(path));
-            if let Some(host) = host {
+            if let Some(host) = host.clone().or_else(|| name.clone()) {
                 http.insert("host".into(), json!([host]));
             }
             if let Some(method) = method {
@@ -577,7 +604,7 @@ fn rewrite_listener(inbound: &mut Value, address: std::net::SocketAddr) -> Resul
 
 fn host_of(server: &str) -> Option<String> {
     server
-        .parse::<std::net::IpAddr>()
+        .parse::<IpAddr>()
         .is_err()
         .then(|| server.to_string())
 }
@@ -613,11 +640,51 @@ mod tests {
             level: Level::Warn,
             upstream,
             routing,
+            dial: None,
         }
     }
 
     fn build(plan: &Plan<'_>) -> Value {
         generate(plan).expect("config builds")
+    }
+
+    /// The platform resolved the server for the core: the config dials that
+    /// address and still presents the names the hostname stood for, because the
+    /// certificate, the Host header and the authority belong to the name.
+    #[test]
+    fn a_resolved_server_keeps_every_name_it_stood_for() {
+        let profile = Profile::parse(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@front.example.net:443\
+             ?type=ws&path=%2Fray&host=cdn.example.com&security=tls#node",
+        )
+        .expect("profile parses");
+        let routing = routing();
+        let mut plan = plan(&profile, &routing, None);
+        plan.dial = Some("203.0.113.7".parse().expect("an address"));
+        let config = build(&plan);
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["server"], "203.0.113.7");
+        assert_eq!(outbound["tls"]["server_name"], "cdn.example.com");
+        assert_eq!(outbound["transport"]["headers"]["Host"], "cdn.example.com");
+    }
+
+    /// Trojan handshakes in TLS whatever the link said, so a config that never
+    /// named a name has one filled in from the server it no longer dials by
+    /// name: the alternative is presenting the address as the SNI.
+    #[test]
+    fn a_tls_by_contract_link_names_its_server_when_the_address_replaces_it() {
+        let profile = Profile::parse(
+            "trojan://pass@front.example.net:443?security=none&type=ws&path=%2Fws#node",
+        )
+        .expect("profile parses");
+        let routing = routing();
+        let mut plan = plan(&profile, &routing, None);
+        plan.dial = Some("203.0.113.7".parse().expect("an address"));
+        let config = build(&plan);
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["server"], "203.0.113.7");
+        assert_eq!(outbound["tls"]["server_name"], "front.example.net");
+        assert_eq!(outbound["transport"]["headers"]["Host"], "front.example.net");
     }
 
     #[test]

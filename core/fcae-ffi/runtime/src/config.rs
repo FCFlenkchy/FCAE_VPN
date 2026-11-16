@@ -192,7 +192,9 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             profile: None,
-            log_level: FcaeEngineLog::Info,
+            // Silent unless asked otherwise: a core at info writes a line per
+            // connection through the app's own log ring.
+            log_level: FcaeEngineLog::Off,
             library: SavedConfigs::default(),
             selection: None,
         }
@@ -1046,32 +1048,42 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             "socks_port and http_port are both {}; they must differ", cfg.socks_port
         )));
     }
-    let aether_provides_udp = |protocol| {
-        protocol != FcaeProtocol::Tor && !matches!(raw.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain)
-    };
-    let mut previous_udp = match cfg.backend {
-        FcaeBackend::Aether => aether_provides_udp(cfg.protocol),
-        FcaeBackend::Psiphon => false,
-        // A generated SOCKS5 inbound always offers UDP ASSOCIATE.
-        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox => true,
-    };
-    for exit in cfg.chain.clone() {
+    // A hop behind Tor or Psiphon reaches the internet over a CONNECT stream, so
+    // it cannot reach an endpoint that answers on datagrams alone. That is not a
+    // reason to refuse the session: the engine's own Tor carrier answers the same
+    // way, by running MASQUE and MASQUE-in-MASQUE over http/2, which rides that
+    // stream. The hop is moved onto the same carrier, and only a hop whose
+    // endpoint has no TCP form at all is refused.
+    let mut previous_udp = hop_carries_udp(&cfg);
+    for index in 0..cfg.chain.len() {
+        let exit = cfg.chain[index].clone();
         let mut hop = cfg.clone();
         hop.backend = exit.backend;
         hop.protocol = exit.protocol;
         hop.obfuscation.h2_enabled = exit.h2_enabled;
         hop.chain.clear();
         if hop.upstream_requires_udp() && !previous_udp {
-            return Err(CoreError::InvalidConfig(format!(
-                "the {} hop requires a UDP-capable upstream; the preceding backend is TCP-only",
+            let rides_tcp = exit.backend == FcaeBackend::Aether
+                && matches!(
+                    exit.protocol,
+                    FcaeProtocol::Masque | FcaeProtocol::MasqueInMasque | FcaeProtocol::WarpInMasque
+                );
+            if !rides_tcp {
+                return Err(CoreError::InvalidConfig(format!(
+                    "the {} hop answers on UDP alone, and the hop above it carries TCP only, \
+                     so it can never be reached through it; use a MASQUE or WARP-in-MASQUE \
+                     hop instead",
+                    exit.label()
+                )));
+            }
+            log::info!(
+                "[session] the hop above carries TCP only; {} rides the http/2 carrier",
                 exit.label()
-            )));
+            );
+            cfg.chain[index].h2_enabled = true;
+            hop.obfuscation.h2_enabled = true;
         }
-        previous_udp = match exit.backend {
-            FcaeBackend::Psiphon => false,
-            FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox => true,
-            FcaeBackend::Aether => aether_provides_udp(exit.protocol),
-        };
+        previous_udp = hop_carries_udp(&hop);
     }
 
     // The built-in cores (Xray-core, sing-box) carry their own uplink, so their
@@ -1290,6 +1302,26 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     }
 
     Ok(cfg)
+}
+
+/// Whether a hop can carry datagrams for the hop behind it.
+///
+/// Tor -- the protocol, and either Tor mode that serves the user-facing
+/// listener -- and Psiphon carry CONNECT streams only. Everything else does:
+/// MASQUE over http/2 rides a stream, but its CONNECT-UDP still delivers
+/// datagrams, which is why the carrier is the transport rather than the
+/// question. Unlike [`aether_carrier_is_udp`], this asks what the hop *gives*
+/// its downstream, not what it needs from its upstream.
+fn hop_carries_udp(hop: &SessionConfig) -> bool {
+    match hop.backend {
+        FcaeBackend::Aether => {
+            hop.protocol != FcaeProtocol::Tor
+                && !matches!(hop.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain)
+        }
+        FcaeBackend::Psiphon => false,
+        // A generated SOCKS5 inbound always offers UDP ASSOCIATE.
+        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox => true,
+    }
 }
 
 /// Whether the Aether carrier dials the network over UDP. Tor Only has no
@@ -2180,6 +2212,34 @@ mod tests {
         raw.chain.hops = hops.as_ptr();
         raw.chain.hop_count = 1;
         assert!(unsafe { parse(&raw) }.is_ok());
+    }
+
+    #[test]
+    fn a_hop_behind_tor_rides_http2_and_an_udp_only_one_is_refused() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        let tor = FcaeChainHop {
+            backend: FcaeBackend::Aether, protocol: FcaeProtocol::Tor, h2_enabled: false,
+            config_ref: std::ptr::null(),
+        };
+        let masque = FcaeChainHop {
+            backend: FcaeBackend::Aether, protocol: FcaeProtocol::Masque, h2_enabled: false,
+            config_ref: std::ptr::null(),
+        };
+        let hops = [tor, masque];
+        raw.chain.hops = hops.as_ptr();
+        raw.chain.hop_count = hops.len() as u32;
+        let cfg = unsafe { parse(&raw) }.expect("a MASQUE hop behind tor runs over http/2");
+        assert!(cfg.chain[1].h2_enabled);
+
+        let wireguard = FcaeChainHop {
+            backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false,
+            config_ref: std::ptr::null(),
+        };
+        let only_udp = [tor, wireguard];
+        raw.chain.hops = only_udp.as_ptr();
+        assert!(unsafe { parse(&raw) }.is_err());
     }
 
     #[test]

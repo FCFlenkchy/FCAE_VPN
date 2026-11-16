@@ -48,6 +48,9 @@ impl Dialect for XrayDialect {
         set_log: xray_set_log,
     };
     const LOG_SINK: unsafe extern "C" fn(c_int, *const c_char) = log_sink;
+    // Go's resolver falls back to the platform's own when it cannot read
+    // /etc/resolv.conf, which is what Android hands it.
+    const RESOLVES_SERVER: bool = true;
 
     fn generate(plan: &Plan<'_>) -> std::result::Result<serde_json::Value, String> {
         config::generate(plan)

@@ -48,6 +48,8 @@ impl Dialect for SingBoxDialect {
         set_log: sb_set_log,
     };
     const LOG_SINK: unsafe extern "C" fn(c_int, *const c_char) = log_sink;
+    // The core's own DNS transport reads /etc/resolv.conf and nothing else.
+    const RESOLVES_SERVER: bool = false;
 
     fn generate(plan: &Plan<'_>) -> std::result::Result<serde_json::Value, String> {
         config::generate(plan)

@@ -231,6 +231,11 @@ struct AppState {
     // The FFI's own log callback level is fixed at info and not exposed.
     int  engine_log  = 3;
 
+    // Verbosity of the core the route runs (FcaeEngineLog; Xray, sing-box):
+    // 0 = silent, which is the default. Both cores log a line per connection
+    // at info, so the setting is here for when one of them needs watching.
+    int  core_log    = 0;
+
     // Verbosity of the tun2socks data plane (FcaeT2sLog): 1 = silent ..
     // 5 = debug. The netstack logs a line per connection when verbose,
     // which is noise for daily use; silent still lets error lines through.
@@ -285,8 +290,8 @@ struct AppState {
     bool firefox_totp = false;
     bool firefox_remove_in_flight = false;
 
-    // Tor egress (inside the Aether engine, not a separate backend).
-    int  tor_mode    = 0;        // FcaeTorMode
+    // Tor egress (inside the Aether engine, not a separate backend). Tor is a
+    // chain hop, so only its bridges and its own ports live here.
     int  tor_bridges = 0;        // FcaeTorBridges
     char tor_bridge_lines[2048] = {};
 
@@ -369,7 +374,7 @@ struct AppState {
 
     bool final_listener_is_firefox() const {
         if (!chain_transports.empty()) return chain_transports.back() == 10;
-        return backend == 2 && tor_mode != 3;
+        return backend == 2;
     }
 
     /// A saved core config by protocol-list position, or nullptr.
@@ -568,6 +573,8 @@ struct AppState {
         // references below rely on.
         build_core_library();
         c.core.library    = core_library_built.empty() ? nullptr : core_library_built.c_str();
+        c.core.log_level  = (core_log >= 0 && core_log <= 5) ? (FcaeEngineLog)core_log
+                                                             : FCAE_ENGINE_LOG_OFF;
         // A core backend with nothing to run is a start that fails, so a config
         // the engine was not sent (a draft, or one that vanished) degrades to the
         // default transport instead of refusing the session.
@@ -587,7 +594,6 @@ struct AppState {
         else if (backend >= 3)                  c.backend = FCAE_BACKEND_AETHER;
         else c.backend = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
 
-        const bool explicit_chain = !chain_transports.empty();
         // A saved-config hop is referenced rather than encoded, so its
         // references are built first and pointed at second: the hop list stays
         // in carrier-to-exit order, in one pass. A position whose config is not
@@ -602,7 +608,7 @@ struct AppState {
         }
         size_t core_ref = 0;
         chain_hops_built.clear();
-        chain_hops_built.reserve(chain_transports.size() + (!explicit_chain && backend != 1 && tor_mode == 3 ? 1 : 0));
+        chain_hops_built.reserve(chain_transports.size());
         for (int transport : chain_transports) {
             if (core_doc_index(transport) >= 0) {
                 FcaeChainHop core_hop{};
@@ -628,12 +634,6 @@ struct AppState {
                 default: hop.protocol = FCAE_PROTOCOL_GOOL; break;
             }
             chain_hops_built.push_back(hop);
-        }
-        if (!explicit_chain && backend != 1 && tor_mode == 3) {
-            FcaeChainHop psiphon{};
-            psiphon.backend = FCAE_BACKEND_PSIPHON;
-            psiphon.protocol = FCAE_PROTOCOL_AUTO;
-            chain_hops_built.push_back(psiphon);
         }
         c.chain.hops = chain_hops_built.data();
         c.chain.hop_count = (uint32_t)chain_hops_built.size();
@@ -701,15 +701,10 @@ struct AppState {
         c.aether.disable_session_ticket = disable_session_ticket;
         c.aether.disable_extension_permutation = disable_extension_permutation;
 
-        // Where does this session's traffic end: protocol Psiphon (backend
-        // 1) or egress "Psiphon through the tunnel" (tor_mode 3 on a
-        // non-Psiphon protocol). Both end at a Psiphon exit, and Psiphon
-        // exits are IPv4-only.
-        const bool proto_psiphon  = (backend == 1);
-        const bool proto_tor      = (protocol == 4);
-        const bool egress_psiphon = (!proto_psiphon && !explicit_chain && tor_mode == 3);
-        const int final_backend = !chain_hops_built.empty() ? (int)chain_hops_built.back().backend : (egress_psiphon ? 1 : backend);
-        const bool psiphon_exit   = (final_backend == 1);
+        // Where does this session's traffic end. Psiphon exits are IPv4-only,
+        // and an exit is whatever the last hop runs.
+        const int final_backend = !chain_hops_built.empty() ? (int)chain_hops_built.back().backend : backend;
+        const bool psiphon_exit = (final_backend == FCAE_BACKEND_PSIPHON);
 
         c.dns.sni = sni[0] ? sni : nullptr;
         // Desktop uses default IPv4 resolvers when this override is empty.
@@ -733,30 +728,15 @@ struct AppState {
 
         c.engine_log       = (engine_log >= 0 && engine_log <= 5) ? (FcaeEngineLog)engine_log : FCAE_ENGINE_LOG_INFO;
 
-        // Protocol Psiphon does not apply the egress combo (value kept in
-        // the UI for when the user switches back). Protocol Tor DOES combine
-        // with egress 3: the chain runs Aether(Tor-only) -> Psiphon via
-        // UpstreamProxyURL. Egress index 3 is Psiphon, not a FcaeTorMode.
-        // (The flags were computed above; the DNS override needs them too.)
-        int tm = tor_mode;
-        if ((proto_psiphon && !explicit_chain) || egress_psiphon || tm < 0 || tm > 2) tm = 0;
-        // Protocol Tor normalises tor.mode to Only inside the runtime no
-        // matter what we pass, so keep sending 0 for the non-chain case (a
-        // stale Chain value would only produce a normalization warning).
-        if (proto_tor) tm = 0;
-        c.tor.mode         = (FcaeTorMode)tm;
+        // Tor's own mode is not a setting any more: a Tor hop is a chain hop,
+        // and the runtime gives it its own mode. Only the bridges and the ports
+        // travel from here.
+        c.tor.mode         = FCAE_TOR_OFF;
         c.tor.bridges      = (tor_bridges >= 0 && tor_bridges <= 3) ? (FcaeTorBridges)tor_bridges : FCAE_TOR_BRIDGES_NONE;
         c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;
         // Field == engine default -> send 0 (defer); explicit edit -> verbatim.
         c.tor.socks_port   = (uint16_t)(tor_socks_port == kEngineDefaultTorSocksPort
                                         ? 0 : tor_socks_port);
-
-        // Egress "Psiphon through the tunnel" keeps Aether as the backend
-        // (so WARP comes up first). _reserved[0] tells the supervisor to
-        // start Psiphon next with UpstreamProxyURL = Aether SOCKS.
-        if (egress_psiphon) {
-            c._reserved[0] |= 1;
-        }
 
         if (mode == 1 && listener_http_enabled()) c._reserved[0] |= FCAE_CONFIG_TUN_HTTP;
 

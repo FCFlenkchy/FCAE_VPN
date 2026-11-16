@@ -159,6 +159,10 @@ object NativeEngine {
         firefoxLocation: String,
         firefoxServer: String,
         firefoxTransport: String,
+        // The route core's own verbosity (FcaeEngineLog):
+        // 0=silent 1=error 2=warn 3=info 4=debug 5=trace. Silent by default:
+        // Xray and sing-box write a line per connection at info.
+        coreLog: Int,
     ): Boolean
     @JvmStatic external fun nativeFirefoxCaptchaPending(): Long
     @JvmStatic external fun nativeFirefoxCaptchaImage(id: Long): String
@@ -410,6 +414,7 @@ object NativeEngine {
             chainTransports = sessionChainTransports(session),
             coreConfigs = coreConfigs,
             coreConfigId = coreConfigId,
+            coreLog = session.getIntExtra("coreLog", 0),
             firefoxAccountId = session.getStringExtra("firefoxAccountId").orEmpty(),
             firefoxLocation = session.getStringExtra("firefoxLocation").orEmpty(),
             firefoxServer = session.getStringExtra("firefoxServer").orEmpty(),

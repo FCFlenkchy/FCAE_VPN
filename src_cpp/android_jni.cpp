@@ -864,7 +864,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jstring firefoxAccountId,
     jstring firefoxLocation,
     jstring firefoxServer,
-    jstring firefoxTransport
+    jstring firefoxTransport,
+    jint coreLog
 ) {
     ensure_init();
 
@@ -1035,6 +1036,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // Verbosity of the aether engine itself. The FFI's own log callback stays
     // at info regardless -- this only changes how much the engine emits.
     cfg.engine_log = (engineLog >= 0 && engineLog <= 5) ? (FcaeEngineLog)engineLog : FCAE_ENGINE_LOG_INFO;
+    // The route core's own logger (Xray, sing-box), silent unless asked for.
+    cfg.core.log_level = (coreLog >= 0 && coreLog <= 5) ? (FcaeEngineLog)coreLog : FCAE_ENGINE_LOG_OFF;
 
     // Tor's own listener, kept off the engine's and Psiphon's ports.
     // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);

@@ -125,6 +125,25 @@ impl Transport {
             Transport::Xhttp { .. } => "xhttp",
         }
     }
+
+    /// The name this transport puts on the wire, when it has one: the HTTP
+    /// `Host` a proxied session presents, which a server's certificate is
+    /// issued for whenever it is fronted.
+    pub fn presented_host(&self) -> Option<&str> {
+        match self {
+            Transport::Ws { host, .. }
+            | Transport::HttpUpgrade { host, .. }
+            | Transport::Xhttp { host, .. } => host.as_deref(),
+            // An `h2` link may list several hosts; the first is the authority.
+            Transport::H2 { host, .. } => host
+                .as_deref()
+                .and_then(|hosts| hosts.split(',').next())
+                .map(str::trim)
+                .filter(|host| !host.is_empty()),
+            Transport::Grpc { authority, .. } => authority.as_deref(),
+            Transport::Tcp | Transport::Kcp { .. } => None,
+        }
+    }
 }
 
 /// The outer security layer of a single outbound.
@@ -613,13 +632,14 @@ fn parse_vless(rest: &str) -> Result<Outbound, String> {
             ));
         }
     }
-    let security = parse_security(&query, &server, false)?;
+    let transport = parse_transport(&query)?;
+    let security = parse_security(&query, &server, &transport, false)?;
     if flow.is_some() && matches!(security, Security::None) {
         return Err("vless flow requires tls or reality security".into());
     }
     Ok(Outbound {
         protocol: Protocol::Vless { uuid, flow, encryption },
-        transport: parse_transport(&query)?,
+        transport,
         security,
         finalmask: parse_finalmask(&query)?,
         server,
@@ -785,14 +805,15 @@ fn parse_vmess_uri(body: &str, remark: Option<String>) -> Result<Outbound, Strin
         return Err(format!("vmess id {:?} is not a UUID", excerpt(&uuid)));
     }
     let (server, port) = split_host_port(target, None)?;
+    let transport = parse_transport(&query)?;
     Ok(Outbound {
         protocol: Protocol::Vmess {
             uuid,
             alter_id: 0,
             security: vmess_security(query.get("scy").unwrap_or_default())?,
         },
-        transport: parse_transport(&query)?,
-        security: parse_security(&query, &server, false)?,
+        transport,
+        security: parse_security(&query, &server, &transport, false)?,
         finalmask: parse_finalmask(&query)?,
         server,
         port,
@@ -844,11 +865,12 @@ fn parse_trojan(rest: &str) -> Result<Outbound, String> {
         ));
     }
     let (server, port) = split_host_port(target, None)?;
+    let transport = parse_transport(&query)?;
     Ok(Outbound {
         protocol: Protocol::Trojan { password },
-        transport: parse_transport(&query)?,
+        transport,
         // Trojan is TLS by definition; links routinely omit `security=tls`.
-        security: parse_security(&query, &server, true)?,
+        security: parse_security(&query, &server, &transport, true)?,
         finalmask: parse_finalmask(&query)?,
         server,
         port,
@@ -931,7 +953,7 @@ fn parse_http(rest: &str, tls: bool) -> Result<Outbound, String> {
     // scheme uses.
     let security = if tls {
         query.remove("security");
-        parse_security(&query, &server, true)?
+        parse_security(&query, &server, &Transport::Tcp, true)?
     } else {
         Security::None
     };
@@ -1288,7 +1310,24 @@ fn parse_transport(query: &Query) -> Result<Transport, String> {
     Ok(transport)
 }
 
-fn parse_security(query: &Query, server: &str, implicit_tls: bool) -> Result<Security, String> {
+fn parse_security(
+    query: &Query,
+    server: &str,
+    transport: &Transport,
+    implicit_tls: bool,
+) -> Result<Security, String> {
+    // The name a certificate is issued for. Links spell it out in `sni` only
+    // when it differs from the host the transport already presents, so a
+    // fronted config — a WebSocket `host`, an `h2` authority, a gRPC authority
+    // — is measured against that host and not against the address it dials,
+    // which is very often an origin server the certificate has never heard of.
+    let server_name = || {
+        query
+            .string("sni")
+            .or_else(|| query.string("peer"))
+            .or_else(|| transport.presented_host().and_then(domain_name))
+            .or_else(|| host_name(server))
+    };
     let mode = query
         .get("security")
         .map(str::to_ascii_lowercase)
@@ -1296,10 +1335,7 @@ fn parse_security(query: &Query, server: &str, implicit_tls: bool) -> Result<Sec
     match mode.as_str() {
         "" | "none" => Ok(Security::None),
         "tls" | "xtls" => Ok(Security::Tls {
-            sni: query
-                .string("sni")
-                .or_else(|| query.string("peer"))
-                .or_else(|| host_name(server)),
+            sni: server_name(),
             alpn: query.list("alpn"),
             fingerprint: query.string("fp"),
             allow_insecure: query.flag("allowinsecure") || query.flag("insecure"),
@@ -1311,10 +1347,7 @@ fn parse_security(query: &Query, server: &str, implicit_tls: bool) -> Result<Sec
             let public_key = query
                 .string("pbk")
                 .ok_or("reality needs pbk (the server public key)")?;
-            let sni = query
-                .string("sni")
-                .or_else(|| host_name(server))
-                .ok_or("reality needs sni (the camouflaged server name)")?;
+            let sni = server_name().ok_or("reality needs sni (the camouflaged server name)")?;
             // `spx` is the path the camouflage crawler is shown; the core
             // refuses anything that is not a path, so a link naming one is
             // reported here.
@@ -1510,6 +1543,12 @@ fn host_name(server: &str) -> Option<String> {
         .parse::<IpAddr>()
         .is_err()
         .then(|| server.to_string())
+}
+
+/// A name a certificate can be issued for: anything but an address literal.
+fn domain_name(text: &str) -> Option<String> {
+    let text = text.trim().trim_start_matches('[').trim_end_matches(']');
+    (!text.is_empty() && text.parse::<IpAddr>().is_err()).then(|| text.to_string())
 }
 
 fn valid_uuid(text: &str) -> bool {
@@ -1822,6 +1861,9 @@ pub struct Plan<'a> {
     pub level: Level,
     pub upstream: Option<&'a UpstreamProxy>,
     pub routing: &'a RoutingConfig,
+    /// Where the core must dial, when the platform had to resolve the server
+    /// name for it. `None` means the core resolves and dials the name itself.
+    pub dial: Option<IpAddr>,
 }
 
 /// Free loopback ports, held until every pick is made so two reservations in one
@@ -2022,6 +2064,47 @@ fn routable(ip: IpAddr) -> bool {
     !(ip.is_unspecified() || ip.is_multicast() || ip.is_loopback())
 }
 
+/// The address a core must dial in place of a hostname, or `None` when the
+/// profile already names one.
+///
+/// A core that resolves names with the platform's resolver needs no help, but
+/// sing-box's `local` DNS transport reads `/etc/resolv.conf` and nothing else:
+/// a host without that file — every Android device — leaves it querying
+/// `127.0.0.1:53` and `[::1]:53`, so no dial it makes ever leaves the device.
+/// Handing it a resolved address takes DNS out of the dial path entirely, which
+/// also keeps the lookup from being answered through the tunnel that is waiting
+/// for it.
+async fn resolve_address(server: &str, port: u16) -> CoreResult<Option<IpAddr>> {
+    if server.parse::<IpAddr>().is_ok() {
+        return Ok(None);
+    }
+    let resolved = timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((server, port)))
+        .await
+        .map_err(|_| CoreError::StartFailed(format!("resolving {server} timed out")))?
+        .map_err(|error| CoreError::StartFailed(format!("cannot resolve {server}: {error}")))?;
+    let address = preferred_address(resolved.map(|address| address.ip())).ok_or_else(|| {
+        CoreError::StartFailed(format!("{server} resolved to no usable address"))
+    })?;
+    Ok(Some(address))
+}
+
+/// The address worth dialling first: a routable IPv4 one, then a routable IPv6
+/// one, then whatever the resolver returned at all.
+fn preferred_address(addresses: impl Iterator<Item = IpAddr>) -> Option<IpAddr> {
+    let (mut v4, mut v6, mut any) = (None, None, None);
+    for address in addresses {
+        any.get_or_insert(address);
+        if routable(address) {
+            if address.is_ipv4() {
+                v4.get_or_insert(address);
+            } else {
+                v6.get_or_insert(address);
+            }
+        }
+    }
+    v4.or(v6).or(any)
+}
+
 // ---------------------------------------------------------------------------
 // In-process driving
 // ---------------------------------------------------------------------------
@@ -2050,6 +2133,13 @@ pub struct CoreFfi {
 pub trait Dialect: Send + Sync + 'static {
     /// Human-readable name for messages.
     const DISPLAY: &'static str;
+    /// Whether the core resolves an outbound server name itself, with the
+    /// platform's resolver behind it. Xray-core does — Go's resolver falls back
+    /// to the system's, so a device without `/etc/resolv.conf` still resolves.
+    /// sing-box does not: its `local` DNS transport parses that file and, on a
+    /// host that has none, queries `127.0.0.1:53` and `[::1]:53`, where nothing
+    /// answers. Such a core is handed an address instead.
+    const RESOLVES_SERVER: bool;
     /// The shim this core exports from `libfcae_go_bridge`.
     const FFI: CoreFfi;
     /// The trampoline that receives this core's log lines.
@@ -2117,14 +2207,42 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
         Some((server, port)) => resolve_peer(config, server, port).await?,
         None => None,
     };
+    // A core that cannot resolve is handed addresses: the profile's server and,
+    // when the session is chained, the upstream proxy's host.
+    let mut dial = None;
+    let mut pinned_upstream = None;
+    if !D::RESOLVES_SERVER {
+        if let CoreProfile::Link(outbound) = profile {
+            dial = resolve_address(&outbound.server, outbound.port)
+                .await
+                .map_err(|error| match error {
+                    // The platform is the only resolver this core has, so a
+                    // name it cannot resolve is a refusal worth naming the
+                    // core in: nothing downstream would explain it better.
+                    CoreError::StartFailed(text) => {
+                        CoreError::StartFailed(format!("{}: {text}", D::DISPLAY))
+                    }
+                    other => other,
+                })?;
+        }
+        if let Some(upstream) = config.upstream_proxy.as_ref() {
+            if let Some(address) = resolve_address(&upstream.host, upstream.port).await? {
+                let mut pinned = upstream.clone();
+                pinned.host = address.to_string();
+                pinned_upstream = Some(pinned);
+            }
+        }
+    }
+    let upstream = pinned_upstream.as_ref().or(config.upstream_proxy.as_ref());
 
     let generated = D::generate(&Plan {
         profile,
         socks,
         http,
         level: Level::of(config.core.log_level),
-        upstream: config.upstream_proxy.as_ref(),
+        upstream,
         routing: &config.routing,
+        dial,
     })
     .map_err(|error| CoreError::InvalidConfig(format!("{}: {error}", D::DISPLAY)))?;
     let body = serde_json::to_string(&generated).map_err(|error| {
@@ -3101,6 +3219,71 @@ mod tests {
             other => panic!("expected reality, got {other:?}"),
         }
         assert_eq!(outbound.remark.as_deref(), Some("tokyo"));
+    }
+
+    /// A WebSocket link whose `host` fronts a different address: the Host
+    /// header is the name the certificate belongs to, so without an explicit
+    /// `sni` that header is what TLS has to be measured against. Reading the
+    /// name off the address instead fails the handshake on every fronted
+    /// config, which is how a link that works elsewhere stops working here.
+    #[test]
+    fn a_fronted_websocket_link_measures_tls_against_its_host() {
+        let outbound = link(&format!(
+            "vless://{UUID}@front.example.net:443\
+             ?path=%2F9597g17a-g092-470a-b33p-f092e781716a&security=tls&alpn=http%2F1.1\
+             &encryption=none&insecure=0&host=cdn.example.org&fp=firefox&type=ws\
+             &allowInsecure=0#F"
+        ));
+        assert_eq!(
+            outbound.transport,
+            Transport::Ws {
+                path: "/9597g17a-g092-470a-b33p-f092e781716a".into(),
+                host: Some("cdn.example.org".into()),
+                max_early_data: None,
+                early_data_header: None,
+            }
+        );
+        match outbound.security {
+            Security::Tls {
+                sni,
+                alpn,
+                fingerprint,
+                allow_insecure,
+                ..
+            } => {
+                assert_eq!(sni.as_deref(), Some("cdn.example.org"));
+                assert_eq!(alpn, vec!["http/1.1".to_string()]);
+                assert_eq!(fingerprint.as_deref(), Some("firefox"));
+                assert!(!allow_insecure);
+            }
+            other => panic!("expected tls, got {other:?}"),
+        }
+    }
+
+    /// An address is not a name: a link that spells its host as one keeps the
+    /// server's own name as the SNI, exactly as both cores would.
+    #[test]
+    fn an_address_host_is_not_mistaken_for_a_name() {
+        let outbound = link(&format!(
+            "vless://{UUID}@example.com:443?type=ws&host=203.0.113.7&security=tls"
+        ));
+        match outbound.security {
+            Security::Tls { sni, .. } => assert_eq!(sni.as_deref(), Some("example.com")),
+            other => panic!("expected tls, got {other:?}"),
+        }
+    }
+
+    /// The address a core is handed is the first one a dial can use: a routable
+    /// IPv4 address, then IPv6, and only then whatever else the resolver said.
+    #[test]
+    fn an_address_is_chosen_in_the_order_a_dial_can_use_it() {
+        let loopback = "::1".parse::<IpAddr>().expect("an address");
+        let v6 = "2001:db8::1".parse::<IpAddr>().expect("an address");
+        let v4 = "203.0.113.7".parse::<IpAddr>().expect("an address");
+        assert_eq!(preferred_address([loopback, v6, v4].into_iter()), Some(v4));
+        assert_eq!(preferred_address([loopback, v6].into_iter()), Some(v6));
+        assert_eq!(preferred_address([loopback].into_iter()), Some(loopback));
+        assert_eq!(preferred_address(std::iter::empty()), None);
     }
 
     #[test]

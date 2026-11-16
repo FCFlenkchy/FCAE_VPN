@@ -98,6 +98,10 @@ static bool s_legacy_firefox_tun_http = false;
 static bool s_loaded_legacy_firefox_tun_http = false;
 static int s_loaded_legacy_chain_count = -1;
 static int s_loaded_legacy_chain_exits[3] = {};
+// The routing mode Tor and Psiphon used to have. It is read only to turn an old
+// file into the chain that describes the same route, and is never written back:
+// the mode is not a setting any more, the route is.
+static int s_loaded_tor_mode = 0;
 
 // The UI fingerprint lets platform loops skip frames whose pixels would not change.
 
@@ -527,8 +531,8 @@ static uint64_t config_signature() {
     h = fnv_value(h, g_app.check_prereleases);
     h = fnv_value(h, g_app.sys_profile);
     h = fnv_value(h, g_app.engine_log);
+    h = fnv_value(h, g_app.core_log);
     h = fnv_value(h, g_app.t2s_log);
-    h = fnv_value(h, g_app.tor_mode);
     h = fnv_value(h, g_app.tor_bridges);
     h = fnv_cstr(h, g_app.tor_bridge_lines);
     h = fnv_cstr(h, g_app.team_name);
@@ -616,8 +620,8 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.ech_enabled);
     h = fnv_value(h, g_app.sys_profile);
     h = fnv_value(h, g_app.engine_log);
+    h = fnv_value(h, g_app.core_log);
     h = fnv_value(h, g_app.t2s_log);
-    h = fnv_value(h, g_app.tor_mode);
     h = fnv_value(h, g_app.tor_bridges);
     h = fnv_cstr(h, g_app.tor_bridge_lines);
     h = fnv_cstr(h, g_app.tun_mtu);
@@ -1138,6 +1142,14 @@ static constexpr size_t kMaxCoreConfigText = 128 * 1024;
 // positions against it before the UI helpers are in scope.
 static int transport_count();
 static bool transport_is_core(int transport);
+static int current_transport();
+static void apply_transport(int transport);
+
+/// Positions in the protocol list that are hops and never sessions. Tor and
+/// Psiphon only exist behind a carrier and in front of an exit, so a route
+/// names them among its exits; the carrier is the protocol above them.
+static constexpr int kTorTransport = 4;
+static constexpr int kPsiphonTransport = 5;
 
 // atoi wraps out-of-range and negative values; a config line saying
 // socks_port=-1 would otherwise bind port 65535. Keep the previous value
@@ -1329,8 +1341,9 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "check_prereleases") g_app.check_prereleases = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
     else if (key == "engine_log") g_app.engine_log = atoi(val.c_str());
+    else if (key == "core_log") g_app.core_log = atoi(val.c_str());
     else if (key == "tun2socks_log") g_app.t2s_log = atoi(val.c_str());
-    else if (key == "tor_mode") g_app.tor_mode = atoi(val.c_str());
+    else if (key == "tor_mode") s_loaded_tor_mode = atoi(val.c_str());
     else if (key == "tor_bridges") g_app.tor_bridges = atoi(val.c_str());
     else if (key == "tor_bridge_lines")
         snprintf(g_app.tor_bridge_lines, sizeof(g_app.tor_bridge_lines), "%s", val.c_str());
@@ -1484,8 +1497,8 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "check_prereleases=%d\n", g_app.check_prereleases ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
     fprintf(f, "engine_log=%d\n", g_app.engine_log);
+    fprintf(f, "core_log=%d\n", g_app.core_log);
     fprintf(f, "tun2socks_log=%d\n", g_app.t2s_log);
-    fprintf(f, "tor_mode=%d\n", g_app.tor_mode);
     fprintf(f, "tor_bridges=%d\n", g_app.tor_bridges);
     // The cfg file is line-based, so newlines in a value would corrupt it on
     // reload. The engine accepts ';' as a bridge-line separator too, so store
@@ -1567,6 +1580,7 @@ static bool load_config_from(const std::string& path) {
     // is for every other setting.
     g_app.core_configs.clear();
     s_loaded_chain_transports = false;
+    s_loaded_tor_mode = 0;
     s_loaded_socks_port = false;
     s_loaded_http_port = false;
     s_loaded_firefox_socks_port = false;
@@ -1644,9 +1658,47 @@ static bool load_config_from(const std::string& path) {
             g_app.chain_transports.push_back(backend == 1 ? 5 : backend == 2 ? 10 : 0);
         }
     }
-    if (g_app.tor_mode == 3) {
-        if (g_app.chain_transports.empty() && g_app.backend != 1) g_app.chain_transports.push_back(5);
-        g_app.tor_mode = 0;
+    // The protocol is the route's outermost element and the chain is what rides
+    // it, so Tor and Psiphon are as valid there as MASQUE -- they are simply not
+    // a route on their own. What used to be the engine's Tor routing mode says
+    // the same thing in that one order, and is rewritten once: 1 = Tor behind the
+    // tunnel, 2 = the tunnel behind Tor, 3 = the Psiphon egress. The mode itself
+    // is no longer written back.
+    {
+        const int stored = current_transport();
+        const bool stored_is_hop = stored == kTorTransport || stored == kPsiphonTransport;
+        bool repaired = false;
+        // The hop the old mode added behind the carrier the profile keeps. Mode 2
+        // is the one that moves the carrier itself: Tor carries there, so Tor is
+        // the protocol and the transport the profile names is what rides it.
+        int exit_hop = -1;
+        if (s_loaded_tor_mode == 2) {
+            apply_transport(kTorTransport);
+            exit_hop = stored_is_hop ? 0 : stored;
+        } else if (s_loaded_tor_mode == 1) {
+            exit_hop = kTorTransport;
+        } else if (s_loaded_tor_mode == 3) {
+            exit_hop = kPsiphonTransport;
+        }
+        if (exit_hop >= 0 && g_app.chain_transports.empty()) {
+            // A hop never rides a copy of itself: where the carrier the profile
+            // keeps is already that hop, the WARP transport becomes the exit it
+            // used to sit on instead.
+            g_app.chain_transports.push_back(exit_hop == current_transport() ? 0 : exit_hop);
+            repaired = true;
+        }
+        // A route whose carrier is Tor or Psiphon needs something behind it, so
+        // what used to be a standalone session becomes that carrier with the
+        // WARP transport as its exit.
+        const int carrier = current_transport();
+        if ((carrier == kTorTransport || carrier == kPsiphonTransport)
+            && g_app.chain_transports.empty()) {
+            g_app.chain_transports.push_back(0);
+            repaired = true;
+        }
+        s_loaded_tor_mode = 0;
+        if (repaired)
+            g_app.add_log(4, "[ui] the saved Tor/Psiphon route was rewritten as a chain");
     }
     // A saved config only counts when it has a name and a body: the per-field
     // keys of a half-written file must not become anonymous protocol entries.
@@ -3525,6 +3577,17 @@ static void render_core_configs() {
     core_listener_block(0);
     core_listener_block(1);
     ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Logging");
+    ImGui::TextWrapped(
+        "How much the core writes to the console, through its own logger. Both cores write a "
+        "line per connection at info, so they stay silent until asked otherwise; a core that "
+        "will not start reports why either way.");
+    ImGui::PushItemWidth(200);
+    const char* core_logs[] = { "Silent", "Error", "Warn", "Info", "Debug", "Trace" };
+    ImGui::Combo("Core log level", &g_app.core_log, core_logs, 6);
+    ImGui::PopItemWidth();
+    ImGui::Spacing();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
@@ -3550,6 +3613,7 @@ static void render_protocol_editor() {
     const char* const* names = labels.pointers.data();
     const int transport_choices = (int)labels.pointers.size();
     if (s_protocol_draft < 0 || s_protocol_draft >= transport_choices) s_protocol_draft = 0;
+    const int protocol_before = s_protocol_draft;
     for (int i = 0; i < transport_choices; ++i) {
         // The radio carries the name alone and the tag follows it with a gap in
         // its own colour, so a saved config never reads as one long white run.
@@ -3584,6 +3648,15 @@ static void render_protocol_editor() {
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     if (changed) {
         apply_transport(s_protocol_draft);
+        // A carrier of Tor or Psiphon has to carry something: picking one for an
+        // otherwise empty route adds the WARP transport as its exit rather than
+        // leaving a session that is only the hop. Any exit can be swapped or
+        // removed afterwards, so this is a default and not a rule.
+        if (s_protocol_draft != protocol_before
+            && (s_protocol_draft == kTorTransport || s_protocol_draft == kPsiphonTransport)
+            && s_chain_draft.empty()) {
+            s_chain_draft.push_back(0);
+        }
         g_app.chain_transports = s_chain_draft;
     }
     ImGui::EndPopup();
@@ -4005,12 +4078,13 @@ void render_ui() {
                 const auto has_hop = [](int transport) {
                     return std::find(g_app.chain_transports.begin(), g_app.chain_transports.end(), transport) != g_app.chain_transports.end();
                 };
-                const bool uses_tor = (g_app.backend == 0 && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)) || has_hop(4);
-                const bool uses_psi = g_app.backend == 1 || has_hop(5) || g_app.tor_mode == 3;
+                const bool uses_tor = (g_app.backend == 0 && g_app.protocol == 4) || has_hop(4);
+                const bool uses_psi = g_app.backend == 1 || has_hop(5);
                 const bool uses_firefox = g_app.backend == 2 || has_hop(10);
-                // A core final hop serves what its config declares: with no
-                // listener switch left on, the engine refuses the session, so
-                // say which switch before it gets that far.
+                // Every hop above the exit has to hand the one below it a SOCKS5
+                // endpoint, and the exit has to answer on a listener the session
+                // actually opened. The runtime refuses the session for the same
+                // reasons -- this says which switch before anything is torn down.
                 const bool core_final = g_app.final_listener_is_core();
                 const std::string core_socks_name =
                     std::string(g_app.final_listener_core() == 4 ? "sing-box" : "Xray") + " SOCKS5";
@@ -4808,8 +4882,8 @@ void render_ui() {
             };
             if (telem.connected_peer[0])
                 ImGui::TextWrapped("Peer: %s", telem.connected_peer);
-            const int final_backend = !g_app.chain_transports.empty() ? transport_carrier(g_app.chain_transports.back())
-                : ((telem.backend != FCAE_BACKEND_PSIPHON && g_app.tor_mode == 3) ? FCAE_BACKEND_PSIPHON : telem.backend);
+            const int final_backend = !g_app.chain_transports.empty()
+                ? transport_carrier(g_app.chain_transports.back()) : telem.backend;
             const char* final_name = final_backend == FCAE_BACKEND_FIREFOX ? "Firefox"
                 : final_backend == FCAE_BACKEND_PSIPHON ? "Psiphon"
                 : final_backend == FCAE_BACKEND_SINGBOX ? "sing-box"
@@ -4820,15 +4894,20 @@ void render_ui() {
                     g_app.core_selected >= 0 ? kCoreTransportBase + g_app.core_selected : -1)
                 : g_app.core_config_at(g_app.chain_transports.back());
             if (final_core && !final_core->name.empty()) final_name = final_core->name.c_str();
+            // Tor answers on its own listeners whenever it is anywhere in the
+            // route — the protocol, or any hop of the chain.
+            const bool tor_in_route = g_app.protocol == 4
+                || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end(), 4)
+                       != g_app.chain_transports.end();
             if (final_backend != FCAE_BACKEND_PSIPHON) {
                 if (g_app.protocol != 4 && g_app.listener_socks_enabled())
                     endpoint(final_name, "SOCKS5",
                              g_app.listener_socks_port() ? g_app.listener_socks_port() : g_app.default_listener_socks_port());
                 if (g_app.protocol != 4 && g_app.listener_http_enabled())
                     endpoint(final_name, "HTTP", g_app.listener_http_port());
-                if (g_app.tor_http_enabled && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2))
+                if (g_app.tor_http_enabled && tor_in_route)
                     endpoint("Tor", "HTTP", g_app.tor_http_port);
-                if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)
+                if (tor_in_route)
                     endpoint("Tor", "SOCKS5", g_app.tor_socks_port ? g_app.tor_socks_port : 1821);
             }
             if (final_backend == FCAE_BACKEND_PSIPHON) {
@@ -5144,15 +5223,15 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f), "TOR SETTINGS (AETHER)");
             ImGui::Separator();
-            static const char* kTorRoutingModes[3] = {
-                "Off",
-                "Tor through the tunnel",
-                "Tunnel through Tor (MASQUE only)",
-            };
-            if (g_app.tor_mode < 0 || g_app.tor_mode > 2) g_app.tor_mode = 0;
-            ImGui::Combo("Tor routing", &g_app.tor_mode, kTorRoutingModes, 3);
-            // All Tor knobs stay editable in every combo; the engine
-            // ignores them when no Tor is in play (to_config normalises).
+            // Tor is a hop, not a routing mode: an exit of the ordered chain is
+            // what puts traffic on the Tor network, and the chain decides what
+            // that Tor rides on. The engine's own routing modes are gone from
+            // here for that reason.
+            ImGui::TextWrapped(
+                "Tor runs when the route contains it: add Tor as an exit in the chain, behind the "
+                "protocol above it. What follows is how its own listeners and bridges are set up.");
+            // All Tor knobs stay editable; the engine ignores them when no Tor
+            // is in play (to_config normalises).
             ImGui::Checkbox("Tor SOCKS5 proxy", &g_app.tor_socks_enabled);
             ImGui::Checkbox("Tor HTTP proxy", &g_app.tor_http_enabled);
             ImGui::InputInt("Tor HTTP port", &g_app.tor_http_port, 0, 0);
@@ -5164,9 +5243,6 @@ void render_ui() {
             // built-in set once a bridge family is picked; empty = "auto".
             ImGui::InputTextMultiline("##tor_bridge_lines", g_app.tor_bridge_lines,
                                       sizeof(g_app.tor_bridge_lines), ImVec2(0, 60));
-            if (g_app.tor_mode == 2 && (g_app.protocol == 1 || g_app.protocol == 2))
-                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
-                                   "Tor is TCP-only: pick MASQUE for this mode.");
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

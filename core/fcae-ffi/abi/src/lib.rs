@@ -462,7 +462,9 @@ pub struct FcaeCore {
     /// Share link (`vless://`, `vmess://`, `trojan://`, `ss://`, `socks5://`,
     /// `http://`) or a complete native config JSON object.
     pub profile: *const c_char,
-    /// The core's own log verbosity (`FcaeEngineLog`). Defaults to `Info`.
+    /// The core's own log verbosity (`FcaeEngineLog`). Defaults to `Off`: a
+    /// core at `Info` writes a line per connection, so silence is the default
+    /// and the setting is there for when something needs watching.
     pub log_level: FcaeEngineLog,
     /// The user's saved configs, as a JSON array of
     /// `{"name": …, "backend": "xray"|"sing-box", "config": …}` objects — the

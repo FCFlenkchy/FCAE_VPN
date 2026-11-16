@@ -212,10 +212,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerScan: Spinner
     private lateinit var spinnerIpVersion: Spinner
     private lateinit var spinnerNoize: Spinner
-    private lateinit var spinnerTor: Spinner
     private lateinit var spinnerTorBridges: Spinner
     private lateinit var editTorBridgeLines: android.widget.EditText
     private lateinit var spinnerEngineLog: Spinner
+    private lateinit var spinnerCoreLog: Spinner
     private lateinit var spinnerT2sLog: Spinner
     private lateinit var spinnerTunEngine: Spinner
     private lateinit var textTunEngineLabel: android.widget.TextView
@@ -1346,10 +1346,10 @@ class MainActivity : AppCompatActivity() {
         spinnerScan = findViewById(R.id.spinnerScan)
         spinnerIpVersion = findViewById(R.id.spinnerIpVersion)
         spinnerNoize = findViewById(R.id.spinnerNoize)
-        spinnerTor = findViewById(R.id.spinnerTor)
         spinnerTorBridges = findViewById(R.id.spinnerTorBridges)
         editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
         spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
+        spinnerCoreLog = findViewById(R.id.spinnerCoreLog)
         spinnerT2sLog = findViewById(R.id.spinnerT2sLog)
         spinnerTunEngine = findViewById(R.id.spinnerTunEngine)
         textTunEngineLabel = findViewById(R.id.textTunEngineLabel)
@@ -1595,18 +1595,6 @@ class MainActivity : AppCompatActivity() {
             this, R.layout.spinner_dark_item,
             listOf("Auto", "Low", "Medium", "High"),
         )
-        // Tor is an egress inside the Aether engine (AETHER_TOR), not a
-        // separate backend. Positions map 1:1 onto FcaeTorMode.
-        // "Tor only" is deliberately NOT here: it is the Tor entry of the
-        // protocol list above, so it appears once.
-        spinnerTor.adapter = ArrayAdapter(
-            this, R.layout.spinner_dark_item,
-            listOf(
-                "Off",
-                "Tor through the tunnel",
-                "Tunnel through Tor (MASQUE only)",
-            ),
-        )
         // Positions map 1:1 onto FcaeTorBridges.
         spinnerTorBridges.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
@@ -1638,6 +1626,13 @@ class MainActivity : AppCompatActivity() {
             this, R.layout.spinner_dark_item,
             listOf("Off", "Error", "Warn", "Info", "Debug", "Trace"),
         )
+        // Verbosity of the route core itself (Xray, sing-box). Positions map
+        // 1:1 onto FcaeEngineLog; index 0 = silent is the default, because both
+        // cores write a line per connection at info.
+        spinnerCoreLog.adapter = ArrayAdapter(
+            this, R.layout.spinner_dark_item,
+            listOf("Silent", "Error", "Warn", "Info", "Debug", "Trace"),
+        )
         // Verbosity of the tun2socks data plane. Position p maps onto
         // FcaeT2sLog value p+1 (see t2sLogValue/t2sLogPosition): the ABI's
         // 0 = "app default" sentinel is the same thing as silent, so the UI
@@ -1660,18 +1655,6 @@ class MainActivity : AppCompatActivity() {
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
-        spinnerTorBridges.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(
-                parent: android.widget.AdapterView<*>?,
-                view: android.view.View?,
-                position: Int,
-                id: Long
-            ) {
-                applyTorLock()
-            }
-
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-        }
         // Persist the selected code before a later region refresh can rebuild
         // the adapter. The widget remains a normal Spinner; the data source is
         // fixed below rather than inferred from its lifecycle.
@@ -1685,18 +1668,6 @@ class MainActivity : AppCompatActivity() {
                 if (applyingRegionList) return
                 savedPsiphonRegion = psiphonRegionCodes.getOrElse(position) { "" }
                 prefs.edit().putString("psiphonRegion", savedPsiphonRegion).apply()
-            }
-
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-        }
-        spinnerTor.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(
-                parent: android.widget.AdapterView<*>?,
-                view: android.view.View?,
-                position: Int,
-                id: Long
-            ) {
-                applyTorLock()
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -1715,7 +1686,6 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.e("FCAE_VPN", "loadSettings failed; using defaults", t)
             Toast.makeText(this, "Settings failed to load: ${t.message}", Toast.LENGTH_LONG).show()
         }
-        applyTorLock()
 
         findViewById<TextView>(R.id.versionText).apply {
             text = "$displayVersion  |  ${if (buildIsPrerelease) "pre-release" else "release"}"
@@ -1738,8 +1708,8 @@ class MainActivity : AppCompatActivity() {
         }
         applyTunEngineVisibility()
 
-        // The protocol list owns "Tor only"; refresh egress applicability
-        // when the protocol changes.
+        // The WARP-in-WARP endpoints only apply to that protocol; refresh
+        // them when the protocol changes.
         spinnerProtocol.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: android.widget.AdapterView<*>?,
@@ -1747,10 +1717,6 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
-                // Gray unavailable egress entries (Psiphon protocol locks the
-                // combo; Tor protocol grays the two Tor entries). Do not reset
-                // the combo — restoring protocol restores the pick.
-                applyTorLock()
                 layoutGoolInner.visibility =
                     if (position in 8..9) android.view.View.VISIBLE else android.view.View.GONE
             }
@@ -2463,25 +2429,6 @@ class MainActivity : AppCompatActivity() {
         showTunEngineHint()
     }
 
-    private fun applyTorLock() {
-        if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
-        ensureTorRoutingAdapter()
-    }
-
-    /** Installs the Aether Tor routing choices without disturbing selection. */
-    private fun ensureTorRoutingAdapter() {
-        if (!::spinnerTor.isInitialized || spinnerTor.adapter != null) return
-        val labels = listOf(
-            "Off",
-            "Tor through the tunnel",
-            "Tunnel through Tor (MASQUE only)",
-        )
-        val a = android.widget.ArrayAdapter(
-            this, R.layout.spinner_dark_item, labels)
-        a.setDropDownViewResource(R.layout.spinner_dark_item)
-        spinnerTor.adapter = a
-    }
-
     private fun selectedChain(): List<Int> {
         // A position at or above the base names a saved config, and the engine
         // refuses the session over one that is not in the library it was handed.
@@ -2688,6 +2635,15 @@ class MainActivity : AppCompatActivity() {
             val position = checkedId - 1
             if (position in choices.indices && draftProtocol != position) {
                 draftProtocol = position
+                // A carrier of Tor or Psiphon has to carry something: picking
+                // one for an otherwise empty route adds the WARP transport as
+                // its exit rather than leaving a session that is only the hop.
+                // Any exit can be swapped or removed afterwards, so this is a
+                // default and not a rule.
+                if ((position == TOR_POSITION || position == PSIPHON_POSITION) && draft.isEmpty()) {
+                    draft.add(TRANSPORT_MASQUE_H3)
+                    renderRows()
+                }
                 persistProtocol()
             }
         }
@@ -2935,7 +2891,6 @@ class MainActivity : AppCompatActivity() {
         prefs.edit()
             .putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
             .apply()
-        applyTorLock()
     }
 
     /** Stored alongside the protocol so a saved config's position survives a restart. */
@@ -4411,9 +4366,9 @@ class MainActivity : AppCompatActivity() {
             spinnerScan,
             spinnerIpVersion,
             spinnerNoize,
-            spinnerTor,
             spinnerTorBridges,
             spinnerEngineLog,
+            spinnerCoreLog,
             spinnerT2sLog,
             spinnerSysprofile,
             spinnerSplitTunnel,
@@ -4442,7 +4397,7 @@ class MainActivity : AppCompatActivity() {
     private fun invalidPortSetting(): Triple<Boolean, android.widget.EditText, Boolean>? {
         val route = routeBackends()
         val transports = listOf(spinnerProtocol.selectedItemPosition) + selectedChain()
-        val torUsed = 4 in transports || effectiveTorMode() in 1..2
+        val torUsed = 4 in transports
         return listOf(
             // Whichever backend owns the final listener — Aether, Firefox, Xray or
             // sing-box — its pair is the pair that has to parse.
@@ -4485,10 +4440,10 @@ class MainActivity : AppCompatActivity() {
             putInt("scan", spinnerScan.selectedItemPosition)
             putInt("ipVersion", spinnerIpVersion.selectedItemPosition)
             putInt("noize", spinnerNoize.selectedItemPosition)
-            putInt("tor", spinnerTor.selectedItemPosition)
             putInt("torBridges", spinnerTorBridges.selectedItemPosition)
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
+            putInt("coreLog", spinnerCoreLog.selectedItemPosition)
             putInt("t2sLog", t2sLogValue())
             putInt("backend", backendFromSelection())
             // The saved config a core protocol runs, by its position in the
@@ -4594,6 +4549,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadSettings() {
+        // Before anything reads the stored protocol: the migration rewrites it.
+        migrateTorRoutingToChain()
         // A saved core config is identified by its position in the saved list,
         // which the protocol/backend pair cannot express, so it has its own key.
         val coreSelected = prefs.getInt("coreSelected", -1)
@@ -4624,26 +4581,10 @@ class MainActivity : AppCompatActivity() {
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
-        val savedTor = prefs.getInt("tor", 0)
-        if (savedTor == 3) {
-            if (!prefs.contains("chainTransports")) {
-                val chain = selectedChain().ifEmpty { listOf(5) }
-                prefs.edit()
-                    .putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
-                    .remove("chainCount").remove("chainExit0").remove("chainExit1").remove("chainExit2")
-                    .apply()
-            }
-            prefs.edit().putInt("tor", 0).apply()
-            spinnerTor.setSelection(0)
-        } else if (savedTor > 3) {
-            if (prefs.getInt("backend", 0) != 1) spinnerProtocol.setSelection(4)
-            spinnerTor.setSelection(0)
-        } else {
-            spinnerTor.setSelection(savedTor.coerceIn(0, 2))
-        }
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
+        spinnerCoreLog.setSelection(prefs.getInt("coreLog", 0))
         spinnerT2sLog.setSelection(t2sLogPosition(prefs.getInt("t2sLog", 0)))
         editTorSocksPort.setText(prefs.getString("torSocksPort", "1821"))
         editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", PsiphonTunnelService.DEFAULT_SOCKS_PORT.toString()))
@@ -4780,8 +4721,12 @@ class MainActivity : AppCompatActivity() {
         clearTransientError()
         val route = routeBackends()
         val transports = listOf(spinnerProtocol.selectedItemPosition) + selectedChain()
+        // Every hop above the exit has to hand the one below it a SOCKS5 endpoint,
+        // and the exit has to answer on a listener the session actually opened.
+        // The runtime refuses the session for the same reasons -- this says which
+        // switch before anything is torn down.
         val disabled = when {
-            (4 in transports || effectiveTorMode() in 1..2) && !switchTorSocks.isChecked -> "Tor SOCKS5"
+            4 in transports && !switchTorSocks.isChecked -> "Tor SOCKS5"
             1 in route.dropLast(1) && !switchPsiphonSocks.isChecked -> "Psiphon SOCKS5"
             2 in route.dropLast(1) && !firefoxSocksEnabled -> "Firefox SOCKS5"
             1 in route && !switchPsiphonSocks.isChecked && !switchPsiphonHttp.isChecked -> "Psiphon SOCKS5 or HTTP"
@@ -5066,10 +5011,10 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("accessEmail", editAccessEmail.text.toString().trim())
         i.putExtra("routesFile", editRoutesFile.text.toString().trim())
         i.putExtra("routesInline", editRoutesInline.text.toString().trim())
-        i.putExtra("torMode", effectiveTorMode())
         i.putExtra("torBridges", spinnerTorBridges.selectedItemPosition)
         i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
         i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
+        i.putExtra("coreLog", spinnerCoreLog.selectedItemPosition)
         i.putExtra("t2sLog", t2sLogValue())
         i.putExtra("backend", backendFromSelection())
         i.putExtra("torSocksPort", deferredTorSocksPort())
@@ -5170,10 +5115,10 @@ class MainActivity : AppCompatActivity() {
         val accessEmail = editAccessEmail.text.toString().trim()
         val routesFile = editRoutesFile.text.toString().trim()
         val routesInline = editRoutesInline.text.toString().trim()
-        val torMode = effectiveTorMode()
         val torBridges = spinnerTorBridges.selectedItemPosition
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
         val engineLog = spinnerEngineLog.selectedItemPosition
+        val coreLog = spinnerCoreLog.selectedItemPosition
         val t2sLog = t2sLogValue()
         // TUN mode only consumes it, but pass it in every mode so the native
         // side always sees one consistent session description.
@@ -5237,10 +5182,13 @@ class MainActivity : AppCompatActivity() {
                     accessEmail = accessEmail,
                     routesFile = routesFile,
                     routesInline = routesInline,
-                    torMode = torMode,
+                    // Tor is a hop now, so the engine reads it from the route and
+                    // no routing mode is sent (0 = off, which it normalises).
+                    torMode = 0,
                     torBridges = torBridges,
                     torBridgeLines = torBridgeLines,
                     engineLog = engineLog,
+                    coreLog = coreLog,
                     backend = backend,
                     torSocksPort = torSocksPort,
                     torHttpPort = torHttpPort,
@@ -6084,7 +6032,7 @@ class MainActivity : AppCompatActivity() {
                         if (finalHttpEnabled()) effectiveHttpPort().toString() else null)
                 }
             }
-            if (isTorOnly() || effectiveTorMode() in 1..2) endpoints("Tor",
+            if (routeIncludesTor()) endpoints("Tor",
                 editTorSocksPort.text.toString().trim().ifEmpty { "1821" },
                 if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
         }
@@ -6306,6 +6254,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun isFinalPsiphon(): Boolean = routeBackends().lastOrNull() == 1
 
+    /** Tor answers on its own listeners whenever it is anywhere in the route. */
+    private fun routeIncludesTor(): Boolean =
+        isTorOnly() || selectedChain().contains(4)
+
     private fun isPurePsiphon(): Boolean = isPsiphonSelected() && selectedChain().isEmpty()
 
     /**
@@ -6330,11 +6282,62 @@ class MainActivity : AppCompatActivity() {
     /** Protocol Psiphon only. Egress Psiphon starts Aether first, then the Psiphon service. */
     private fun isPsiphonSelected(): Boolean = isPsiphonProtocol()
 
-    /** Tor is an Aether setting and stays independent of the ordered backend chain. */
-    private fun effectiveTorMode(): Int {
-        if (isTorOnly() || backendFromSelection() != 0) return 0
-        val p = if (::spinnerTor.isInitialized) spinnerTor.selectedItemPosition else 0
-        return if (p in 0..2) p else 0
+    /**
+     * Tor and Psiphon are hops, never sessions: a route is a carrier with them
+     * behind it. The routing mode Tor used to have, and a protocol that named
+     * either of them, both become the chain that describes the same route, once,
+     * and the mode is never written again. The engine still takes Tor from the
+     * route: a Tor hop, or the Tor protocol it is turned into for it.
+     */
+    private fun migrateTorRoutingToChain() {
+        val saved = prefs.getInt("tor", 0)
+        // The stored protocol, as the position it stands for: prefs keep the
+        // engine's protocol id plus the h2 flag, not the list position.
+        val stored = selectionPositionFromPrefs(
+            prefs.getInt("protocol", 0),
+            prefs.getBoolean("h2", true),
+            prefs.getInt("backend", 0),
+        )
+        val hopOnly = stored == TOR_POSITION || stored == PSIPHON_POSITION
+        if (saved <= 0 && !hopOnly) {
+            if (prefs.contains("tor")) prefs.edit().remove("tor").apply()
+            return
+        }
+        val chain: MutableList<Int> = if (prefs.contains("chainTransports"))
+            NativeEngine.parseChainTransports(prefs.getString("chainTransports", "")).toMutableList()
+        else mutableListOf()
+        val editor = prefs.edit().remove("tor")
+        // The hop the old mode added behind the carrier the profile keeps. Mode 2
+        // is the one that moves the carrier itself: Tor carries there, so Tor is
+        // the protocol and the transport the profile names is what rides it.
+        var exitHop = -1
+        var carrier = stored
+        when (saved) {
+            1 -> exitHop = TOR_POSITION
+            3 -> exitHop = PSIPHON_POSITION
+            2 -> {
+                editor.putInt("protocol", TOR_PROTOCOL).putInt("backend", 0)
+                carrier = TOR_POSITION
+                exitHop = if (hopOnly) TRANSPORT_MASQUE_H3 else stored
+            }
+        }
+        // A hop never rides a copy of itself: where the carrier the profile keeps
+        // is already that hop, the WARP transport becomes the exit it used to sit
+        // on instead.
+        if (exitHop >= 0 && chain.isEmpty()) {
+            chain.add(if (exitHop == carrier) TRANSPORT_MASQUE_H3 else exitHop)
+        }
+        // A route whose carrier is Tor or Psiphon needs something behind it, so
+        // what used to be a standalone session becomes that carrier with the
+        // WARP transport as its exit.
+        if ((carrier == TOR_POSITION || carrier == PSIPHON_POSITION) && chain.isEmpty()) {
+            chain.add(TRANSPORT_MASQUE_H3)
+        }
+        if (chain.isNotEmpty()) {
+            editor.putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
+                .remove("chainCount").remove("chainExit0").remove("chainExit1").remove("chainExit2")
+        }
+        editor.apply()
     }
 
     /**
@@ -6500,10 +6503,13 @@ class MainActivity : AppCompatActivity() {
             // fallback (protocol 3 = Auto means nothing to a built-in).
             backend >= 3 -> if (protocol == 0 && h2) 1 else 0
             backend == 2 -> 10         // Firefox IP Protection
+            // A stored Psiphon or Tor protocol is a hop now, and the
+            // migration turns it into the exit of a chain; the position is
+            // still read so that migration sees what was chosen.
             backend == 1 -> 5          // Psiphon
             protocol == 6 -> if (h2) 9 else 8
             protocol == 5 -> if (h2) 7 else 6
-            protocol == 4 -> 4         // Tor only
+            protocol == 4 -> 4         // Tor
             protocol == 0 -> if (h2) 1 else 0
             else -> protocol + 1       // 1=wg -> 2, 2=gool -> 3
         }
@@ -6579,9 +6585,9 @@ class MainActivity : AppCompatActivity() {
          * The built-in transports, in protocol-list order. H2 is folded into
          * the MASQUE entries; the helpers in the activity map a position to the
          * (backend, protocol, h2) triple the engine takes. 4 = Tor and 5 =
-         * Psiphon are peers of the WARP transports from the user's point of
-         * view ("how do I get out?"), even though Tor is an engine egress and
-         * Psiphon is a separate backend. Saved core configs follow these.
+         * Psiphon are carriers of their own, so they are picked here like any
+         * other; a route that starts with one has an exit behind it. Saved core
+         * configs follow these.
          */
         private val BUILTIN_PROTOCOL_LABELS = listOf(
             "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
@@ -6592,6 +6598,12 @@ class MainActivity : AppCompatActivity() {
 
         /** First protocol-list position that names a saved core config. */
         private const val CORE_TRANSPORT_BASE = NativeEngine.CORE_TRANSPORT_BASE
+        /** Protocol-list positions of the two hops, and the default carrier. */
+        private const val TOR_POSITION = 4
+        private const val PSIPHON_POSITION = 5
+        private const val TRANSPORT_MASQUE_H3 = 0
+        /** The engine's own protocol id for Tor, what prefs "protocol" holds. */
+        private const val TOR_PROTOCOL = 4
 
         private const val LINK_TELEGRAM = "https://t.me/FCAE_VPN"
         private const val LINK_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"

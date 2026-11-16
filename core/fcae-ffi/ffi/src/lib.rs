@@ -543,7 +543,9 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         },
         core: FcaeCore {
             profile: std::ptr::null(),
-            log_level: FcaeEngineLog::Info,
+            // 0 = silent. A core at info writes a line per connection, and the
+            // console is worth reading only until one of them says something.
+            log_level: FcaeEngineLog::Off,
             library: std::ptr::null(),
             config_ref: std::ptr::null(),
         },

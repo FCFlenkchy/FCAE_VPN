@@ -1116,16 +1116,15 @@ fn route_name(config: &SessionConfig) -> String {
     // A saved config is named by the user, and that name is what they picked
     // out of the protocol list: showing "Xray" instead would leave a route of
     // three saved configs unreadable.
+    // A Tor carrier is read as Tor rather than as the engine running it: what a
+    // route of Tor and then MASQUE says is two names, not one.
+    let tor_carrier = config.backend == FcaeBackend::Aether
+        && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain);
     let first = config
         .core
         .selection_name()
-        .unwrap_or_else(|| backend_label(config.backend));
+        .unwrap_or(if tor_carrier { "Tor" } else { backend_label(config.backend) });
     if config.chain.is_empty() && !config.psiphon.through_tunnel {
-        if config.backend == FcaeBackend::Aether
-            && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain)
-        {
-            return "Tor".into();
-        }
         return first.into();
     }
     let mut names = vec![first.to_string()];

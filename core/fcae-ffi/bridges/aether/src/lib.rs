@@ -604,10 +604,14 @@ impl BackendHandle for AetherHandle {
             peer_ip: (!self.peers.is_empty()).then(|| {
                 self.peers.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
             }),
-            // Arti's Tor-terminated SOCKS listener carries CONNECT streams,
-            // not UDP associations. Aether's own tunnel listener can still
-            // carry datagrams through its MASQUE/WireGuard netstack.
-            udp: !matches!(self.cfg.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain),
+            // A Tor listener answers UDP ASSOCIATE, but it only ever carries a
+            // resolver: the engine rewrites every datagram for :53 into DNS over
+            // the TCP stream through the circuit and drops the rest, which is all
+            // a TCP-only egress can carry. Saying so is what lets a TUN bridge
+            // resolve at all behind Tor, and it promises nothing beyond that --
+            // a hop that needs real datagrams is moved onto http/2 rather than
+            // handed this.
+            udp: true,
             psiphon_dns: false,
         }
     }

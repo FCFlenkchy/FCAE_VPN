@@ -1271,6 +1271,7 @@ public class FCAEVpnService extends VpnService {
         final String torLines  = intent.getStringExtra("torBridgeLines");
         final String torLinesV = (torLines == null) ? "" : torLines;
         final int engineLog    = intent.getIntExtra("engineLog", 3);
+        final int coreLog      = intent.getIntExtra("coreLog", 0);
         // Xray/sing-box without the saved config they run has no profile at all,
         // so a session recorded against a config that no longer exists falls back
         // to the default transport instead of failing to start.
@@ -1379,7 +1380,8 @@ public class FCAEVpnService extends VpnService {
                     upstreamProxy,
                     chainTransports,
                     coreConfigs, coreConfigId,
-                    firefoxAccountId, firefoxLocation, firefoxServer, firefoxTransport
+                    firefoxAccountId, firefoxLocation, firefoxServer, firefoxTransport,
+                    coreLog
                 );
                 if (ok && psiphonInRoute) {
                     // nativeStart creates downstream attach requests. Poll only
@@ -2039,6 +2041,7 @@ public class FCAEVpnService extends VpnService {
         putInt(e, i, "torBridges", 0);
         putStr(e, i, "torBridgeLines");
         putInt(e, i, "engineLog", 3);
+        putInt(e, i, "coreLog", 0);
         putInt(e, i, "backend", 0);
         e.putString("chainTransports", NativeEngine.encodeChainTransports(NativeEngine.sessionChainTransports(i)));
         putStr(e, i, "coreConfigs");
@@ -2133,6 +2136,7 @@ public class FCAEVpnService extends VpnService {
         copyInt(p, i, "torBridges", 0);
         copyStr(p, i, "torBridgeLines");
         copyInt(p, i, "engineLog", 3);
+        copyInt(p, i, "coreLog", 0);
         copyInt(p, i, "backend", 0);
         if (p.contains("chainTransports")) {
             i.putExtra("chainTransports", NativeEngine.parseChainTransports(p.getString("chainTransports", "")));
