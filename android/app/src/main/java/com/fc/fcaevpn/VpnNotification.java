@@ -13,6 +13,11 @@ public class VpnNotification {
     // New id: Android ignores importance changes on an existing channel.
     public static final String CHANNEL_ID = "fcaevpn_service_hi";
     public static final int NOTIFICATION_ID = 1;
+    /**
+     * The "the VPN slot is not ours any more" notice. Not 3: the proxy owner
+     * still cancels 3 to clear a notification id older builds used.
+     */
+    public static final int NOTICE_ID = 4;
 
     /** Connecting / establishing: the full running controls — Stop cancels
         the dial and leaves the session resumable. */
@@ -44,7 +49,13 @@ public class VpnNotification {
     }
 
     private void createChannel() {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        ensureChannel(manager);
+    }
+
+    /** Idempotent: the consent notice posts from the service, which has no
+        instance of this class in hand. */
+    private static void ensureChannel(NotificationManager manager) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && manager != null) {
             NotificationChannel ch = new NotificationChannel(
                 CHANNEL_ID, "FCAE VPN",
                 NotificationManager.IMPORTANCE_HIGH);
@@ -52,11 +63,9 @@ public class VpnNotification {
             ch.setShowBadge(false);
             ch.setSound(null, null);
             ch.enableVibration(false);
-            if (manager != null) {
-                manager.createNotificationChannel(ch);
-                // Drop the old low-importance channel so it is not used.
-                try { manager.deleteNotificationChannel("fcaevpn_service"); } catch (Exception ignored) {}
-            }
+            manager.createNotificationChannel(ch);
+            // Drop the old low-importance channel so it is not used.
+            try { manager.deleteNotificationChannel("fcaevpn_service"); } catch (Exception ignored) {}
         }
     }
 
@@ -144,6 +153,58 @@ public class VpnNotification {
             if (manager != null) manager.cancel(NOTIFICATION_ID);
         } catch (Exception e) {
             Log.w("VpnNotification", "dismiss failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * The system's VPN slot no longer belongs to this app.
+     *
+     * Android grants the slot to one app at a time, and the grant is taken away
+     * the moment another VPN asks for it. Without it `Builder.establish()`
+     * returns null and no TUN can exist, so a session started from the widget,
+     * the tile or the notification used to end on a toast nobody could act on.
+     * The intent goes straight to the Activity because the consent dialog can
+     * only be raised from one -- and because a notification that reached an
+     * Activity through a service would be a blocked trampoline on Android 12+.
+     */
+    public static void notifyPermissionRequired(Context context) {
+        try {
+            NotificationManager manager = context.getSystemService(NotificationManager.class);
+            if (manager == null) return;
+            ensureChannel(manager);
+            Intent grant = new Intent(context, MainActivity.class)
+                .putExtra(MainActivity.EXTRA_GRANT_VPN, true)
+                .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            PendingIntent pi = PendingIntent.getActivity(context, 2, grant,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            String text = "Tap to grant it and connect";
+            Notification.Builder nb = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+                ? new Notification.Builder(context, CHANNEL_ID)
+                : new Notification.Builder(context);
+            nb.setContentTitle("FCAE VPN lost its VPN access")
+              .setContentText(text)
+              .setSmallIcon(R.drawable.ic_fcae_vpn)
+              .setContentIntent(pi)
+              .setAutoCancel(true)
+              .setOnlyAlertOnce(true)
+              .setCategory(Notification.CATEGORY_STATUS)
+              .setVisibility(Notification.VISIBILITY_PUBLIC)
+              .setPriority(Notification.PRIORITY_HIGH)
+              .setStyle(new Notification.BigTextStyle().bigText(
+                  "Android gives the VPN slot to one app at a time, and FCAE VPN does not "
+                      + "hold it any more. It cannot connect without it."));
+            manager.notify(NOTICE_ID, nb.build());
+        } catch (Exception e) {
+            Log.w("VpnNotification", "permission notice failed: " + e.getMessage());
+        }
+    }
+
+    /** Drop the consent notice: the slot is ours again, or the user asked for it. */
+    public static void clearPermissionRequired(Context context) {
+        try {
+            NotificationManager manager = context.getSystemService(NotificationManager.class);
+            if (manager != null) manager.cancel(NOTICE_ID);
+        } catch (Exception ignored) {
         }
     }
 

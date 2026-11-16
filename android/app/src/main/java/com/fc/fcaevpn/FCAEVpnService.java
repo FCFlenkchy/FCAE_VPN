@@ -520,7 +520,83 @@ public class FCAEVpnService extends VpnService {
     }
 
     /**
-     * Create or reuse the connected session's TUN interface; -1 on failure.
+     * Why the host could not hand the core a TUN descriptor. The values are the
+     * JNI contract with `establish_now()` in bridges/tun2socks: the core reads
+     * them to turn a refusal into something the user can act on, so they must
+     * not be renumbered on one side only.
+     */
+    static final int TUN_FD_FAILED = -1;
+    /** The session ended while the interface was being asked for. */
+    static final int TUN_FD_STALE = -2;
+    /** The system revoked this app's VPN permission; it must be granted again. */
+    static final int TUN_FD_REVOKED = -3;
+    /** Another VPN app holds the slot, which Android hands to one app at a time. */
+    static final int TUN_FD_OCCUPIED = -4;
+    /** The native side has no VpnService attached, so nobody could ask at all. */
+    static final int TUN_FD_NO_SERVICE = -5;
+
+    /**
+     * Whether this package no longer holds the system's VPN consent.
+     *
+     * Android gives the VPN slot to one app at a time and takes the grant away
+     * from the previous holder the moment another VPN asks for it, so consent
+     * is not a one-time fact about the app -- it is state that another app can
+     * change while this one is disconnected. `prepare()` answers null only when
+     * the grant is still ours.
+     */
+    private boolean vpnConsentMissing() {
+        try {
+            return VpnService.prepare(this) != null;
+        } catch (Throwable error) {
+            // A system that cannot answer is not a reason to refuse a session:
+            // establish() will say so itself if the slot really is gone.
+            Log.w(TAG, "VpnService.prepare failed: " + error);
+            return false;
+        }
+    }
+
+    /**
+     * End this start attempt and send the user to the one surface that can ask
+     * for the slot back: the Activity. Dialling anyway can only end in a TUN
+     * that the system refuses to create, which is how a start from the widget,
+     * the tile or the notification died on a toast nobody could act on.
+     */
+    private void endStartForVpnConsent() {
+        Log.w(TAG, "the VPN slot is not ours; only the Activity can ask for it");
+        handler.removeCallbacks(connectWatchdog);
+        uiConnecting = false;
+        SessionState.command(SessionState.Command.NONE);
+        SessionState.markIdle(this);
+        notification.dismiss();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        // Posted before any teardown, so it is not swept up with the session's
+        // own notification.
+        VpnNotification.notifyPermissionRequired(this);
+        // A paused or dialling session still owns a live engine, and losing the
+        // slot does not end it by itself: the full teardown is what reclaims it.
+        if (running || vpnPaused || vpnThread != null || engineOpInFlight) {
+            fullShutdown();
+        } else {
+            stopSelf();
+        }
+    }
+
+    /**
+     * How long the system is given to hand over the VPN slot.
+     *
+     * `Builder.establish()` answers null when this app is not prepared *or* is
+     * revoked, which is the documented way it reports a race with another VPN
+     * app: a slot that is still being torn down reads exactly like a refusal.
+     * Disconnecting another VPN and immediately connecting this one is the
+     * case, so the interface is asked for again over this window before the
+     * refusal is believed.
+     */
+    private static final int TUN_ESTABLISH_ATTEMPTS = 9;
+    private static final long TUN_ESTABLISH_RETRY_MS = 250L;
+
+    /**
+     * Create or reuse the connected session's TUN interface; a negative
+     * `TUN_FD_*` code when the system will not give one.
      *
      * Called from the core through the fd provider registered in
      * android_jni.cpp (reflectively, by name and signature) once a backend has
@@ -541,15 +617,20 @@ public class FCAEVpnService extends VpnService {
         }
     }
 
+    /** True once a disconnect, or a newer connect, has ended this session. */
+    private boolean tunSessionStale() {
+        synchronized (tunLock) {
+            return shuttingDown || pendingSessionGen != cleanupGeneration.get();
+        }
+    }
+
     private int establishTunLocked() {
         // A disconnect may have arrived while the backend was still dialling.
         // Building an interface for a session nobody wants any more would
         // strand a live TUN behind a disconnected UI.
-        synchronized (tunLock) {
-            if (shuttingDown || pendingSessionGen != cleanupGeneration.get()) {
-                Log.w(TAG, "establishTunNow: session is stale, refusing");
-                return -1;
-            }
+        if (tunSessionStale()) {
+            Log.w(TAG, "establishTunNow: session is stale, refusing");
+            return TUN_FD_STALE;
         }
 
         try {
@@ -583,27 +664,51 @@ public class FCAEVpnService extends VpnService {
             configureSplitTunnel(builder);
             configureTunDns(builder);
 
-            ParcelFileDescriptor pfd = builder.establish();
-            if (pfd == null) {
-                Log.e(TAG, "establishTunNow: the system refused to create the interface");
-                return -1;
-            }
-
-            // Re-check under the same lock as teardown: establish() can block,
-            // and a Disconnect landing in that window would otherwise leave a
-            // live PFD behind a session that is already over.
-            synchronized (tunLock) {
-                if (shuttingDown || pendingSessionGen != cleanupGeneration.get()) {
-                    closeQuiet(pfd);
-                    Log.w(TAG, "establishTunNow: session went stale while establishing");
-                    return -1;
+            for (int attempt = 1; ; attempt++) {
+                ParcelFileDescriptor pfd = builder.establish();
+                if (pfd != null) {
+                    // Re-check under the same lock as teardown: establish() can
+                    // block, and a Disconnect landing in that window would
+                    // otherwise leave a live PFD behind a session that is
+                    // already over — or be missed by the teardown that ran
+                    // between the check and the store, leaving the interface
+                    // up with nothing holding it.
+                    synchronized (tunLock) {
+                        if (shuttingDown || pendingSessionGen != cleanupGeneration.get()) {
+                            closeQuiet(pfd);
+                            Log.w(TAG, "establishTunNow: session went stale while establishing");
+                            return TUN_FD_STALE;
+                        }
+                        vpnInterface = pfd;
+                        return pfd.getFd();
+                    }
                 }
-                vpnInterface = pfd;
-                return pfd.getFd();
+                // Consent missing is not a race: retrying asks the system the
+                // same question, and only the user can answer it.
+                if (VpnService.prepare(this) != null) {
+                    Log.e(TAG, "establishTunNow: VPN permission is not granted"
+                            + " (another VPN took the slot); it must be granted again");
+                    return TUN_FD_REVOKED;
+                }
+                if (attempt >= TUN_ESTABLISH_ATTEMPTS) {
+                    Log.e(TAG, "establishTunNow: another VPN is holding the slot after "
+                            + attempt + " attempts");
+                    return TUN_FD_OCCUPIED;
+                }
+                if (tunSessionStale()) {
+                    Log.w(TAG, "establishTunNow: session ended while waiting for the slot");
+                    return TUN_FD_STALE;
+                }
+                try {
+                    Thread.sleep(TUN_ESTABLISH_RETRY_MS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return TUN_FD_STALE;
+                }
             }
         } catch (Throwable t) {
             Log.e(TAG, "establishTunNow failed: " + t);
-            return -1;
+            return TUN_FD_FAILED;
         }
     }
 
@@ -943,10 +1048,12 @@ public class FCAEVpnService extends VpnService {
             handler.postDelayed(replayHandoffWatchdog, 15000L);
             return;
         }
-        if (VpnService.prepare(this) != null) {
-            failReplay(startId, "Open FCAE VPN to grant VPN permission.");
-            return;
-        }
+        // The slot is asked for in requestStart(), which every connect path
+        // shares: one gate, one behaviour, whatever started this session. A
+        // replay that meets a slot another VPN took therefore ends on the
+        // consent notice rather than here, and the tap on it connects again
+        // from the top -- the recorded session below is left untouched, so that
+        // connect starts the same configuration this replay would have.
         notificationPause = false;
         armConnectWatchdog();
         SessionState.command(SessionState.Command.CONNECT);
@@ -1066,6 +1173,15 @@ public class FCAEVpnService extends VpnService {
         ProcessExit.cancel();
         lastStartIntent = new Intent(src);
         rememberStart(lastStartIntent);
+
+        // Only a TUN session needs the slot, and only a TUN session can lose it.
+        // Checked for every entry point -- notification Start, widget, tile,
+        // replay -- because they all land here, and none of them had a way to
+        // reach the consent dialog on its own.
+        if (lastStartIntent.getIntExtra("mode", 1) != 0 && vpnConsentMissing()) {
+            endStartForVpnConsent();
+            return;
+        }
 
         synchronized (cmdLock) {
             if (vpnPaused) {
@@ -1440,7 +1556,14 @@ public class FCAEVpnService extends VpnService {
                 }
                 if (!ok) {
                     handler.post(() -> {
-                        if (sessionGen == cleanupGeneration.get()) fullShutdown();
+                        if (sessionGen != cleanupGeneration.get()) return;
+                        // The engine can still lose the slot between the check
+                        // in requestStart() and establish(), and the message the
+                        // session ended with would then be the only trace of it.
+                        // The notice outlives this process, so tearing down
+                        // stays as complete as it is for any other failure.
+                        if (vpnConsentMissing()) VpnNotification.notifyPermissionRequired(this);
+                        fullShutdown();
                     });
                     return;
                 }
@@ -2292,9 +2415,11 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public void onRevoke() {
-        // The user revoked the VPN from system settings: there is nothing left
-        // to run for. The process follows the session unless the app is open —
-        // then it stays, so the screen in front of the user can say so.
+        // Reached both when the user turns the VPN off from system settings and
+        // when another VPN app asks for the slot. Only the second takes the
+        // grant away, and only a lost grant needs the notice -- it is held by
+        // the system, so it outlives the teardown below.
+        if (vpnConsentMissing()) VpnNotification.notifyPermissionRequired(this);
         fullShutdown();
         super.onRevoke();
     }

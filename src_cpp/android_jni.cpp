@@ -421,21 +421,28 @@ static jmethodID g_establish_mid = nullptr;
 // its own session generation before and after, so a disconnect that lands
 // during the call is still caught there.
 static int establish_tun() {
+    // The refusals are the FCAEVpnService.TUN_FD_* codes: the core turns them
+    // into a message that says which of the three situations it is -- stale
+    // session, permission revoked, another VPN holding the slot -- instead of
+    // one sentence that names none of them.
+    constexpr int kTunFdFailed = -1;
+    constexpr int kTunFdNoService = -5;
+
     ScopedEnv scoped;
     JNIEnv* env = scoped.get();
-    if (!env) return -1;
+    if (!env) return kTunFdFailed;
 
     VpnServiceRef vpn(env, &g_establish_mid);
     if (!vpn) {
         LOGE("establish_tun: no VpnService registered");
-        return -1;
+        return kTunFdNoService;
     }
 
     jint fd = env->CallIntMethod(vpn.service(), vpn.method());
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         LOGE("establish_tun: the service threw while establishing");
-        return -1;
+        return kTunFdFailed;
     }
     LOGI("establish_tun -> fd %d", (int)fd);
     return (int)fd;

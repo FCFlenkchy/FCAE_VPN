@@ -748,11 +748,35 @@ async fn run_session(
         };
         if let Err(error) = tun_start {
             log::error!("[session] TUN startup failed: {error}");
+            // There is no session to re-raise a device on while this attempt
+            // unwinds; leaving the snapshot published let resume_tun believe
+            // otherwise and build a TUN over the backends being torn down.
+            *live_tun.lock() = None;
             stop_all(&mut handles, stop_timeout).await;
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            return Err(error);
+            // A data plane that could not be raised is not necessarily a
+            // session that cannot work. The classic case is a host with one
+            // VPN slot: another VPN that was just disconnected still reads as
+            // occupying it for a moment, and Android reports that as a refusal
+            // to create the interface. Ending the session there left the user
+            // with a dead-end sentence and a button to press again, so a
+            // transient refusal retries the same way every other startup
+            // failure in this loop does. A deterministic one -- no elevation,
+            // a permission the user revoked -- still surfaces at once.
+            if !error.is_transient() || !should_retry(auto_reconnect, max_reconnects, attempt, &cancel) {
+                return Err(error);
+            }
+            attempt += 1;
+            sink.set_state(
+                FcaeState::Reconnecting,
+                format!("TUN startup failed ({error}); retrying…"),
+            );
+            if backoff(&cancel, attempt).await.is_break() {
+                return Ok(());
+            }
+            continue;
         }
         if cancel.is_cancelled() {
             tun_bridge.stop(stop_timeout);

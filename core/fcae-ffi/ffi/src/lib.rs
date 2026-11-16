@@ -166,15 +166,29 @@ impl TunEngines {
 
     /// Ask the host to build the TUN interface now, if a provider is
     /// registered. `Ok(None)` = no provider (the engine creates the device
-    /// itself); `Err` = the host refused to build the interface.
+    /// itself); `Err` = the host refused, with the reason the user has to act
+    /// on.
     #[cfg(all(feature = "tun", any(feature = "zeptun", feature = "hev")))]
     fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
         if !self.t2s.has_fd_provider() {
-            return Ok(None);
+            // Android has no way to open a device of its own: the descriptor
+            // belongs to the VpnService that created the interface. Nothing
+            // registered means the service is not attached to the engine any
+            // more, which a reconnect fixes -- so it is not the same failure as
+            // the system refusing, and it must not read like a dead end.
+            return if cfg!(target_os = "android") {
+                Err(CoreError::StartFailed(
+                    "the VPN service is not attached to the engine; reconnect".into(),
+                ))
+            } else {
+                Ok(None)
+            };
         }
-        self.t2s.establish_now().map(Some).ok_or_else(|| {
-            CoreError::Internal("the host could not establish the VPN interface".into())
-        })
+        match self.t2s.establish_now() {
+            None => Ok(None),
+            Some(Ok(fd)) => Ok(Some(fd)),
+            Some(Err(code)) => Err(tun_refusal(code)),
+        }
     }
 
     /// The provider is a tun2socks mechanism, so a build that carries only
@@ -184,6 +198,36 @@ impl TunEngines {
     #[cfg(all(not(feature = "tun"), any(feature = "zeptun", feature = "hev")))]
     fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
         Ok(None)
+    }
+}
+
+/// What a host refusal of the TUN descriptor means for the user.
+///
+/// The codes are `fcae_bridge_tun2socks::host_fd`, which mirrors the Java
+/// `TUN_FD_*` constants. They are classified, not just described: a slot another
+/// VPN still holds is a race that clears on its own, so the session retries it,
+/// while a revoked permission is one only the user can answer and ends the
+/// session with something to act on. "Could not establish the VPN interface"
+/// told them neither.
+#[cfg(all(feature = "tun", any(feature = "zeptun", feature = "hev")))]
+fn tun_refusal(code: i32) -> CoreError {
+    use fcae_bridge_tun2socks::host_fd;
+    match code {
+        host_fd::STALE => CoreError::StartFailed(
+            "the connect was cancelled before the VPN interface was created".into(),
+        ),
+        host_fd::REVOKED => CoreError::PermissionDenied(
+            "Android revoked this app's VPN permission (another VPN took the slot); \
+             reconnect to grant it again"
+                .into(),
+        ),
+        host_fd::OCCUPIED => {
+            CoreError::StartFailed("another VPN is holding the system VPN slot".into())
+        }
+        host_fd::NO_SERVICE => {
+            CoreError::StartFailed("the VPN service is not attached to the engine; reconnect".into())
+        }
+        _ => CoreError::StartFailed("the system refused to create the VPN interface".into()),
     }
 }
 

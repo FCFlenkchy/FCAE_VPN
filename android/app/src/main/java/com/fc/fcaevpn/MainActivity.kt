@@ -38,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private var connecting = false
     @Volatile private var engineRunning = false
     private var pendingAfterVpnPermission = false
+    /** A connect is owed once the user gives the VPN slot back to this app. */
+    private var pendingConnectAfterGrant = false
     @Volatile private var pendingPsiSocks = 0
     @Volatile private var pendingPsiHttp = 0
     @Volatile private var pendingPsiLan = ""
@@ -389,7 +391,16 @@ class MainActivity : AppCompatActivity() {
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && pendingAfterVpnPermission) {
+        val granted = result.resultCode == Activity.RESULT_OK
+        // The slot was taken by another VPN while this app was down, so the
+        // connect is still owed: run it whole rather than starting a session
+        // whose half of the state was never set up.
+        val connect = pendingConnectAfterGrant
+        pendingConnectAfterGrant = false
+        if (granted && connect) {
+            pendingAfterVpnPermission = false
+            connectClicked()
+        } else if (granted && pendingAfterVpnPermission) {
             pendingAfterVpnPermission = false
             if (isPsiphonSelected()) startPsiphon() else startTunServiceWithConfig()
         } else {
@@ -397,8 +408,43 @@ class MainActivity : AppCompatActivity() {
             commandConnecting = false
             SessionState.command(SessionState.Command.NONE)
             updateButton()
-            Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
+            // Reached from the consent notice, a denial is not a stray "no":
+            // the slot went to another VPN and this app cannot connect at all
+            // without it, which is what the notice said.
+            Toast.makeText(
+                this,
+                if (connect) "FCAE VPN cannot connect without VPN access"
+                else "VPN permission denied",
+                Toast.LENGTH_SHORT
+            ).show()
         }
+    }
+
+    /**
+     * Ask the system for the VPN slot, then connect.
+     *
+     * The consent dialog can only be raised from an Activity, and the grant is
+     * per app and revocable by another VPN app asking for the same slot -- so a
+     * background start cannot recover by itself. It posts a notice instead, and
+     * the tap lands here.
+     */
+    private fun requestVpnSlotThenConnect() {
+        // The cached flags can still say a session is up after the service gave
+        // the slot away and tore down; only a live owner may skip the recovery.
+        if (SessionState.reconciled(this).active) return
+        connecting = false
+        commandConnecting = false
+        engineRunning = false
+        vpnActive = false
+        updateButton()
+        val prep = VpnService.prepare(this)
+        if (prep == null) {
+            VpnNotification.clearPermissionRequired(this)
+            connectClicked()
+            return
+        }
+        pendingConnectAfterGrant = true
+        vpnPermissionLauncher.launch(prep)
     }
 
     @Volatile private var lastBroadcastGeneration = 0L
@@ -2089,7 +2135,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleWidgetIntent(intent: Intent?) {
         if (intent == null) return
-        if (intent.getBooleanExtra(EXTRA_DISCONNECT_NOW, false)) {
+        if (intent.getBooleanExtra(EXTRA_GRANT_VPN, false)) {
+            intent.removeExtra(EXTRA_GRANT_VPN)
+            requestVpnSlotThenConnect()
+        } else if (intent.getBooleanExtra(EXTRA_DISCONNECT_NOW, false)) {
             intent.removeExtra(EXTRA_DISCONNECT_NOW)
             disconnectAll()
         } else if (intent.getBooleanExtra(EXTRA_TRIGGER_CONNECT, false)) {
@@ -4724,6 +4773,9 @@ class MainActivity : AppCompatActivity() {
     private fun connectClicked() {
         if (connecting || engineRunning || vpnActive) return
         clearTransientError()
+        // The user is here, acting: whatever notice pointed them at this screen
+        // has done its job.
+        VpnNotification.clearPermissionRequired(this)
         val route = routeBackends()
         val transports = listOf(spinnerProtocol.selectedItemPosition) + selectedChain()
         // Every hop above the exit has to hand the one below it a SOCKS5 endpoint,
@@ -6546,6 +6598,8 @@ class MainActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_DISCONNECT_NOW = "com.fc.fcaevpn.DISCONNECT_NOW"
         const val EXTRA_TRIGGER_CONNECT = "com.fc.fcaevpn.TRIGGER_CONNECT"
+        /** The VPN slot is held by another app; ask the system for it, then connect. */
+        const val EXTRA_GRANT_VPN = "com.fc.fcaevpn.GRANT_VPN"
 
         private const val POLL_INTERVAL_MS = 1000L
         // Sponsor card frames are paced by this hardcoded 30 FPS interval on

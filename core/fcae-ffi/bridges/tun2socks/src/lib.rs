@@ -174,6 +174,24 @@ pub const fn is_supported() -> bool {
     cfg!(tun2socks_linked)
 }
 
+/// Why the host refused to hand over a TUN descriptor.
+///
+/// These mirror `FCAEVpnService.TUN_FD_*` exactly -- they cross the JNI callback
+/// as a bare `int`, so the two sides are one contract and a code must never be
+/// renumbered on only one of them.
+pub mod host_fd {
+    /// The system would not create the interface, or the service threw.
+    pub const FAILED: i32 = -1;
+    /// The session ended while the interface was being asked for.
+    pub const STALE: i32 = -2;
+    /// The app's VPN permission was revoked and has to be granted again.
+    pub const REVOKED: i32 = -3;
+    /// Another VPN app holds the slot, which Android gives to one app at a time.
+    pub const OCCUPIED: i32 = -4;
+    /// No VpnService is attached to the engine, so nobody could be asked.
+    pub const NO_SERVICE: i32 = -5;
+}
+
 /// State owned by a live TUN session.
 struct Active {
     /// Platform state needed to undo routes/DNS.
@@ -302,17 +320,22 @@ impl Tun2SocksBridge {
     /// `external_fd`, exactly like the on-demand path of
     /// [`Self::device_spec`], so a later tun2socks start reuses the same
     /// interface. The FFI dispatcher uses this to hand a descriptor to the
-    /// zeptun engine, which consumes fds but cannot create the device
-    /// itself. `None` when the host could not build the interface.
-    pub fn establish_now(&self) -> Option<i32> {
+    /// zeptun engine, which consumes fds but cannot create the device itself.
+    ///
+    /// `None` means no provider is registered -- this build, or this platform,
+    /// creates its own device. `Some(Err(code))` carries the host's reason,
+    /// because "the interface could not be created" and "another VPN has the
+    /// slot" send the user to two different places.
+    pub fn establish_now(&self) -> Option<std::result::Result<i32, i32>> {
         let provide = self.fd_provider()?;
         let fd = unsafe { provide() };
         if fd >= 0 {
             log::info!("[tun2socks] host provided VpnService fd {fd} on demand");
             self.external_fd.store(fd, Ordering::SeqCst);
-            Some(fd)
+            Some(Ok(fd))
         } else {
-            None
+            log::warn!("[tun2socks] the host refused a TUN descriptor (code {fd})");
+            Some(Err(fd))
         }
     }
 
