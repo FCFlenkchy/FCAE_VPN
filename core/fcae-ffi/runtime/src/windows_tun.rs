@@ -188,6 +188,40 @@ fn exclusion_gateway(physical: &MIB_IPFORWARD_ROW2, family: u16) -> Option<IpAdd
     gateway.map(|(_, next)| next)
 }
 
+/// The subnets this machine is directly connected to, with the on-link row
+/// that owns each of them.
+///
+/// These are the LANs of the physical interfaces: the only private space a
+/// local gateway can actually reach. Rows of the tunnel interface are skipped,
+/// and so are the scopes that are never routed (loopback, link-local,
+/// multicast) via [`needs_exclusion_route`].
+fn connected_subnets(tun: NET_LUID_LH) -> Vec<(IpAddr, u8, MIB_IPFORWARD_ROW2)> {
+    let mut subnets = Vec::new();
+    for family in [AF_INET, AF_INET6] {
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = ptr::null_mut();
+        if unsafe { GetIpForwardTable2(family, &mut table) } != 0 || table.is_null() {
+            continue;
+        }
+        unsafe {
+            let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+            for row in rows {
+                if row.InterfaceLuid.Value == tun.Value
+                    || row.DestinationPrefix.PrefixLength == 0
+                    || !ip_of(&row.NextHop).is_unspecified()
+                {
+                    continue;
+                }
+                let network = ip_of(&row.DestinationPrefix.Prefix);
+                if needs_exclusion_route(network) {
+                    subnets.push((network, row.DestinationPrefix.PrefixLength as u8, *row));
+                }
+            }
+            FreeMibTable(table.cast());
+        }
+    }
+    subnets
+}
+
 /// Whether a private prefix needs a route of its own on Windows.
 ///
 /// Loopback, link-local, multicast and the reserved blocks have an on-link
@@ -314,45 +348,46 @@ impl TunGuard {
         // force. That is what keeps a printer, a NAS or the router's admin page
         // answering while the device carries everything else.
         if cfg.tun.exclude_private {
-            let outside_v6 = non_loopback_ipv6_present()?;
-            for (network, bits) in crate::config::excluded_prefixes() {
-                if (network.is_ipv6() && !outside_v6) || !needs_exclusion_route(network) {
-                    continue;
-                }
-                let physical = match best_route(network) {
-                    Ok(physical) => physical,
-                    Err(error) => {
-                        log::debug!("[tun] no physical route for {network}/{bits}: {error}");
-                        continue;
-                    }
-                };
-                if unsafe { physical.InterfaceLuid.Value == luid.Value } {
-                    log::warn!("[tun] private range {network}/{bits} already routes through FCAE; skipping its exclusion");
+            // Every connected subnet already owns a route more specific than
+            // anything the device installs -- its /1 halves or a default -- so
+            // the LAN itself never needs a row, and programming a whole RFC 1918
+            // block would be wrong the other way: private space this machine
+            // reaches *through* the tunnel (a corporate network, a provider's
+            // internal service) handed to the local gateway is dropped there, so
+            // those flows neither work nor reach the counters. What is left is
+            // the case this guards: a subnet the engine's own routing already
+            // captured gets its connected route back.
+            let subnets = connected_subnets(luid);
+            let connected = subnets.len();
+            let mut restored = 0;
+            for (network, bits, on_link) in subnets {
+                if best_route(network).is_ok_and(|current| unsafe { current.InterfaceLuid.Value != luid.Value }) {
                     continue;
                 }
                 let family = if network.is_ipv4() { AF_INET } else { AF_INET6 };
-                let Some(gateway) = exclusion_gateway(&physical, family) else {
-                    log::debug!("[tun] {network}/{bits} has no gateway on its interface; keeping its existing route");
+                let Some(gateway) = exclusion_gateway(&on_link, family) else {
+                    log::debug!("[tun] {network}/{bits} has no gateway on its interface; leaving its route alone");
                     continue;
                 };
                 let mut bypass = MIB_IPFORWARD_ROW2::default();
                 unsafe { InitializeIpForwardEntry(&mut bypass); }
-                bypass.InterfaceLuid = physical.InterfaceLuid;
-                bypass.InterfaceIndex = physical.InterfaceIndex;
+                bypass.InterfaceLuid = on_link.InterfaceLuid;
+                bypass.InterfaceIndex = on_link.InterfaceIndex;
                 bypass.DestinationPrefix.Prefix = sockaddr(network);
                 bypass.DestinationPrefix.PrefixLength = bits;
                 bypass.NextHop = sockaddr(gateway);
                 bypass.Metric = 0;
                 bypass.Protocol = MIB_IPPROTO_NETMGMT;
-                // One prefix that cannot be programmed is not a reason to refuse
-                // the session: the scopes that always have a route of their own
-                // (loopback, link-local, multicast) are on this list too, and the
-                // other platforms treat a failed exclusion the same way.
-                if let Err(error) = guard.add_route(bypass, true) {
-                    log::debug!("[tun] {network}/{bits} keeps its existing route: {error}");
+                match guard.add_route(bypass, true) {
+                    Ok(()) => restored += 1,
+                    Err(error) => log::debug!("[tun] {network}/{bits} keeps its existing route: {error}"),
                 }
             }
-            log::info!("[tun] private ranges keep the physical interface");
+            log::info!(
+                "[tun] {} connected subnet(s) keep the physical interface ({restored} restored); \
+                 private space the device carries stays on the device",
+                connected
+            );
         }
 
         log::info!("[tun] configuring adapter interfaces and addresses");
