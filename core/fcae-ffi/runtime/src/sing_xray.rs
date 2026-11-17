@@ -1539,9 +1539,12 @@ fn parse_wireguard(rest: &str) -> Result<Outbound, String> {
         .ok_or("a wireguard link must be wireguard://<private-key>@<host>:<port>")?;
     let secret_key = wireguard_key(&percent_decode(userinfo), "the wireguard private key")?;
     let (server, port) = split_host_port(trim_trailing_path(target), Some(51820))?;
-    let public_key = query
-        .first(&["publickey", "public_key", "peer_public_key", "peerpublickey"])
-        .ok_or("a wireguard link needs publickey, the key its peer is verified against")?;
+    let public_key = wireguard_key(
+        query
+            .first(&["publickey", "public_key", "peer_public_key", "peerpublickey"])
+            .ok_or("a wireguard link needs publickey, the key its peer is verified against")?,
+        "the wireguard public key",
+    )?;
     let preshared_key = query
         .first(&["presharedkey", "preshared_key", "pre_shared_key", "psk"])
         .map(|key| wireguard_key(key, "the wireguard preshared key"))
@@ -1580,9 +1583,7 @@ fn parse_wireguard(rest: &str) -> Result<Outbound, String> {
                 .trim()
                 .trim_end_matches(['s', 'S'])
                 .parse::<u16>()
-                .map_err(|_| {
-                    format!("wireguard keepalive {raw:?} is not 1–65535 seconds")
-                })?;
+                .map_err(|_| format!("wireguard keepalive {raw:?} is not 1–65535 seconds"))?;
             Some(u32::from(seconds))
         }
         None => None,
@@ -5006,6 +5007,12 @@ mod tests {
                     "wireguard://{SHORT_KEY}@example.net:51820?publickey={WIREGUARD_KEY}&address=10.0.0.2"
                 ),
                 "32",
+            ),
+            // The peer's key is normalised like the other two, so one that is
+            // not a key at all is refused rather than handed to the core.
+            (
+                wireguard_link("publickey=not-a-key&address=10.0.0.2"),
+                "public key",
             ),
             // Xray-core's interface address takes no subnet but a host's.
             (
