@@ -1264,6 +1264,8 @@ fn configure_internal_listeners(config: &mut SessionConfig) -> Result<()> {
         Some(p) if is_tor => (p.tor_socks, p.tor_http),
         Some(p) if config.backend == FcaeBackend::Firefox => (p.firefox_socks, p.firefox_http),
         Some(p) if config.backend == FcaeBackend::Aether => (p.aether_socks, p.aether_http),
+        Some(p) if config.backend == FcaeBackend::Xray => (p.xray_socks, p.xray_http),
+        Some(p) if config.backend == FcaeBackend::SingBox => (p.singbox_socks, p.singbox_http),
         _ => (true, false),
     };
     if config.backend == FcaeBackend::Psiphon {
@@ -1673,6 +1675,7 @@ mod tests {
             aether_socks: true, aether_http: false,
             firefox_socks: false, firefox_http: true,
             tor_socks: true, tor_http: false,
+            ..Default::default()
         });
         assert!(configure_internal_listeners(&mut cfg).unwrap_err().to_string().contains("Firefox SOCKS5"));
         cfg.listener_policy.as_mut().unwrap().firefox_socks = true;
@@ -1689,8 +1692,42 @@ mod tests {
             aether_socks: false, aether_http: true,
             firefox_socks: true, firefox_http: true,
             tor_socks: true, tor_http: false,
+            ..Default::default()
         });
         assert!(configure_internal_listeners(&mut cfg).unwrap_err().to_string().contains("Aether SOCKS5"));
+    }
+
+    #[test]
+    fn internal_core_hop_opens_the_http_listener_the_user_left_on() {
+        for backend in [FcaeBackend::Xray, FcaeBackend::SingBox] {
+            let mut cfg = SessionConfig::default();
+            cfg.backend = backend;
+            cfg.listener_policy = Some(crate::config::ListenerPolicy {
+                xray_http: true, singbox_http: true,
+                ..Default::default()
+            });
+            configure_internal_listeners(&mut cfg).unwrap();
+            // The hop above it dials SOCKS5, and the HTTP listener the user
+            // switched on is opened next to it instead of being dropped.
+            assert!(cfg.internal_socks, "{backend:?}");
+            assert!(cfg.internal_http, "{backend:?}");
+            let (socks, http) = crate::sing_xray::plan_listeners(&cfg).unwrap();
+            assert!(socks.is_some(), "{backend:?}");
+            assert_eq!(http.expect("http listener").ip(), std::net::Ipv4Addr::LOCALHOST, "{backend:?}");
+
+            // The same switch, off: a hop that cannot serve SOCKS5 cannot
+            // serve the hop above it at all, so the start is refused.
+            cfg.internal_socks = false;
+            cfg.internal_http = false;
+            cfg.listener_policy = Some(crate::config::ListenerPolicy {
+                xray_socks: false, singbox_socks: false,
+                xray_http: true, singbox_http: true,
+                ..Default::default()
+            });
+            let error = configure_internal_listeners(&mut cfg).unwrap_err().to_string();
+            assert!(error.contains("SOCKS5"), "{error}");
+            assert!(error.contains(crate::config::backend_label(backend)), "{error}");
+        }
     }
 
     #[test]

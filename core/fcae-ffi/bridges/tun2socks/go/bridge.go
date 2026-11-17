@@ -1403,20 +1403,25 @@ func coreConfigScope(raw json.RawMessage) bool {
 	return !strings.EqualFold(text, "localhost")
 }
 
-// coreRecord is one `instance|label|proto|port|scope` record: an inbound, the
+// coreRecord is one `handle|label|proto|port|scope` record: an inbound, the
 // instance that runs it, and what that instance calls itself.
 //
+// The handle is the one a start handed back, so the host can join the record to
+// the instance it started: the route an instance belongs to, its place in that
+// route and the name the user gave its saved config all live on the host side,
+// and none of them is in a config this shim was handed.
+//
 // The label is the flavour the config declares — its first real outbound and
-// the transport that carries it, `vless reality` rather than an index — so a
-// session that runs the same core twice can be told apart on screen. It is
-// empty when the config carries no outbound of its own, which is a config that
-// only serves local proxies.
-func coreRecord(instance int, label string, listener coreListener) string {
+// the transport that carries it, `vless reality` rather than an index — which is
+// what the host falls back to when it has no name of its own. It is empty when
+// the config carries no outbound of its own, which is a config that only serves
+// local proxies.
+func coreRecord(handle uint64, label string, listener coreListener) string {
 	scope := "local"
 	if listener.any {
 		scope = "any"
 	}
-	return fmt.Sprintf("%d|%s|%s|%d|%s", instance, label, listener.proto, listener.port, scope)
+	return fmt.Sprintf("%d|%s|%s|%d|%s", handle, label, listener.proto, listener.port, scope)
 }
 
 // coreTransportWords joins the parts of a config's own description, skipping

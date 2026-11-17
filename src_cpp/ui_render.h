@@ -768,13 +768,20 @@ struct AppState {
         // bridge). Only the transport choice needs splicing in.
         if (!psiphon_socks_enabled) json.insert(json.size() - 1, ",\"DisableLocalSocksProxy\":true");
         if (!psiphon_http_enabled) json.insert(json.size() - 1, ",\"DisableLocalHTTPProxy\":true");
+        // Every backend's switches, because a hop in a chain is dialled through
+        // its own listener too: a core that only appears in the middle of a
+        // route still opens the SOCKS5 and HTTP listeners the user configured.
         json.insert(json.size() - 1,
             std::string(",\"FCAEListeners\":{\"aetherSocks\":") + (socks_enabled ? "true" : "false") +
             ",\"aetherHttp\":" + (http_enabled ? "true" : "false") +
             ",\"firefoxSocks\":" + (firefox_socks_enabled ? "true" : "false") +
             ",\"firefoxHttp\":" + (firefox_http_enabled ? "true" : "false") +
             ",\"torSocks\":" + (tor_socks_enabled ? "true" : "false") +
-            ",\"torHttp\":" + (tor_http_enabled ? "true" : "false") + "}");
+            ",\"torHttp\":" + (tor_http_enabled ? "true" : "false") +
+            ",\"xraySocks\":" + (xray_socks_enabled ? "true" : "false") +
+            ",\"xrayHttp\":" + (xray_http_enabled ? "true" : "false") +
+            ",\"singboxSocks\":" + (singbox_socks_enabled ? "true" : "false") +
+            ",\"singboxHttp\":" + (singbox_http_enabled ? "true" : "false") + "}");
         json = merge_psiphon_transport(json, psiphon_transport);
         psiphon_config_json_built = json;
         c.psiphon.config_json   = psiphon_config_json_built.c_str();

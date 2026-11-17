@@ -2142,7 +2142,7 @@ pub struct CoreFfi {
     /// Installs the host log sink (NULL clears it) and its level gate, from the
     /// scale [`log_gate`] produces.
     pub set_log: unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>, c_int),
-    /// Every inbound of every live instance as `instance|label|proto|port|scope`
+    /// Every inbound of every live instance as `handle|label|proto|port|scope`
     /// records, `;`-separated: what the core is actually listening on, which is
     /// not what the app's settings say. Answers the bytes it needs when the
     /// buffer is too small, so the caller can ask again.
@@ -2152,14 +2152,16 @@ pub struct CoreFfi {
 /// One inbound a live core instance is listening on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreListener {
-    /// The instance's position among the live ones in its shim: two hops of one
-    /// core have different ones, which is what keeps their listeners apart on
-    /// screen. It counts from one and is not the internal handle, which grows
-    /// for the life of the process.
-    pub instance: u64,
-    /// What the instance calls itself, from the config it was given: `vless
+    /// The handle the shim gave the instance that runs this inbound, which is
+    /// what joins the record to the [`LiveInstance`] the session published: the
+    /// shim numbers its instances per core, so it is the host side that knows
+    /// which route an instance belongs to and where in that route it sits.
+    pub handle: u64,
+    /// What the config calls itself, from the outbound it declares: `vless
     /// reality`, not an index. Empty when the config declares no outbound of
-    /// its own, which is a config that only serves local proxies.
+    /// its own, which is a config that only serves local proxies. This is the
+    /// fallback for an instance the session started without a saved config;
+    /// a named one is shown under the user's own name.
     pub label: String,
     /// The core's own protocol name, as its config spells it.
     pub proto: String,
@@ -2199,7 +2201,7 @@ pub fn live_listeners(ffi: CoreFfi) -> Vec<CoreListener> {
     Vec::new()
 }
 
-/// `instance|label|proto|port|scope;...` into typed records, skipping anything
+/// `handle|label|proto|port|scope;...` into typed records, skipping anything
 /// unreadable.
 fn parse_listeners(text: &str) -> Vec<CoreListener> {
     let mut out = Vec::new();
@@ -2214,11 +2216,11 @@ fn parse_listeners(text: &str) -> Vec<CoreListener> {
         ) else {
             continue;
         };
-        let (Ok(instance), Ok(port)) = (instance.parse::<u64>(), port.parse::<u16>()) else {
+        let (Ok(handle), Ok(port)) = (instance.parse::<u64>(), port.parse::<u16>()) else {
             continue;
         };
         out.push(CoreListener {
-            instance,
+            handle,
             label: label.to_string(),
             proto: proto.to_string(),
             port,
@@ -2226,6 +2228,55 @@ fn parse_listeners(text: &str) -> Vec<CoreListener> {
         });
     }
     out
+}
+
+/// One core instance this process is running, and what the session calls it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveInstance {
+    pub backend: FcaeBackend,
+    /// The handle its shim gave it. Handles count per core, so the same number
+    /// can name an Xray instance and a sing-box one: the pair is the identity.
+    pub handle: u64,
+    /// The user's name for the saved config it runs. Empty for an instance
+    /// started without one, which is shown under its config's own description
+    /// instead.
+    pub name: String,
+}
+
+/// Every live core instance, in the order its session started it — the exit
+/// first, then each chain hop above it.
+///
+/// A shim numbers its instances per core for the life of the process, so the
+/// two cores of one route both start at one and neither knows the other exists.
+/// What the connection info lists is one route, in one order, numbered across
+/// every core in it, and the name of each instance is the user's own name for
+/// the config — none of which a shim can see: it is handed a config and nothing
+/// else. Starts run from the exit upwards and are published as they happen, so
+/// the order here is the route's.
+static LIVE: Mutex<Vec<LiveInstance>> = Mutex::new(Vec::new());
+
+/// Publish an instance the moment its handle owns the core, and until it is
+/// stopped it is what the connection info lists.
+fn publish_live(backend: FcaeBackend, handle: u64, name: String) {
+    let mut live = LIVE.lock();
+    live.retain(|instance| instance.backend != backend || instance.handle != handle);
+    live.push(LiveInstance { backend, handle, name });
+}
+
+/// Forget one instance once its core is closed. Idempotent.
+fn retire_live(backend: FcaeBackend, handle: u64) {
+    LIVE.lock()
+        .retain(|instance| instance.backend != backend || instance.handle != handle);
+}
+
+/// Forget every instance of one core, for a teardown that closed them all.
+pub fn retire_all(backend: FcaeBackend) {
+    LIVE.lock().retain(|instance| instance.backend != backend);
+}
+
+/// The live instances, in route order.
+pub fn live_instances() -> Vec<LiveInstance> {
+    LIVE.lock().clone()
 }
 
 /// One core's build identity and config grammar — the only per-core code.
@@ -2435,8 +2486,13 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     // From here the handle owns the core: dropping the handle is what stops a
     // core whose start was abandoned, so the guard has nothing left to do.
     owner.armed = false;
+    // Published under the handle that now owns it, so the connection info lists
+    // this instance under the user's own name for the config it runs, in the
+    // place the route started it — and only stopping it takes it back out.
+    publish_live(config.backend, handle, config.core.selection_name().unwrap_or_default().to_owned());
     let running = Running {
         ffi,
+        backend: config.backend,
         handle,
         display: D::DISPLAY,
         endpoints,
@@ -2503,19 +2559,24 @@ pub async fn halt(ffi: CoreFfi, handle: u64) {
 
 /// Stop every instance of one core: the net a session teardown leaves under the
 /// paths that could not stop what they started.
-pub async fn halt_all(ffi: CoreFfi) {
+pub async fn halt_all(ffi: CoreFfi, backend: FcaeBackend) {
     let _ = tokio::task::spawn_blocking(move || unsafe { (ffi.stop_all)() }).await;
+    // Every instance of that core is closed above, so none of them is live.
+    retire_all(backend);
 }
 
 /// Stop one instance from a caller that cannot await -- a `Drop`, which is where
 /// an abandoned start ends up.
-fn halt_detached(ffi: CoreFfi, handle: u64) {
+fn halt_detached(backend: FcaeBackend, ffi: CoreFfi, handle: u64) {
     // The Go stop joins the core's own goroutines, so it must not run on the
     // thread that is dropping: on the session worker that would hold a
     // disconnect open, and on the UI thread it would freeze the window.
     let _ = std::thread::Builder::new()
         .name("fcae-core-halt".into())
-        .spawn(move || unsafe { (ffi.stop)(handle) });
+        .spawn(move || {
+            unsafe { (ffi.stop)(handle) };
+            retire_live(backend, handle);
+        });
 }
 
 /// A core start that is in flight, and the promise that the core it brings up
@@ -2573,6 +2634,9 @@ impl Drop for CoreStart {
 /// dropped instead (an abandoned start), which stops the core off-thread.
 pub struct Running {
     ffi: CoreFfi,
+    /// The core this instance runs. Handles count per core, so this is half of
+    /// what identifies the instance in [`LIVE`].
+    backend: FcaeBackend,
     /// This instance's handle in its shim. Two hops of one core in a session
     /// hold different handles, which is what keeps their counters apart.
     handle: u64,
@@ -3365,6 +3429,7 @@ impl Running {
     async fn halt(&self) {
         self.stopping.store(true, Ordering::SeqCst);
         halt(self.ffi, self.handle).await;
+        retire_live(self.backend, self.handle);
     }
 }
 
@@ -3381,7 +3446,7 @@ impl Drop for Running {
     fn drop(&mut self) {
         self.rtt_stop.store(true, Ordering::Release);
         if !self.stopping.load(Ordering::SeqCst) {
-            halt_detached(self.ffi, self.handle);
+            halt_detached(self.backend, self.ffi, self.handle);
         }
     }
 }
@@ -3462,26 +3527,58 @@ mod tests {
         }
     }
 
-    /// A record carries what names an instance -- its own flavour, and whether
-    /// its port reaches beyond loopback -- so the connection info can say which
-    /// core serves which port instead of numbering them.
+    /// A record carries the handle that names the instance, its own flavour and
+    /// whether its port reaches beyond loopback -- so the host can join the
+    /// record to the session that started it and say which core serves which
+    /// port, under what name.
     #[test]
-    fn listener_records_keep_their_label_and_scope() {
+    fn listener_records_keep_their_instance_label_and_scope() {
         let parsed = parse_listeners(
-            "1|vless reality|socks|1827|local;\
-             1|vless reality|http|1828|any;\
-             2||socks|9000|local",
+            "7|vless reality|socks|1827|local;\
+             7|vless reality|http|1828|any;\
+             9||socks|9000|local",
         );
         assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0].instance, 1);
+        assert_eq!(parsed[0].handle, 7);
         assert_eq!(parsed[0].label, "vless reality");
         assert_eq!(parsed[0].proto, "socks");
         assert_eq!(parsed[0].port, 1827);
         assert!(!parsed[0].any, "a loopback listener is not offered on the LAN");
         assert_eq!(parsed[1].proto, "http");
         assert!(parsed[1].any, "a wildcard listener answers on the LAN address");
-        assert_eq!(parsed[2].instance, 2);
+        assert_eq!(parsed[2].handle, 9, "each instance keeps its own handle");
         assert_eq!(parsed[2].label, "", "a config with no outbound names nothing");
+    }
+
+    /// The registry is what puts a route in one order and numbers it across the
+    /// cores it runs: an instance joins it when its start hands it a handle --
+    /// the exit first, each hop above it next -- and a stop takes it back out.
+    #[test]
+    fn live_instances_keep_the_order_their_route_started_them_in() {
+        const EXIT: u64 = u64::MAX;
+        const HOP: u64 = u64::MAX - 1;
+        publish_live(FcaeBackend::Xray, EXIT, "Home".into());
+        publish_live(FcaeBackend::SingBox, HOP, "Backup".into());
+        let live = live_instances();
+        let find = |backend, handle| {
+            live.iter()
+                .position(|instance| instance.backend == backend && instance.handle == handle)
+                .expect("the instance is listed")
+        };
+        let (exit, hop) = (find(FcaeBackend::Xray, EXIT), find(FcaeBackend::SingBox, HOP));
+        assert!(exit < hop, "the exit is listed before the hop that dials through it");
+        assert_eq!(live[exit].name, "Home", "the instance is named by its saved config");
+
+        retire_live(FcaeBackend::Xray, EXIT);
+        let live = live_instances();
+        assert!(!live.iter().any(|i| i.backend == FcaeBackend::Xray && i.handle == EXIT));
+        assert!(
+            live.iter().any(|i| i.backend == FcaeBackend::SingBox && i.handle == HOP),
+            "stopping one instance leaves the others alone"
+        );
+
+        retire_all(FcaeBackend::SingBox);
+        assert!(!live_instances().iter().any(|i| i.backend == FcaeBackend::SingBox && i.handle == HOP));
     }
 
     /// A record this side cannot read in full is not guessed at.

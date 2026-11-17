@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use fcae_firefox::{Account, Accounts, ChallengeService, ControlPlane, Dialer, FirefoxError, Fxa, LoginOutcome, Result, TransportPreference};
 use parking_lot::Mutex;
@@ -27,6 +28,22 @@ impl JobSnapshot {
 
 type Services = Arc<tokio::sync::Mutex<HashMap<String, Arc<OnceCell<Accounts>>>>>;
 
+/// How long the worker waits for another job before it retires.
+///
+/// It owns a runtime, a TLS stack's worth of cached state and every `Accounts`
+/// object its jobs built. None of that is worth keeping while nothing is
+/// happening: an app that opened the account list once would otherwise hold a
+/// thread and a runtime for the rest of the process's life. Retiring costs only
+/// those objects -- the next submission starts a fresh worker.
+const WORKER_IDLE: Duration = Duration::from_secs(30);
+/// Commands that may wait for the worker before a submission is refused.
+const WORKER_QUEUE: usize = 32;
+/// Jobs that may run at once; each one holds a permit for its whole life.
+const WORKER_SLOTS: usize = 32;
+/// Finished jobs the table keeps before it starts dropping them. A running job
+/// is never dropped: it is what its caller is still waiting on.
+const JOB_HISTORY: usize = 128;
+
 struct Command {
     id: u64,
     request: Zeroizing<String>,
@@ -34,10 +51,48 @@ struct Command {
     _permit: OwnedSemaphorePermit,
 }
 
-struct Dispatcher {
+/// The account worker: the thread, while one exists.
+///
+/// `identity` is what lets the worker clear the slot it was started for and
+/// leave a replacement alone.
+struct Worker {
+    identity: Arc<()>,
     sender: mpsc::Sender<Command>,
+}
+
+struct Dispatcher {
+    /// `None` between workers. Commands are enqueued under this lock, and the
+    /// worker retires under it too, so a command can never be handed to a
+    /// receiver that is on its way out.
+    worker: Mutex<Option<Worker>>,
     permits: Arc<Semaphore>,
     jobs: Arc<Mutex<HashMap<u64, JobSnapshot>>>,
+}
+
+impl Dispatcher {
+    fn new() -> Self {
+        Self {
+            worker: Mutex::new(None),
+            permits: Arc::new(Semaphore::new(WORKER_SLOTS)),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Hand `command` to the account worker, starting one when the last one
+    /// retired. Returns the command back when no worker can take it.
+    fn dispatch(&'static self, command: Command) -> std::result::Result<(), Command> {
+        let mut slot = self.worker.lock();
+        if slot.as_ref().map_or(true, |worker| worker.sender.is_closed()) {
+            *slot = spawn_worker(self.worker, self.jobs.clone());
+        }
+        let Some(worker) = slot.as_ref() else {
+            return Err(command);
+        };
+        worker
+            .sender
+            .try_send(command)
+            .map_err(|error| error.into_inner())
+    }
 }
 
 static DISPATCHER: OnceLock<Dispatcher> = OnceLock::new();
@@ -145,17 +200,7 @@ pub async fn solve_captcha(image: &str) -> Result<String> {
 }
 
 pub fn submit(request: &str) -> u64 {
-    let dispatcher = DISPATCHER.get_or_init(|| {
-        let (sender, receiver) = mpsc::channel(32);
-        let permits = Arc::new(Semaphore::new(32));
-        let jobs = Arc::new(Mutex::new(HashMap::new()));
-        let worker_jobs = jobs.clone();
-        std::thread::Builder::new()
-            .name("fcae-firefox-accounts".into())
-            .spawn(move || account_worker(receiver, worker_jobs))
-            .expect("failed to spawn Firefox account worker");
-        Dispatcher { sender, permits, jobs }
-    });
+    let dispatcher = DISPATCHER.get_or_init(Dispatcher::new);
     if request.len() > 64 * 1024 { return 0; }
     let Ok(permit) = dispatcher.permits.clone().try_acquire_owned() else { return 0 };
     let cancel_on_release = serde_json::from_str::<Value>(request).ok()
@@ -164,17 +209,51 @@ pub fn submit(request: &str) -> u64 {
     let id = NEXT_JOB.fetch_add(1, Ordering::Relaxed);
     {
         let mut jobs = dispatcher.jobs.lock();
-        if jobs.len() >= 128 {
-            let completed: Vec<_> = jobs.iter().filter(|(_, job)| job.status != "running").map(|(id, _)| *id).collect();
-            for id in completed.into_iter().take(jobs.len().saturating_sub(127)) { jobs.remove(&id); }
-        }
+        trim_jobs(&mut jobs);
         jobs.insert(id, JobSnapshot::new(id, "running", json!({}), cancel_on_release));
     }
     let command = Command { id, request: Zeroizing::new(request.to_string()), cancel_on_release, _permit: permit };
-    if dispatcher.sender.try_send(command).is_err() {
-        finish(&dispatcher.jobs, id, Err(FirefoxError::Internal("Firefox account worker is unavailable or busy".into())));
+    if let Err(refused) = dispatcher.dispatch(command) {
+        finish(&dispatcher.jobs, refused.id, Err(FirefoxError::Internal(
+            "Firefox account worker is unavailable or busy".into(),
+        )));
     }
     id
+}
+
+/// Drop enough finished jobs to leave room for one more.
+fn trim_jobs(jobs: &mut HashMap<u64, JobSnapshot>) {
+    if jobs.len() < JOB_HISTORY {
+        return;
+    }
+    let finished: Vec<u64> = jobs
+        .iter()
+        .filter(|(_, job)| job.status != "running")
+        .map(|(id, _)| *id)
+        .collect();
+    for id in finished.into_iter().take(jobs.len() - JOB_HISTORY + 1) {
+        jobs.remove(&id);
+    }
+}
+
+/// Start the account worker for `slot`, or `None` when the thread cannot be.
+fn spawn_worker(
+    slot: &'static Mutex<Option<Worker>>,
+    jobs: Arc<Mutex<HashMap<u64, JobSnapshot>>>,
+) -> Option<Worker> {
+    let (sender, receiver) = mpsc::channel(WORKER_QUEUE);
+    let identity: Arc<()> = Arc::new(());
+    let owned = Arc::clone(&identity);
+    match std::thread::Builder::new()
+        .name("fcae-firefox-accounts".into())
+        .spawn(move || account_worker(receiver, jobs, slot, owned))
+    {
+        Ok(_) => Some(Worker { identity, sender }),
+        Err(error) => {
+            log::error!("[firefox] cannot start the account worker: {error}");
+            None
+        }
+    }
 }
 
 pub fn poll(id: u64) -> Option<Arc<str>> {
@@ -195,17 +274,44 @@ fn release_job(jobs: &Mutex<HashMap<u64, JobSnapshot>>, id: u64) {
     }
 }
 
-fn account_worker(mut receiver: mpsc::Receiver<Command>, jobs: Arc<Mutex<HashMap<u64, JobSnapshot>>>) {
+fn account_worker(
+    mut receiver: mpsc::Receiver<Command>,
+    jobs: Arc<Mutex<HashMap<u64, JobSnapshot>>>,
+    slot: &'static Mutex<Option<Worker>>,
+    identity: Arc<()>,
+) {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
             log::error!("[firefox] cannot create account runtime: {error}");
+            // Nothing will ever run on this worker, so it must not keep the
+            // slot: the next submission has to be able to start another one.
+            retire(slot, &identity, &mut receiver, &jobs);
             return;
         }
     };
+    // Everything this worker owns lives inside this block: the `Accounts`
+    // service cache, the tasks parked on the runtime and the runtime itself.
+    // Leaving it is what hands all of it back.
     runtime.block_on(async move {
         let services: Services = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        while let Some(command) = receiver.recv().await {
+        loop {
+            let command = match tokio::time::timeout(WORKER_IDLE, receiver.recv()).await {
+                Ok(Some(command)) => command,
+                // Every sender is gone; nothing can arrive any more.
+                Ok(None) => break,
+                // Idle. A job still running is work the caller is waiting on,
+                // so the worker stays while one does.
+                Err(_) => {
+                    if jobs.lock().values().any(|job| job.status == "running") {
+                        continue;
+                    }
+                    if retire(slot, &identity, &mut receiver, &jobs) {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let services = services.clone();
             let jobs = jobs.clone();
             let id = command.id;
@@ -215,14 +321,7 @@ fn account_worker(mut receiver: mpsc::Receiver<Command>, jobs: Arc<Mutex<HashMap
                 let _permit = command._permit;
                 let result = execute(&services, &command.request).await;
                 finish(&task_jobs, id, result);
-                let jobs = task_jobs;
-                let mut states = jobs.lock();
-                if states.len() > 128 {
-                    let completed: Vec<u64> = states.iter().filter(|(_, state)| state.status != "running").map(|(id, _)| *id).collect();
-                    for id in completed.into_iter().take(states.len().saturating_sub(128)) {
-                        states.remove(&id);
-                    }
-                }
+                trim_jobs(&mut task_jobs.lock());
             });
             let mut states = jobs.lock();
             if let Some(state) = states.get_mut(&id) {
@@ -232,6 +331,34 @@ fn account_worker(mut receiver: mpsc::Receiver<Command>, jobs: Arc<Mutex<HashMap
             }
         }
     });
+}
+
+/// Hand the worker slot back, and fail whatever is still queued for it.
+///
+/// Called by the worker itself while it holds the slot lock, which is the same
+/// lock [`Dispatcher::dispatch`] enqueues under: a submission either reaches
+/// this receiver or, from that moment on, sees no worker and starts another.
+/// The queued commands are failed rather than dropped so a caller is never left
+/// polling a job nothing will finish.
+fn retire(
+    slot: &Mutex<Option<Worker>>,
+    identity: &Arc<()>,
+    receiver: &mut mpsc::Receiver<Command>,
+    jobs: &Mutex<HashMap<u64, JobSnapshot>>,
+) -> bool {
+    let mut slot = slot.lock();
+    if !slot.as_ref().is_some_and(|worker| Arc::ptr_eq(&worker.identity, identity)) {
+        return false;
+    }
+    // Drops the slot's sender. Every other sender is a clone taken inside
+    // `dispatch`, which is holding this lock, so none can outlive this.
+    *slot = None;
+    while let Ok(command) = receiver.try_recv() {
+        finish(jobs, command.id, Err(FirefoxError::Internal(
+            "the Firefox account worker retired before this job ran".into(),
+        )));
+    }
+    true
 }
 
 fn finish(jobs: &Mutex<HashMap<u64, JobSnapshot>>, id: u64, result: Result<Value>) {

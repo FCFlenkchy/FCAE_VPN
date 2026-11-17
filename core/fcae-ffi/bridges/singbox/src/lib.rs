@@ -96,7 +96,7 @@ impl Backend for SingBoxBackend {
     /// the net is here as well as on the stop paths, and why it closes every
     /// instance rather than one.
     async fn drain(&self) {
-        halt_all(SingBoxDialect::FFI).await;
+        halt_all(SingBoxDialect::FFI, FcaeBackend::SingBox).await;
     }
 
     /// [`Self::drain`] without a runtime to run it on.
@@ -107,6 +107,9 @@ impl Backend for SingBoxBackend {
     /// worker died before it could drain.
     fn reclaim_blocking(&self) {
         unsafe { sb_stop_all() };
+        // Closed, so none of them is live: a teardown that could not await the
+        // drain must not leave the connection info listing cores that are gone.
+        fcae_runtime::sing_xray::retire_all(FcaeBackend::SingBox);
     }
 }
 

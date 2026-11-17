@@ -4907,13 +4907,20 @@ class MainActivity : AppCompatActivity() {
         .put("FCAETransport", selectedPsiphonTransportIndex())
         .put("DisableLocalHTTPProxy", !switchPsiphonHttp.isChecked)
         .put("DisableLocalSocksProxy", !switchPsiphonSocks.isChecked)
+        // Every backend's switches, because a hop in a chain is dialled through
+        // its own listener too: a core that only appears in the middle of a
+        // route still opens the SOCKS5 and HTTP listeners the user configured.
         .put("FCAEListeners", org.json.JSONObject()
             .put("aetherSocks", switchSocks.isChecked)
             .put("aetherHttp", switchHttp.isChecked)
             .put("firefoxSocks", firefoxSocksEnabled)
             .put("firefoxHttp", firefoxHttpEnabled)
             .put("torSocks", switchTorSocks.isChecked)
-            .put("torHttp", switchTorHttp.isChecked))
+            .put("torHttp", switchTorHttp.isChecked)
+            .put("xraySocks", xraySocksEnabled)
+            .put("xrayHttp", xrayHttpEnabled)
+            .put("singboxSocks", singBoxSocksEnabled)
+            .put("singboxHttp", singBoxHttpEnabled))
         .toString()
 
     private fun startPsiphon() {
@@ -6051,16 +6058,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Append what the live proxy cores report: a header per instance naming the
-     * config it runs, then one line per inbound it answers on. True only when
-     * the exit core answered, so the caller does not also print the settings'
-     * single port for a session the cores have answered for -- a hop's lines
-     * never suppress it.
+     * Append what the live proxy cores report: a header per instance -- its
+     * place in the route and the name of the saved config it runs, as `1_ Home`
+     * -- then one line per inbound it answers on. True only when the exit core
+     * answered, so the caller does not also print the settings' single port for
+     * a session the cores have answered for -- a hop's lines never suppress it.
      *
-     * [exitName] is the user's own name for the config the route ends in, and
-     * it goes on the last instance of the exit core, which is the hop that end
-     * is. A LAN address is offered only for an inbound the core bound beyond
-     * loopback: a chained hop serves only the hop below it.
+     * The engine reports every instance of every core in one route order, so the
+     * numbers run across the cores the route uses. [exitName] is the user's own
+     * name for the config the route ends in, and it goes on the last instance of
+     * the exit core, which is the hop that end is. A LAN address is offered only
+     * for an inbound the core bound beyond loopback: a chained hop serves only
+     * the hop below it.
      */
     private fun appendCoreListeners(
         out: StringBuilder,
@@ -6075,9 +6084,9 @@ class MainActivity : AppCompatActivity() {
         }
         if (reported.isEmpty()) return false
         val records = reported.split(';')
-        // The records of one instance are adjacent, so a header is due where
-        // (core, instance) changes -- and the exit's own name belongs to the
-        // last of those groups that its core reports.
+        // The records of one instance are adjacent, so a header is due where the
+        // instance changes: its core and its place in the route. The exit's own
+        // name belongs to the last of those groups that its core reports.
         var exitGroupAt = -1
         var group = ""
         records.forEachIndexed { index, record ->
@@ -6096,16 +6105,15 @@ class MainActivity : AppCompatActivity() {
             val fields = record.split('|')
             if (fields.size != 6) return@forEachIndexed
             val core = fields[0]
-            val instance = fields[1]
+            val position = fields[1]
             val proto = fields[3]
             val port = fields[4].toIntOrNull() ?: return@forEachIndexed
             if (core.isEmpty() || port !in 1..65535) return@forEachIndexed
-            if (core + " " + instance != group) {
-                group = core + " " + instance
-                val named = if (index == exitGroupAt) exitName else fields[2]
-                out.append("\n$core")
-                if (named.isNotEmpty()) out.append(" $named")
-                out.append(" #$instance")
+            if (core + " " + position != group) {
+                group = core + " " + position
+                val named = if (index == exitGroupAt && exitName.isNotEmpty()) exitName else fields[2]
+                out.append("\n").append(position).append("_")
+                if (named.isNotEmpty()) out.append(' ').append(named)
                 added = true
                 if (core == exitIsCore) exitListed = true
             }

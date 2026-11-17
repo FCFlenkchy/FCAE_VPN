@@ -394,6 +394,15 @@ impl ChainHop {
     }
 }
 
+/// Which listeners each backend may open when it is a chain hop rather than the
+/// session's exit.
+///
+/// A hop is dialled through its SOCKS5 listener, so that one is required; its
+/// HTTP listener is the user's own switch and is opened exactly when they left
+/// it on, the same as it is for the exit. Every backend is here for the same
+/// reason: a hop this app starts is still the core the user configured, and one
+/// of them silently losing half of its listener configuration is what made an
+/// HTTP proxy available on an exit and missing on the hop in front of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenerPolicy {
     pub aether_socks: bool,
@@ -402,6 +411,30 @@ pub struct ListenerPolicy {
     pub firefox_http: bool,
     pub tor_socks: bool,
     pub tor_http: bool,
+    pub xray_socks: bool,
+    pub xray_http: bool,
+    pub singbox_socks: bool,
+    pub singbox_http: bool,
+}
+
+impl Default for ListenerPolicy {
+    /// What a caller that names no listeners at all means: every SOCKS5
+    /// listener on, every HTTP listener off, which is the pair a chained hop
+    /// needs and nothing more.
+    fn default() -> Self {
+        Self {
+            aether_socks: true,
+            aether_http: false,
+            firefox_socks: true,
+            firefox_http: false,
+            tor_socks: true,
+            tor_http: false,
+            xray_socks: true,
+            xray_http: false,
+            singbox_socks: true,
+            singbox_http: false,
+        }
+    }
 }
 
 /// Fully validated session configuration.
@@ -996,17 +1029,31 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         block,
     };
 
+    // The listener switches travel inside the Psiphon config document, which is
+    // the only free-form field the ABI carries. A flag is read as a flag: a
+    // present `true` is on, a present `false` is off, and anything else -- a
+    // string, a number, a key a caller this old does not send -- is the
+    // documented default rather than a whole policy dropped, so one unreadable
+    // switch cannot silence every other listener the session configured.
     cfg.listener_policy = cstr_opt(raw.psiphon.config_json)
         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
         .and_then(|json| {
-            let p = json.get("FCAEListeners")?;
+            let document = json.get("FCAEListeners")?;
+            let defaults = ListenerPolicy::default();
+            let flag = |key: &str, fallback: bool| {
+                document.get(key).and_then(serde_json::Value::as_bool).unwrap_or(fallback)
+            };
             Some(ListenerPolicy {
-                aether_socks: p.get("aetherSocks")?.as_bool()?,
-                aether_http: p.get("aetherHttp")?.as_bool()?,
-                firefox_socks: p.get("firefoxSocks")?.as_bool()?,
-                firefox_http: p.get("firefoxHttp")?.as_bool()?,
-                tor_socks: p.get("torSocks")?.as_bool()?,
-                tor_http: p.get("torHttp")?.as_bool()?,
+                aether_socks: flag("aetherSocks", defaults.aether_socks),
+                aether_http: flag("aetherHttp", defaults.aether_http),
+                firefox_socks: flag("firefoxSocks", defaults.firefox_socks),
+                firefox_http: flag("firefoxHttp", defaults.firefox_http),
+                tor_socks: flag("torSocks", defaults.tor_socks),
+                tor_http: flag("torHttp", defaults.tor_http),
+                xray_socks: flag("xraySocks", defaults.xray_socks),
+                xray_http: flag("xrayHttp", defaults.xray_http),
+                singbox_socks: flag("singboxSocks", defaults.singbox_socks),
+                singbox_http: flag("singboxHttp", defaults.singbox_http),
             })
         });
 

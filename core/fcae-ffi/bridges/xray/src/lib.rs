@@ -103,7 +103,7 @@ impl Backend for XrayBackend {
     /// are what tells the shared Go runtime an engine is gone, which is what
     /// hands the heap back between sessions.
     async fn drain(&self) {
-        halt_all(XrayDialect::FFI).await;
+        halt_all(XrayDialect::FFI, FcaeBackend::Xray).await;
     }
 
     /// [`Self::drain`] without a runtime to run it on.
@@ -114,6 +114,9 @@ impl Backend for XrayBackend {
     /// worker died before it could drain.
     fn reclaim_blocking(&self) {
         unsafe { xray_stop_all() };
+        // Closed, so none of them is live: a teardown that could not await the
+        // drain must not leave the connection info listing cores that are gone.
+        fcae_runtime::sing_xray::retire_all(FcaeBackend::Xray);
     }
 }
 

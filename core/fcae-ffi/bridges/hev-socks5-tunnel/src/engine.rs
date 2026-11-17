@@ -1,9 +1,11 @@
 //! The HEV engine host — one implementation for every platform; `cfg` appears
 //! only where the platforms genuinely differ.
 //!
-//! * Windows drives the in-process C engine through a dedicated call thread
-//!   (`hev-calls`) that serializes `quit`/`stats`, and protects the existing
-//!   Wintun adapter with `windows_tun::TunGuard`.
+//! * Windows drives the in-process C engine through a call thread (`hev-calls`)
+//!   that serializes `quit`/`stats`, and protects the existing Wintun adapter
+//!   with `windows_tun::TunGuard`. The thread belongs to one run: it is created
+//!   with it and joined with it, so a stopped session leaves no thread, no
+//!   channel and no native handle behind.
 //! * Unix hands the engine an fd (Android fd or its own device) and applies
 //!   host addresses/routes/DNS through `unix_tun::TunGuard` on Linux/macOS.
 //!
@@ -86,6 +88,7 @@ type QuitFn = unsafe extern "C" fn();
 type StatsFn = unsafe extern "C" fn(*mut usize, *mut usize, *mut usize, *mut usize);
 
 #[cfg(windows)]
+#[derive(Clone, Copy)]
 struct Ffi {
     main_from_str: MainFn,
     quit: QuitFn,
@@ -96,31 +99,12 @@ struct Ffi {
 enum Call {
     Quit,
     Stats(mpsc::SyncSender<HevStats>),
-    Barrier(mpsc::SyncSender<()>),
 }
 
+/// The engine's entry points, loaded once. Function pointers only: no thread,
+/// no channel, nothing that could outlive a run.
 #[cfg(windows)]
-struct Runtime {
-    ffi: Ffi,
-    calls: mpsc::Sender<Call>,
-}
-
-#[cfg(windows)]
-fn drain_calls(calls: &mpsc::Sender<Call>, enqueue: &Mutex<()>, timeout: Duration) -> Result<()> {
-    let (reply, done) = mpsc::sync_channel(1);
-    {
-        // A stop that observed the previous run must enqueue its quit before
-        // this barrier, even if that run has already exited.
-        let _enqueue = enqueue.lock();
-        calls.send(Call::Barrier(reply))
-            .map_err(|_| CoreError::Internal("hev call thread stopped".into()))?;
-    }
-    done.recv_timeout(timeout)
-        .map_err(|_| CoreError::Internal("hev calls from the previous run did not finish".into()))
-}
-
-#[cfg(windows)]
-static RUNTIME: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
+static FFI: OnceLock<std::result::Result<Ffi, String>> = OnceLock::new();
 
 #[cfg(windows)]
 fn load() -> Result<Ffi> {
@@ -148,39 +132,75 @@ fn serve(queue: mpsc::Receiver<Call>, quit: QuitFn, stats: StatsFn) {
                 unsafe { stats(&mut s.tx_packets, &mut s.tx_bytes, &mut s.rx_packets, &mut s.rx_bytes) };
                 let _ = reply.send(s);
             }
-            Call::Barrier(reply) => { let _ = reply.send(()); }
         }
     }
 }
 
 #[cfg(windows)]
-fn runtime() -> Result<&'static Runtime> {
-    RUNTIME
-        .get_or_init(|| {
-            std::panic::catch_unwind(load)
-                .unwrap_or_else(|_| Err(CoreError::Internal("initializing the hev runtime panicked".into())))
-                .and_then(|ffi| {
-                    let (calls, queue) = mpsc::channel();
-                    let (quit, stats) = (ffi.quit, ffi.stats);
-                    std::thread::Builder::new()
-                        .name("hev-calls".into())
-                        .spawn(move || serve(queue, quit, stats))
-                        .map_err(|e| CoreError::Internal(format!("cannot start the hev call thread: {e}")))?;
-                    Ok(Runtime { ffi, calls })
-                })
-                .map_err(|e| {
-                    log::error!("[hev] {e}");
-                    e.to_string()
-                })
-        })
-        .as_ref()
-        .map_err(|e| CoreError::Internal(e.clone()))
+fn ffi() -> Result<Ffi> {
+    FFI.get_or_init(|| {
+        std::panic::catch_unwind(load)
+            .unwrap_or_else(|_| Err(CoreError::Internal("initializing the hev runtime panicked".into())))
+            .map_err(|e| {
+                log::error!("[hev] {e}");
+                e.to_string()
+            })
+    })
+    .as_ref()
+    .map(|engine| *engine)
+    .map_err(|error| CoreError::Internal(error.clone()))
 }
 
-/// The runtime if a start already initialized it.
+/// The call thread of one run.
+///
+/// `quit` and `stats` are native calls that must not run on the UI thread and
+/// must not run on the engine's own thread either, so they are handed to this
+/// one. It exists exactly as long as the run it serves: a thread for the whole
+/// process -- parked on a channel only a static could feed -- was a thread, its
+/// stack and its channel left behind by every session that ever used HEV, after
+/// the engine it was started for had already been closed.
 #[cfg(windows)]
-fn loaded() -> Option<&'static Runtime> {
-    RUNTIME.get()?.as_ref().ok()
+struct Calls {
+    /// `None` once the thread has been released; dropping it is what ends the
+    /// thread's loop.
+    sender: Option<mpsc::Sender<Call>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl Calls {
+    fn spawn(engine: Ffi) -> Result<Self> {
+        let (sender, queue) = mpsc::channel();
+        let (quit, stats) = (engine.quit, engine.stats);
+        let thread = std::thread::Builder::new()
+            .name("hev-calls".into())
+            .spawn(move || serve(queue, quit, stats))
+            .map_err(|e| CoreError::Internal(format!("cannot start the hev call thread: {e}")))?;
+        Ok(Self { sender: Some(sender), thread: Some(thread) })
+    }
+
+    fn send(&self, call: Call) -> bool {
+        self.sender.as_ref().is_some_and(|sender| sender.send(call).is_ok())
+    }
+
+    /// Close the channel and wait for the thread to drain what is queued.
+    ///
+    /// The drain is the point: a `quit` that is still in flight is a native
+    /// call the *next* run must not inherit, which is why the join, not the
+    /// send, is what makes a stop complete.
+    fn finish(&mut self) {
+        self.sender = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Calls {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 // --- Shared surface -----------------------------------------------------------
@@ -210,12 +230,20 @@ fn begin_run(running: &AtomicBool, closing: &AtomicBool) -> Result<()> {
 struct Engine {
     thread: std::thread::JoinHandle<()>,
     rc: Arc<AtomicI32>,
+    /// The run's call thread, handed to the active run so it is released with
+    /// it. Dropped here when the start fails before one exists.
+    #[cfg(windows)]
+    calls: Option<Calls>,
 }
 
 struct Active {
     generation: Arc<()>,
     reaping: bool,
     thread: std::thread::JoinHandle<()>,
+    /// The run's call thread; released with this run, never before it and never
+    /// after it.
+    #[cfg(windows)]
+    calls: Option<Calls>,
     _psiphon: Option<socks5p::Adapter>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     _host: Option<fcae_runtime::unix_tun::TunGuard>,
@@ -239,8 +267,6 @@ fn configure_host(cfg: &SessionConfig, peer_ip: Option<&str>, #[cfg_attr(target_
 
 pub struct HevSocks5TunnelBridge {
     lifecycle: Mutex<()>,
-    #[cfg(windows)]
-    enqueue: Mutex<()>,
     active: Arc<Mutex<Option<Active>>>,
     running: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
@@ -255,8 +281,6 @@ impl HevSocks5TunnelBridge {
     pub fn new() -> Self {
         Self {
             lifecycle: Mutex::new(()),
-            #[cfg(windows)]
-            enqueue: Mutex::new(()),
             active: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             closing: Arc::new(AtomicBool::new(false)),
@@ -278,24 +302,44 @@ impl HevSocks5TunnelBridge {
         }
         #[cfg(windows)]
         {
+            // The sender is cloned out from under the lock: the wait for the
+            // answer must not hold up a start or a stop of the same run.
             let (reply, result) = mpsc::sync_channel(1);
-            loaded()?.calls.send(Call::Stats(reply)).ok()?;
+            let sender = {
+                let active = self.active.lock();
+                active.as_ref()?.calls.as_ref()?.sender.clone()?
+            };
+            sender.send(Call::Stats(reply)).ok()?;
             result.recv_timeout(STATS_TIMEOUT).ok()
         }
     }
 
     /// The engine's quit request. Non-Windows calls in place; Windows queues
-    /// the call to the call thread so it never runs on the UI thread.
+    /// the call to the run's own call thread so it never runs on the UI thread.
     fn signal_stop(&self) -> bool {
-        #[cfg(windows)]
-        let _enqueue = self.enqueue.lock();
         if !self.running.swap(false, Ordering::SeqCst) { return false; }
         #[cfg(not(windows))]
         { engine_quit() }
         #[cfg(windows)]
         {
             log::info!("[tun:hev] down");
-            loaded().is_some_and(|rt| rt.calls.send(Call::Quit).is_ok())
+            // A run that was already reaped has no call thread left, and
+            // nothing of it left to quit either.
+            let active = self.active.lock();
+            active.as_ref().is_some_and(|run| run.calls.as_ref().is_some_and(|calls| calls.send(Call::Quit)))
+        }
+    }
+
+    /// Send the run's quit through its own call thread when the run is still
+    /// alive. Idempotent on the engine side, so a second stop of the same run
+    /// costs one native call and never a stuck teardown.
+    #[cfg(windows)]
+    fn quit_if_live(&self) {
+        let active = self.active.lock();
+        let Some(run) = active.as_ref() else { return };
+        if run.thread.is_finished() { return; }
+        if let Some(calls) = run.calls.as_ref() {
+            calls.send(Call::Quit);
         }
     }
 
@@ -325,6 +369,11 @@ impl HevSocks5TunnelBridge {
     fn shutdown(&self, timeout: Duration) {
         self.closing.store(true, Ordering::SeqCst);
         self.signal_stop();
+        // A stop that raced the start cleared `running` before the run had a
+        // call thread to send its quit to, so `signal_stop` had nothing to send
+        // to. The run is up now and owes its quit just the same.
+        #[cfg(windows)]
+        self.quit_if_live();
         if !self.reap(timeout) {
             log::warn!("[hev] engine did not stop within {timeout:?}; cleanup is deferred until it exits");
             self.reap_later();
@@ -391,10 +440,14 @@ impl HevSocks5TunnelBridge {
             if dup < 0 { return Err(CoreError::Internal(format!("dup(tun fd {fd}) failed: {}", std::io::Error::last_os_error()))); }
             Some(dup)
         } else { None };
+        // The call thread is created before the engine thread: `quit` has to be
+        // deliverable from the very first instant the native engine exists,
+        // including a stop that arrives while this start is still running.
         #[cfg(windows)]
-        let entry = {
+        let (entry, calls) = {
             let _ = fd;
-            runtime()?.ffi.main_from_str
+            let engine = ffi()?;
+            (engine.main_from_str, Calls::spawn(engine)?)
         };
         let running = self.running.clone();
         let closing = self.closing.clone();
@@ -423,7 +476,12 @@ impl HevSocks5TunnelBridge {
             if let Some(dup) = dup { unsafe { libc::close(dup) }; }
             CoreError::Internal(format!("cannot spawn the hev-socks5-tunnel engine thread: {e}"))
         })?;
-        Ok(Engine { thread, rc })
+        Ok(Engine {
+            thread,
+            rc,
+            #[cfg(windows)]
+            calls: Some(calls),
+        })
     }
 }
 
@@ -450,8 +508,6 @@ impl TunBridge for HevSocks5TunnelBridge {
             log::info!("[hev] loading Wintun");
             fcae_runtime::windows_dll::ensure_wintun(fcae_runtime::wintun::wintun_bytes())?;
             log::info!("[hev] Wintun loaded; preparing native engine");
-            let rt = runtime()?;
-            drain_calls(&rt.calls, &self.enqueue, RESTART_GRACE)?;
         }
         // Psiphon exits dial through a loopback socks5p adapter so the engine
         // never sees a UDP ASSOCIATE (0x03) it cannot serve; DNS rides the
@@ -483,6 +539,8 @@ impl TunBridge for HevSocks5TunnelBridge {
             generation: Arc::new(()),
             reaping: false,
             thread: engine.thread,
+            #[cfg(windows)]
+            calls: engine.calls,
             _psiphon: psiphon_adapter,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             _host: host,
@@ -551,30 +609,30 @@ impl TunBridge for HevSocks5TunnelBridge {
 mod tests {
     use super::*;
 
-    #[test]
-    fn barrier_waits_for_a_stop_enqueued_by_an_exiting_run() {
-        let enqueue = Arc::new(Mutex::new(()));
-        let (calls, queue) = mpsc::channel();
-        let lock = enqueue.lock();
-        let calls_for_barrier = calls.clone();
-        let enqueue_for_barrier = enqueue.clone();
-        let waiter = std::thread::spawn(move || {
-            drain_calls(&calls_for_barrier, &enqueue_for_barrier, Duration::from_secs(2))
-        });
-        assert!(calls.send(Call::Quit).is_ok());
-        drop(lock);
-        assert!(matches!(queue.recv_timeout(Duration::from_secs(1)).unwrap(), Call::Quit));
-        match queue.recv_timeout(Duration::from_secs(1)).unwrap() {
-            Call::Barrier(reply) => { reply.send(()).unwrap(); }
-            _ => panic!("barrier must follow quit"),
-        }
-        assert!(waiter.join().unwrap().is_ok());
+    unsafe extern "C" fn no_main(_: *const c_uchar, _: c_uint, _: c_int) -> c_int { 0 }
+    unsafe extern "C" fn no_quit() {}
+    unsafe extern "C" fn no_stats(_: *mut usize, _: *mut usize, _: *mut usize, _: *mut usize) {}
+
+    fn test_engine() -> Ffi {
+        Ffi { main_from_str: no_main, quit: no_quit, stats: no_stats }
     }
 
     #[test]
-    fn barrier_fails_if_the_call_thread_is_stuck() {
-        let (calls, _queue) = mpsc::channel();
-        assert!(drain_calls(&calls, &Mutex::new(()), Duration::from_millis(5)).is_err());
+    fn the_call_thread_ends_with_the_run_it_serves() {
+        let mut calls = Calls::spawn(test_engine()).expect("call thread spawns");
+        assert!(calls.send(Call::Quit), "a live run takes its quit");
+        calls.finish();
+        assert!(!calls.send(Call::Quit), "a released call thread takes nothing");
+        assert!(calls.thread.is_none(), "finish joins the thread");
+    }
+
+    #[test]
+    fn stats_reach_the_run_through_its_call_thread() {
+        let mut calls = Calls::spawn(test_engine()).expect("call thread spawns");
+        let (reply, answer) = mpsc::sync_channel(1);
+        assert!(calls.send(Call::Stats(reply)));
+        assert!(answer.recv_timeout(Duration::from_secs(1)).is_ok());
+        calls.finish();
     }
 
     #[test]

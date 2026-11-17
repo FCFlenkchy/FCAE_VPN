@@ -249,14 +249,13 @@ func xray_stop_all() {
 }
 
 // xray_listeners writes what this shim is actually running: one
-// `instance|label|protocol|port|scope` record per inbound of every live
-// instance, in a `;`-separated list. Returns the bytes written without the
-// terminator, or the bytes it needs when the buffer is too small (nothing is
-// written then).
+// `handle|label|protocol|port|scope` record per inbound of every live instance,
+// in a `;`-separated list. Returns the bytes written without the terminator, or
+// the bytes it needs when the buffer is too small (nothing is written then).
 //
-// The instance number is this instance's position among the live ones, not the
-// handle it was given: handles are handed out for the life of the process, so a
-// handle would label the first session's core #1 and the tenth session's #23.
+// Records carry the handle the instance was started with: a route can run this
+// core twice, another core beside it, and the host is what knows the order the
+// instances were started in and the name the user gave each config.
 //
 //export xray_listeners
 func xray_listeners(buf *C.char, capacity C.int) C.int {
@@ -270,10 +269,10 @@ func xray_listeners(buf *C.char, capacity C.int) C.int {
 	}
 	sort.Slice(handles, func(i, j int) bool { return handles[i] < handles[j] })
 	var records []string
-	for position, id := range handles {
+	for _, id := range handles {
 		core := xrayCores[id]
 		for _, listener := range core.listeners {
-			records = append(records, coreRecord(position+1, core.label, listener))
+			records = append(records, coreRecord(id, core.label, listener))
 		}
 	}
 	xrayMu.Unlock()

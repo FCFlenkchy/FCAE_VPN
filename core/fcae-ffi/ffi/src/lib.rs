@@ -24,6 +24,8 @@ use fcae_abi::*;
 use fcae_runtime::config;
 use fcae_runtime::error::CoreError;
 use fcae_runtime::session::{Supervisor, SupervisorConfig, TunBridge};
+#[cfg(any(feature = "xray", feature = "singbox"))]
+use fcae_runtime::sing_xray::CoreListener;
 use fcae_runtime::telemetry::{self, TelemetryCell};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
@@ -1344,33 +1346,79 @@ pub unsafe extern "C" fn fcae_core_listeners(
     listeners.kinds
 }
 
-/// One `core|instance|label|protocol|port|scope` record for an inbound a live
+/// One `core|position|name|protocol|port|scope` record for an inbound a live
 /// core reports.
 ///
-/// `label` is what the instance calls itself (`vless reality`), and `scope` is
-/// `any` for an inbound bound to every interface and `local` for a loopback
-/// one: a chained hop serves only the hop below it, so offering its port on the
-/// LAN address would name an address that refuses the connection.
+/// `name` is what the instance is called — the user's own name for the saved
+/// config it runs — and `position` is its place in the route, counted across
+/// every core in it: the exit is `1` and each hop above it the next number.
+/// `scope` is `any` for an inbound bound to every interface and `local` for a
+/// loopback one: a chained hop serves only the hop below it, so offering its
+/// port on the LAN address would name an address that refuses the connection.
 #[cfg(any(feature = "xray", feature = "singbox"))]
-fn core_record(core: &str, listener: &fcae_runtime::sing_xray::CoreListener) -> String {
+fn core_record(core: &str, position: u64, name: &str, listener: &CoreListener) -> String {
     let scope = if listener.any { "any" } else { "local" };
     format!(
-        "{core}|{}|{}|{}|{}|{scope}",
-        listener.instance, listener.label, listener.proto, listener.port
+        "{core}|{position}|{name}|{}|{}|{scope}",
+        listener.proto, listener.port
     )
 }
 
-/// Every inbound of every live instance of every core compiled in.
+/// Every inbound of every live instance, in route order, numbered across the
+/// cores the route runs.
+///
+/// The two halves are what neither side knows alone: the shims answer what each
+/// instance is listening on, and the live registry answers which route the
+/// instance belongs to, where in that route it sits and what the user calls it.
+/// Listing by shim instead put every Xray instance above every sing-box one —
+/// the order the cores happen to be compiled in, not the order the route runs —
+/// and numbered each core's instances from one, so a route of three hops read
+/// `#1, #2, #1`.
 #[cfg(any(feature = "xray", feature = "singbox"))]
 fn listener_records() -> Vec<String> {
-    let mut records = Vec::new();
-    #[cfg(feature = "xray")]
-    for listener in fcae_bridge_xray::listeners() {
-        records.push(core_record("Xray", &listener));
+    let live = fcae_runtime::sing_xray::live_instances();
+    if live.is_empty() {
+        return Vec::new();
     }
+    // One shim call per core: the ports of every instance of that core, keyed by
+    // the handle the session published the instance under.
+    #[cfg(feature = "xray")]
+    let xray = fcae_bridge_xray::listeners();
     #[cfg(feature = "singbox")]
-    for listener in fcae_bridge_singbox::listeners() {
-        records.push(core_record("sing-box", &listener));
+    let singbox = fcae_bridge_singbox::listeners();
+    let mut records = Vec::new();
+    let mut position = 0;
+    for instance in live {
+        let reported: &[CoreListener] = match instance.backend {
+            #[cfg(feature = "xray")]
+            FcaeBackend::Xray => &xray,
+            #[cfg(feature = "singbox")]
+            FcaeBackend::SingBox => &singbox,
+            _ => &[],
+        };
+        let inbounds: Vec<&CoreListener> = reported
+            .iter()
+            .filter(|listener| listener.handle == instance.handle)
+            .collect();
+        let Some(first) = inbounds.first() else {
+            // Nothing to show for it: an instance with no inbound the app can
+            // name does not take a number of its own.
+            continue;
+        };
+        let core = fcae_runtime::config::backend_label(instance.backend);
+        // A saved config is named by the user; one started without one is shown
+        // under the config's own description of itself.
+        let name = if !instance.name.is_empty() {
+            instance.name.as_str()
+        } else if !first.label.is_empty() {
+            first.label.as_str()
+        } else {
+            core
+        };
+        position += 1;
+        for listener in inbounds {
+            records.push(core_record(core, position, name, listener));
+        }
     }
     records
 }
@@ -1382,7 +1430,7 @@ fn listener_records() -> Vec<String> {
 }
 
 /// What the live proxy cores are listening on, one record per inbound:
-/// `core|instance|label|protocol|port|scope`, records separated by `;`.
+/// `core|position|name|protocol|port|scope`, records separated by `;`.
 ///
 /// The connection info in the UI reads this instead of the settings: a saved
 /// config declares the ports of its own inbounds, a chain runs one instance per

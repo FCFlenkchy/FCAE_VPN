@@ -39,7 +39,7 @@
 extern "C" void fcae_sponsor_set_ui_active(bool active);
 extern "C" void fcae_ui_diagnostic(uint32_t event, uint32_t value);
 // A `fcae-ffi` export rather than part of the `fcae-abi` header: what the live
-// cores are listening on, as `core|instance|label|protocol|port|scope` records.
+// cores are listening on, as `core|position|name|protocol|port|scope` records.
 extern "C" uint32_t fcae_live_listeners(char* out, uint32_t capacity);
 
 
@@ -4838,10 +4838,12 @@ void render_ui() {
             live_len = 0;
             live_listeners[0] = '\0';
         }
-        // `core|instance|label|protocol|port|scope;...`, grouped per instance:
+        // `core|position|name|protocol|port|scope;...`, grouped per instance:
         // one header naming the instance and one line per inbound it answers on.
-        // A listener bound to loopback alone offers no LAN address, because a
-        // chained hop serves only the hop below it.
+        // The records arrive in route order and `position` counts across every
+        // core in it, so a route of several hops reads 1_, 2_, 3_ whatever cores
+        // they run. A listener bound to loopback alone offers no LAN address,
+        // because a chained hop serves only the hop below it.
         struct LiveListener {
             std::string proto;
             std::string port;
@@ -4849,7 +4851,10 @@ void render_ui() {
         };
         struct LiveGroup {
             std::string core;
-            std::string instance;
+            /// The instance's place in the route, counted across every core the
+            /// route runs: the exit is 1, each hop above it the next number.
+            std::string position;
+            /// The name the session started the instance under.
             std::string label;
             std::vector<LiveListener> lines;
         };
@@ -4878,10 +4883,10 @@ void render_ui() {
                 // core's `socks` inbound is named the same way here.
                 if (listener.proto == "SOCKS") listener.proto = "SOCKS5";
                 const std::string core = field(0);
-                const std::string instance = field(1);
+                const std::string position = field(1);
                 if (live_groups.empty() || live_groups.back().core != core
-                        || live_groups.back().instance != instance) {
-                    live_groups.push_back(LiveGroup{core, instance, field(2), {}});
+                        || live_groups.back().position != position) {
+                    live_groups.push_back(LiveGroup{core, position, field(2), {}});
                 }
                 live_groups.back().lines.push_back(std::move(listener));
             }
@@ -4957,19 +4962,20 @@ void render_ui() {
                 endpoint("Psiphon", "SOCKS5", fcae_psiphon_socks_port());
                 endpoint("Psiphon", "HTTP", fcae_psiphon_http_port());
             }
-            // Every live core instance, as the core reports it: the header
-            // names the instance by the config it runs -- the user's own name
-            // when the route ends there, the config's own `vless reality`
-            // otherwise -- and the protocol is the core's name for the inbound,
-            // never a guess made from the settings.
+            // Every live core instance, in route order: the header is the
+            // instance's place in the route and the name the user gave the saved
+            // config it runs -- `1_ Home` -- and the protocol is the core's name
+            // for the inbound, never a guess made from the settings. The name
+            // comes from the session that started the instance, which is what
+            // knows which saved config each hop runs.
             for (size_t i = 0; i < live_groups.size(); ++i) {
                 const LiveGroup& group = live_groups[i];
                 const char* named = (i == exit_group && final_core && !final_core->name.empty())
                     ? final_core->name.c_str() : group.label.c_str();
                 if (*named)
-                    ImGui::TextWrapped("%s %s #%s", group.core.c_str(), named, group.instance.c_str());
+                    ImGui::TextWrapped("%s_ %s", group.position.c_str(), named);
                 else
-                    ImGui::TextWrapped("%s #%s", group.core.c_str(), group.instance.c_str());
+                    ImGui::TextWrapped("%s_", group.position.c_str());
                 for (const LiveListener& line : group.lines) {
                     if (share && line.any)
                         ImGui::TextWrapped("    %s 127.0.0.1:%s | LAN: %s:%s",
