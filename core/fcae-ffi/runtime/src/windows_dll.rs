@@ -218,6 +218,12 @@ extern "system" fn relay(level: i32, _timestamp: u64, message: *const u16) {
     let mut len = 0;
     while unsafe { *message.add(len) } != 0 { len += 1; }
     let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(message, len) });
+    // Every engine opens the adapter before creating it, so the first call of
+    // each session always misses; the create that follows is the real step.
+    if text.starts_with("Failed to find matching adapter name") {
+        log::debug!("[wintun] {text}");
+        return;
+    }
     match level {
         0 => log::info!("[wintun] {text}"),
         1 => log::warn!("[wintun] {text}"),

@@ -147,6 +147,29 @@ fn best_route(peer: IpAddr) -> Result<MIB_IPFORWARD_ROW2> {
     Ok(row)
 }
 
+/// Whether a private prefix needs a route of its own on Windows.
+///
+/// Loopback, link-local, multicast and the reserved blocks have an on-link
+/// interface route on every Windows install, and every one of them is more
+/// specific than the two halves the device installs, so they already stay off
+/// the tunnel. `GetBestRoute2` without a zone id answers with whichever
+/// interface owns a matching on-link row, which is not the path that traffic
+/// takes, so looking them up says nothing about the exclusion. What is left —
+/// the RFC 1918 blocks, shared address space, unique local addresses and the
+/// deprecated site-local scope — has no interface route and needs the row.
+fn needs_exclusion_route(network: IpAddr) -> bool {
+    match network {
+        IpAddr::V4(network) => {
+            let first = network.octets()[0];
+            first != 0 && first != 127 && first < 224 && !network.is_link_local()
+        }
+        IpAddr::V6(network) => {
+            let first = network.segments()[0];
+            network != Ipv6Addr::LOCALHOST && first & 0xffc0 != 0xfe80 && first & 0xff80 != 0xff00
+        }
+    }
+}
+
 struct InterfaceChange {
     before: MIB_IPINTERFACE_ROW,
     applied: MIB_IPINTERFACE_ROW,
@@ -252,7 +275,7 @@ impl TunGuard {
         if cfg.tun.exclude_private {
             let outside_v6 = non_loopback_ipv6_present()?;
             for (network, bits) in crate::config::excluded_prefixes() {
-                if network.is_ipv6() && !outside_v6 {
+                if (network.is_ipv6() && !outside_v6) || !needs_exclusion_route(network) {
                     continue;
                 }
                 let physical = match best_route(network) {
@@ -652,6 +675,16 @@ mod tests {
         assert!(prefix("fc00::1/64", AF_INET).is_err());
         assert!(prefix("127.0.0.1/8", AF_INET).is_err());
         assert!(prefix("198.18.0.1", AF_INET).is_err());
+    }
+
+    #[test]
+    fn only_routable_private_prefixes_get_an_exclusion_route() {
+        let routed = crate::config::excluded_prefixes()
+            .filter(|(network, _)| needs_exclusion_route(*network))
+            .map(|(network, bits)| format!("{network}/{bits}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(routed, "10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 fc00::/7 fec0::/10");
     }
 
     #[test]
