@@ -3533,39 +3533,36 @@ static void render_core_editor() {
     // user added meanwhile.
     bool changed = s_core_editor_fresh;
     s_core_editor_fresh = false;
-    // One field per line, each behind its own label, and the core picked out of
-    // a row of two instead of a dropdown: the two cores are the whole choice, so
-    // both are visible and the pick is one click, the way a radio row reads.
-    const ImGuiStyle& style = ImGui::GetStyle();
-    const float label_width = std::max(ImGui::CalcTextSize("Name").x,
-                                       ImGui::CalcTextSize("Core").x) + style.ItemSpacing.x;
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Name");
-    ImGui::SameLine(label_width);
-    ImGui::PushItemWidth(300);
+    // A caption over its control, the way every other setting in the app is
+    // laid out: a label and its field on one line collide as soon as one of them
+    // grows, and the field gets the width the caption does not need. The Android
+    // dialog does the same, so the two editors read alike.
+    ImGui::TextDisabled("Name");
+    ImGui::PushItemWidth(-FLT_MIN);
     // The engine's limit plus the terminator: typing past it does nothing.
-    changed |= ImGui::InputText("##core_name", s_core_name_buf, kMaxCoreConfigName + 1);
+    changed |= ImGui::InputTextWithHint("##core_name", "a name for this config",
+                                        s_core_name_buf, kMaxCoreConfigName + 1);
     ImGui::PopItemWidth();
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Core");
-    for (int backend = 0; backend < 2; ++backend) {
-        ImGui::SameLine(backend == 0 ? label_width : 0.0f, style.ItemSpacing.x);
-        const char* tag = backend == 1 ? "sing-box" : "xray";
-        // The tag colour is the one the list gives the same core, so the row the
-        // user is saving already looks like the row it becomes.
-        if (s_core_backend_buf == backend) ImGui::PushStyleColor(ImGuiCol_Text, kCoreTagColor);
-        // As tall as a field, so the row reads as one line of controls.
-        const ImVec2 size(ImGui::CalcTextSize(tag).x + 3.0f * style.FramePadding.x,
-                          ImGui::GetFrameHeight());
-        if (ImGui::Selectable(tag, s_core_backend_buf == backend,
-                              ImGuiSelectableFlags_None, size)) {
-            s_core_backend_buf = backend;
+    // Two cores, so both stay on screen: radio circles like Outbound IP version,
+    // not a dropdown that hides half the choice behind a click.
+    ImGui::TextDisabled("Core");
+    {
+        // The circles take the colour the saved-configs list gives the same
+        // core, so the row being saved already looks like the row it becomes.
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, kCoreTagColor);
+        if (ImGui::RadioButton("xray", s_core_backend_buf == 0)) {
+            s_core_backend_buf = 0;
             changed = true;
         }
-        if (s_core_backend_buf == backend) ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (ImGui::RadioButton("sing-box", s_core_backend_buf == 1)) {
+            s_core_backend_buf = 1;
+            changed = true;
+        }
+        ImGui::PopStyleColor();
     }
     ImGui::Spacing();
-    ImGui::TextUnformatted("Config (a share link or the core's own JSON)");
+    ImGui::TextDisabled("Config (a share link or the core's own JSON)");
     float text_height = ImGui::GetContentRegionAvail().y
         - ImGui::GetTextLineHeightWithSpacing() - ImGui::GetFrameHeightWithSpacing() - 8.0f;
     if (text_height < 160.0f) text_height = 160.0f;
