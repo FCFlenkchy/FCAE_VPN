@@ -8,7 +8,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};
+use windows_sys::core::GUID;
+use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+    DiUninstallDevice, SetupDiCallClassInstaller, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
+    SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW, SetupDiSetClassInstallParamsW, DIF_REMOVE,
+    DI_REMOVEDEVICE_GLOBAL, GUID_DEVCLASS_NET, HDEVINFO, SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA,
+    SP_REMOVEDEVICE_PARAMS,
+};
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
+use windows_sys::Win32::NetworkManagement::IpHelper::{ConvertInterfaceGuidToLuid, FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::System::LibraryLoader::{
     AddDllDirectory, GetProcAddress, LoadLibraryExW, SetDefaultDllDirectories,
@@ -255,27 +264,96 @@ pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
     }).as_ref().map(|_| ()).map_err(|e| CoreError::Internal(e.clone()))
 }
 
-/// Resolve the LUID from the Wintun adapter the selected engine actually
-/// opened, rather than assuming Windows used the requested creation GUID.
-pub fn wintun_adapter_luid(name: &str) -> Result<windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH> {
-    use std::ffi::c_void;
-    use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-    let library = WINTUN.get().and_then(|result| result.as_ref().ok())
-        .ok_or_else(|| CoreError::Internal("Wintun has not been loaded".into()))?;
-    type Open = unsafe extern "system" fn(*const u16) -> *mut c_void;
-    type GetLuid = unsafe extern "system" fn(*mut c_void, *mut NET_LUID_LH);
-    type Close = unsafe extern "system" fn(*mut c_void);
-    let open: Open = unsafe { library.symbol(CStr::from_bytes_with_nul(b"WintunOpenAdapter\0").unwrap())? };
-    let get_luid: GetLuid = unsafe { library.symbol(CStr::from_bytes_with_nul(b"WintunGetAdapterLUID\0").unwrap())? };
-    let close: Close = unsafe { library.symbol(CStr::from_bytes_with_nul(b"WintunCloseAdapter\0").unwrap())? };
-    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-    let adapter = unsafe { open(name.as_ptr()) };
-    if adapter.is_null() {
-        return Err(CoreError::Internal(format!("cannot open the engine's Wintun adapter: {}", std::io::Error::last_os_error())));
-    }
+const ADAPTER_GUID: GUID = GUID::from_u128(crate::config::WINTUN_ADAPTER_GUID_U128);
+
+/// `SetupDiGetClassDevsW` failure value (`INVALID_HANDLE_VALUE`).
+const INVALID_DEVINFO: HDEVINFO = -1;
+
+/// Whether Windows has an interface for the adapter, by the pinned GUID or by
+/// the name the engine gave Wintun: the state a failed device install never
+/// reaches.
+fn adapter_present(adapter: &str) -> bool {
     let mut luid = NET_LUID_LH::default();
-    unsafe { get_luid(adapter, &mut luid); close(adapter); }
-    Ok(luid)
+    unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) == 0 } || wintun_adapter_luid(adapter).is_ok()
+}
+
+/// Wintun names every device instance after the requested creation GUID, and
+/// every engine asks for the same one, so the GUID identifies the node across
+/// the enumerator spellings Windows uses (`SWD\Wintun{…}` on Windows 10,
+/// `ROOT\WINTUN\{…}` on Windows 7).
+fn owns_instance(instance: &str) -> bool {
+    instance.to_ascii_uppercase().contains(crate::config::WINTUN_ADAPTER_GUID)
+}
+
+/// Uninstall the Wintun device instances of this GUID that exist without an
+/// interface, and report whether one was removed.
+///
+/// Such a node is a failed install Windows cannot bind again: every later
+/// create re-uses it and fails with problem 31 and `STATUS_OBJECT_NAME_NOT_FOUND`
+/// (Win32 2) before the engine can start, driver reinstall included. Wintun
+/// clears these itself, but only from a work item queued by its own create and
+/// close paths, so a device left by an interrupted install outlives the process
+/// that could have removed it. Only instances with no interface are touched, so
+/// a healthy adapter of a running session is never a candidate.
+fn remove_unusable_adapter(adapter: &str) -> bool {
+    if adapter_present(adapter) { return false; }
+    let mut removed = 0;
+    for enumerator in ["SWD\\WINTUN", "ROOT\\WINTUN"] {
+        removed += remove_instances(enumerator);
+    }
+    if removed > 0 {
+        log::info!("[tun] uninstalled {removed} Wintun device(s) for '{adapter}' that Windows could not bind");
+    }
+    removed > 0
+}
+
+fn remove_instances(enumerator: &str) -> usize {
+    let wide: Vec<u16> = enumerator.encode_utf16().chain(Some(0)).collect();
+    let devices = unsafe { SetupDiGetClassDevsW(&GUID_DEVCLASS_NET, wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if devices == INVALID_DEVINFO { return 0; }
+    let mut removed = 0;
+    let mut index = 0;
+    loop {
+        let mut data: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
+        data.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+        if unsafe { SetupDiEnumDeviceInfo(devices, index, &mut data) } == 0 { break; }
+        index += 1;
+        let mut id = [0u16; 512];
+        if unsafe { SetupDiGetDeviceInstanceIdW(devices, &data, id.as_mut_ptr(), id.len() as u32, std::ptr::null_mut()) } == 0 {
+            continue;
+        }
+        let len = id.iter().position(|unit| *unit == 0).unwrap_or(id.len());
+        if !owns_instance(&String::from_utf16_lossy(&id[..len])) { continue; }
+        if uninstall(devices, &data) { removed += 1; }
+    }
+    unsafe { SetupDiDestroyDeviceInfoList(devices) };
+    removed
+}
+
+fn uninstall(devices: HDEVINFO, data: &SP_DEVINFO_DATA) -> bool {
+    let mut reboot = 0;
+    if unsafe { DiUninstallDevice(std::ptr::null_mut(), devices, data, 0, &mut reboot) } != 0 {
+        if reboot != 0 { log::info!("[tun] a restart is needed to finish removing the Wintun device"); }
+        return true;
+    }
+    // The class installer's remove is what Wintun itself uses.
+    let params = SP_REMOVEDEVICE_PARAMS {
+        ClassInstallHeader: SP_CLASSINSTALL_HEADER {
+            cbSize: std::mem::size_of::<SP_CLASSINSTALL_HEADER>() as u32,
+            InstallFunction: DIF_REMOVE,
+        },
+        Scope: DI_REMOVEDEVICE_GLOBAL,
+        HwProfile: 0,
+    };
+    let size = std::mem::size_of::<SP_REMOVEDEVICE_PARAMS>() as u32;
+    let removed = unsafe {
+        SetupDiSetClassInstallParamsW(devices, data, &params.ClassInstallHeader, size) != 0
+            && SetupDiCallClassInstaller(DIF_REMOVE, devices, data) != 0
+    };
+    if !removed {
+        log::warn!("[tun] cannot uninstall the unusable Wintun device: {}", std::io::Error::last_os_error());
+    }
+    removed
 }
 
 static DRIVER_RESET: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -306,21 +384,40 @@ fn reset_driver() -> Result<()> {
         .map_err(CoreError::Internal)
 }
 
-/// Run an adapter-creating start, reinstalling the Wintun driver once when the
-/// adapter never appeared.
+/// Run an adapter-creating start, clearing the Wintun state that keeps Windows
+/// from installing the adapter.
 ///
 /// Every engine reports a failed device install as a bare start error, so the
-/// missing adapter is the signal: when the adapter is openable the failure was
-/// somewhere else and the driver stays untouched.
-pub fn start_with_driver_repair<T>(adapter: &str, start: impl Fn() -> Result<T>) -> Result<T> {
+/// missing interface is the signal: when the GUID has an interface the failure
+/// was somewhere else and nothing is touched. The stages follow the failure
+/// modes — an unbindable device instance blocks the create, a stale driver
+/// package blocks the install that follows it. A start that is being cancelled
+/// is left alone: the session is going down and must not lose its driver to it.
+pub fn start_with_driver_repair<T>(
+    adapter: &str,
+    stopping: impl Fn() -> bool,
+    start: impl Fn() -> Result<T>,
+) -> Result<T> {
+    remove_unusable_adapter(adapter);
     let error = match start() {
         Ok(value) => return Ok(value),
         Err(error) => error,
     };
-    if wintun_adapter_luid(adapter).is_ok() {
+    if adapter_present(adapter) || stopping() {
         return Err(error);
     }
-    log::warn!("[tun] no Wintun adapter '{adapter}' after a failed start ({error}); reinstalling the driver");
+    log::warn!("[tun] no Wintun interface for '{adapter}' after a failed start: {error}");
+    if remove_unusable_adapter(adapter) {
+        match start() {
+            Ok(value) => {
+                log::info!("[tun] '{adapter}' created after removing its unusable device");
+                return Ok(value);
+            }
+            Err(failed) if stopping() => return Err(failed),
+            Err(failed) => log::warn!("[tun] '{adapter}' still cannot be created: {failed}"),
+        }
+    }
+    log::warn!("[tun] reinstalling the Wintun driver");
     match reset_driver() {
         Ok(()) => {}
         Err(reset) => {
@@ -336,6 +433,33 @@ pub fn start_with_driver_repair<T>(adapter: &str, start: impl Fn() -> Result<T>)
         );
     }
     retried
+}
+
+/// Resolve the LUID of the Wintun adapter the selected engine created, by its
+/// interface name.
+///
+/// Read-only: `WintunCloseAdapter` uninstalls the device instance, so a lookup
+/// that opened the adapter through Wintun would delete the adapter the engine
+/// is using.
+pub fn wintun_adapter_luid(name: &str) -> Result<NET_LUID_LH> {
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    if unsafe { GetIfTable2(&mut table) } != 0 {
+        return Err(CoreError::Internal(format!(
+            "cannot enumerate the network interfaces: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if table.is_null() { return Err(CoreError::Internal("Windows returned an empty interface table".into())); }
+    let wanted: Vec<u16> = name.encode_utf16().collect();
+    let found = (|| {
+        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+        rows.iter().find_map(|row| {
+            let len = row.Alias.iter().position(|unit| *unit == 0).unwrap_or(row.Alias.len());
+            (row.Alias[..len] == wanted[..]).then_some(row.InterfaceLuid)
+        })
+    })();
+    unsafe { FreeMibTable(table.cast()) };
+    found.ok_or_else(|| CoreError::Internal(format!("no network interface named '{name}'")))
 }
 
 #[cfg(test)]

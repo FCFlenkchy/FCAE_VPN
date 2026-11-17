@@ -568,7 +568,11 @@ impl Tun2SocksBridge {
 impl TunBridge for Tun2SocksBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
         #[cfg(windows)]
-        return fcae_runtime::windows_dll::start_with_driver_repair(&cfg.tun.name, || self.start_once(cfg, endpoints));
+        return fcae_runtime::windows_dll::start_with_driver_repair(
+            &cfg.tun.name,
+            || self.closing.load(Ordering::SeqCst),
+            || self.start_once(cfg, endpoints),
+        );
         #[cfg(not(windows))]
         self.start_once(cfg, endpoints)
     }
