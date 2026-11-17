@@ -1141,6 +1141,8 @@ static std::string resolve_config_path_for_load() {
 static constexpr int kMaxCoreConfigs = 64;
 /// Largest single saved config, mirroring fcae-runtime's library limit.
 static constexpr size_t kMaxCoreConfigText = 128 * 1024;
+/// Longest saved-config name in bytes, mirroring fcae-runtime's library limit.
+static constexpr size_t kMaxCoreConfigName = 48;
 
 // Defined next to the protocol list, below: the config loader prunes chain
 // positions against it before the UI helpers are in scope.
@@ -1382,7 +1384,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)index];
         // A line longer than the largest config the engine accepts is a corrupt
         // file, not a config to keep in memory.
-        if (strcmp(end, "_name") == 0 && val.size() <= 48) entry.name = val;
+        if (strcmp(end, "_name") == 0 && val.size() <= kMaxCoreConfigName) entry.name = val;
         else if (strcmp(end, "_backend") == 0) entry.backend = atoi(val.c_str()) == 1 ? 1 : 0;
         else if (strcmp(end, "_text") == 0) {
             std::string text = core_text_decode(val);
@@ -3281,11 +3283,14 @@ static void open_protocol_editor() {
 // pickable as the main protocol and as a chain hop with no extra plumbing.
 
 static bool s_core_configs_popup_open = false;
-// Row the editor below the list is bound to; -1 = nothing selected.
-static int s_core_edit = -1;
-// -1 forces a reload from the entry (the selection changed), otherwise the
-// buffers are the source of truth while the user types.
-static int s_core_buf_for = -1;
+/// The saved-config editor, a modal of its own. Adding and editing are the same
+/// act — a name, a core and a config — so they are the same dialog:
+/// `s_core_editor_row` is the row it rewrites, or -1 while a new one is added.
+static bool s_core_editor_open = false;
+static int s_core_editor_row = -1;
+/// Set when the editor was opened, so the first frame it draws validates what
+/// it was filled with instead of waiting for the first keystroke.
+static bool s_core_editor_fresh = false;
 static char s_core_name_buf[64] = {};
 static int s_core_backend_buf = 0;
 static std::vector<char> s_core_text_buf;
@@ -3294,8 +3299,27 @@ static bool s_core_status_error = false;
 
 static void open_core_configs() {
     s_core_configs_popup_open = true;
-    s_core_buf_for = -1;
+    s_core_editor_open = false;
+    s_core_editor_row = -1;
     s_core_status[0] = 0;
+}
+
+/// Open the editor on `row`, or on a config that does not exist yet (`-1`).
+static void open_core_editor(int row) {
+    const AppState::CoreConfigEntry* entry =
+        (row >= 0 && row < (int)g_app.core_configs.size())
+            ? &g_app.core_configs[(size_t)row] : nullptr;
+    s_core_editor_row = entry ? row : -1;
+    snprintf(s_core_name_buf, sizeof(s_core_name_buf), "%s", entry ? entry->name.c_str() : "");
+    s_core_backend_buf = entry && entry->backend == 1 ? 1 : 0;
+    // One spare byte for the terminator past the largest accepted config.
+    if (s_core_text_buf.size() < kMaxCoreConfigText + 1)
+        s_core_text_buf.assign(kMaxCoreConfigText + 1, '\0');
+    snprintf(s_core_text_buf.data(), s_core_text_buf.size(), "%s", entry ? entry->text.c_str() : "");
+    s_core_status[0] = 0;
+    s_core_status_error = false;
+    s_core_editor_fresh = true;
+    s_core_editor_open = true;
 }
 
 /// Keep every reference into `core_configs` pointing at the same config after
@@ -3323,12 +3347,13 @@ static void core_configs_forget(int removed) {
         rebuilt.push_back(kCoreTransportBase + (index > removed ? index - 1 : index));
     }
     g_app.chain_transports.swap(rebuilt);
-    if (s_core_edit == removed) {
-        s_core_edit = -1;
-        s_core_buf_for = -1;
-    } else if (s_core_edit > removed) {
-        s_core_edit--;
-        s_core_buf_for = -1;
+    // The editor follows the rows it can name, so opening it on a row that moved
+    // still rewrites the config the user pointed at.
+    if (s_core_editor_row == removed) {
+        s_core_editor_row = -1;
+        s_core_editor_open = false;
+    } else if (s_core_editor_row > removed) {
+        s_core_editor_row--;
     }
 }
 
@@ -3337,7 +3362,7 @@ static void core_configs_forget(int removed) {
 /// makes that document ambiguous and gets the later entry dropped.
 static bool core_config_name_free(const char* name, int row) {
     const size_t length = strlen(name);
-    if (length == 0 || length > 48) return false;
+    if (length == 0 || length > kMaxCoreConfigName) return false;
     for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
         if (i == row) continue;
         const std::string& other = g_app.core_configs[(size_t)i].name;
@@ -3350,32 +3375,50 @@ static bool core_config_name_free(const char* name, int row) {
     return true;
 }
 
-/// Validate the editor's buffers. Names must be unique because a saved config
-/// can be referenced by name as well as by position, and a duplicate would make
-/// that ambiguous.
+/// Validate the editor's buffers against the rules the engine parses the
+/// library with, so a config that saves is a config that runs: the name is a
+/// reference in that document and must be unique, the profile has to parse for
+/// the core it is stored under, and every field is bounded in bytes.
+///
+/// `row` is the entry being rewritten, or -1 for one that does not exist yet.
 static void core_config_check(int row) {
     s_core_status_error = true;
-    if (row < 0 || row >= (int)g_app.core_configs.size()) {
+    const std::string name = s_core_name_buf;
+    const bool empty_text = s_core_text_buf.empty() || s_core_text_buf[0] == 0;
+    if (name.empty() && empty_text) {
+        // A form nobody has filled in yet is not a mistake to paint red: the
+        // Save button stays disabled and the status stays silent.
         s_core_status[0] = 0;
         return;
     }
-    const std::string name = s_core_name_buf;
     if (name.empty()) {
         snprintf(s_core_status, sizeof(s_core_status), "Give the config a name.");
         return;
     }
-    if (name.size() > 48) {
-        snprintf(s_core_status, sizeof(s_core_status), "Names are limited to 48 characters.");
+    if (name.size() > kMaxCoreConfigName) {
+        snprintf(s_core_status, sizeof(s_core_status), "Names are limited to %d bytes.",
+                 (int)kMaxCoreConfigName);
         return;
     }
-    if (!core_config_name_free(s_core_name_buf, row)) {
+    if (std::any_of(name.begin(), name.end(),
+                    [](char c) { return std::iscntrl((unsigned char)c) != 0; })) {
+        snprintf(s_core_status, sizeof(s_core_status), "Names cannot contain control characters.");
+        return;
+    }
+    if (!core_config_name_free(name.c_str(), row)) {
         snprintf(s_core_status, sizeof(s_core_status),
                  "Another config is already called \"%s\".", name.c_str());
         return;
     }
-    if (s_core_text_buf.empty() || s_core_text_buf[0] == 0) {
+    if (empty_text) {
         snprintf(s_core_status, sizeof(s_core_status),
                  "Paste a share link or the core's own config JSON.");
+        return;
+    }
+    const size_t length = strlen(s_core_text_buf.data());
+    if (length > kMaxCoreConfigText) {
+        snprintf(s_core_status, sizeof(s_core_status),
+                 "Configs are limited to %d KiB.", (int)(kMaxCoreConfigText / 1024));
         return;
     }
     char reason[224] = {};
@@ -3401,6 +3444,39 @@ static void core_config_check(int row) {
     }
     s_core_status_error = false;
     snprintf(s_core_status, sizeof(s_core_status), "Valid %s config.", core);
+}
+
+/// Store the editor's buffers as the row it was opened on, or as a new one.
+/// Only called with a validated form, so the entry it writes always parses.
+static void apply_core_editor() {
+    AppState::CoreConfigEntry entry;
+    entry.name = s_core_name_buf;
+    entry.backend = s_core_backend_buf == 1 ? 1 : 0;
+    entry.text = s_core_text_buf.data();
+    if (s_core_editor_row >= 0 && s_core_editor_row < (int)g_app.core_configs.size())
+        g_app.core_configs[(size_t)s_core_editor_row] = std::move(entry);
+    else
+        g_app.core_configs.push_back(std::move(entry));
+    // What a listener can answer on is a property of the config, so the cache
+    // the settings and the protocol list read is rebuilt from what was stored.
+    g_app.refresh_core_listeners();
+}
+
+/// `text` shortened with an ellipsis when it does not fit `width`, so the core
+/// tag beside it keeps its place on the row.
+static std::string fit_core_name(const std::string& text, float width) {
+    if (ImGui::CalcTextSize(text.c_str()).x <= width) return text;
+    static const char kEllipsis[] = "...";
+    const float room = width - ImGui::CalcTextSize(kEllipsis).x;
+    std::string out = text;
+    while (!out.empty() && ImGui::CalcTextSize(out.c_str()).x > room) {
+        size_t cut = out.size() - 1;
+        // Never cut a UTF-8 sequence in half: its tail bytes are 10xxxxxx.
+        while (cut > 0 && ((unsigned char)out[cut] & 0xC0) == 0x80) --cut;
+        out.resize(cut);
+    }
+    out += kEllipsis;
+    return out;
 }
 
 /// One core's listener: the same switches and ports Aether and Firefox have.
@@ -3432,6 +3508,60 @@ static void core_listener_block(int backend) {
     ImGui::PopItemWidth();
 }
 
+/// The saved-config editor: the name the user gives a config, the core that runs
+/// it and the config itself. It writes the row it was opened on, or a new one,
+/// and nothing is stored before Save -- the same dialog for both acts, because
+/// they are the same three fields.
+static void render_core_editor() {
+    static const char* const kTitle = "##core-config-editor";
+    if (s_core_editor_open) {
+        ImGui::OpenPopup(kTitle);
+        s_core_editor_open = false;
+    }
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(modal_size(680.0f, 620.0f), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize)) return;
+
+    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f),
+                       s_core_editor_row < 0 ? "Add config" : "Edit config");
+    ImGui::Separator();
+
+    // This frame's edits have to be validated whether or not anything was typed:
+    // an entry can be pre-filled (an edit) and a name can collide with a row the
+    // user added meanwhile.
+    bool changed = s_core_editor_fresh;
+    s_core_editor_fresh = false;
+    ImGui::PushItemWidth(240);
+    // The engine's limit plus the terminator: typing past it does nothing.
+    changed |= ImGui::InputText("Name", s_core_name_buf, kMaxCoreConfigName + 1);
+    ImGui::SameLine();
+    const char* backends[] = { "Xray", "sing-box" };
+    changed |= ImGui::Combo("Core", &s_core_backend_buf, backends, 2);
+    ImGui::PopItemWidth();
+    ImGui::TextUnformatted("Config (a share link or the core's own JSON)");
+    float text_height = ImGui::GetContentRegionAvail().y
+        - ImGui::GetTextLineHeightWithSpacing() - ImGui::GetFrameHeightWithSpacing() - 8.0f;
+    if (text_height < 160.0f) text_height = 160.0f;
+    changed |= ImGui::InputTextMultiline("##core_text", s_core_text_buf.data(),
+                                         s_core_text_buf.size(), ImVec2(-FLT_MIN, text_height));
+    if (changed) core_config_check(s_core_editor_row);
+    ImGui::TextColored(s_core_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
+                                           : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
+                       "%s", s_core_status);
+    ImGui::Spacing();
+    // Save only commits a config that validated, so the library never holds one
+    // the engine would refuse -- that rejection takes the whole session with it.
+    ImGui::BeginDisabled(s_core_status_error);
+    if (ImGui::Button("Save", ImVec2(120, 0))) {
+        apply_core_editor();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 static void render_core_configs() {
     static const char* const kTitle = "Xray & sing-box settings";
     if (s_core_configs_popup_open) {
@@ -3443,108 +3573,70 @@ static void render_core_configs() {
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize)) return;
 
     // The library first: one list of configs, because that is what both cores
-    // run. A row carries the name the user gave it and the core that runs it,
-    // because choosing a core is what this list is for -- the protocol list
-    // names the route and leaves the core here.
+    // run. A row is the name the user gave the config, the core that runs it and
+    // the two things that can be done to it -- the same `name  core` row the
+    // Android dialog shows. Buttons are the only items in a row that take input,
+    // so nothing can swallow their clicks: a full-width Selectable claimed the
+    // whole row, which is why Remove never fired.
     ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Saved configs");
-    ImGui::BeginChild("##core_list", ImVec2(0, 146), ImGuiChildFlags_Borders);
+    // The list takes whatever the listeners, the log level and Close leave.
+    const float list_height = std::max(146.0f, ImGui::GetContentRegionAvail().y - 340.0f);
+    ImGui::BeginChild("##core_list", ImVec2(0, list_height), ImGuiChildFlags_Borders);
+    int edit_row = -1;
     int remove_row = -1;
+    // The same on every row, so it is measured once.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float buttons_width = ImGui::CalcTextSize("Edit").x + ImGui::CalcTextSize("Remove").x
+        + 4.0f * style.FramePadding.x + style.ItemSpacing.x;
     for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
         const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
-        ImGui::PushID(i);
+        const char* tag = transport_tag(kCoreTransportBase + i);
+        // Measured before the row draws anything: what the name may take is the
+        // row less the buttons and the tag beside it, so the tag and the buttons
+        // sit in the same place on every row and a long name cannot reach them.
+        const float row_x = ImGui::GetCursorPosX();
+        const float row_avail = ImGui::GetContentRegionAvail().x;
+        const float tag_width = tag ? ImGui::CalcTextSize(tag).x + kCoreTagGap : 0.0f;
         const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
-        if (ImGui::Selectable(label.c_str(), s_core_edit == i)) {
-            s_core_edit = i;
-            s_core_buf_for = -1;
+        const float name_width = std::max(0.0f, row_avail - buttons_width
+            - 2.0f * style.ItemSpacing.x - tag_width);
+        ImGui::PushID(i);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(fit_core_name(label, name_width).c_str());
+        if (tag) {
+            ImGui::SameLine(0.0f, kCoreTagGap);
+            ImGui::TextColored(kCoreTagColor, "%s", tag);
         }
-        // Measured while the selectable is the line's last item: it spans the
-        // row, so what is left is the whole width again.
-        const float remove_at = std::max(0.0f, ImGui::GetContentRegionAvail().x - 90.0f);
-        if (const char* tag = transport_tag(kCoreTransportBase + i)) {
-            const float tag_at = ImGui::GetStyle().FramePadding.x
-                + ImGui::CalcTextSize(label.c_str()).x + kCoreTagGap;
-            // Only where the name leaves the room: an over-long name already
-            // runs into the Remove button, and a tag drawn on top of it reads
-            // worse than the name alone.
-            if (tag_at + ImGui::CalcTextSize(tag).x < remove_at) {
-                ImGui::SameLine(tag_at);
-                ImGui::TextColored(kCoreTagColor, "%s", tag);
-            }
-        }
-        ImGui::SameLine(remove_at);
+        ImGui::SameLine(row_x + row_avail - buttons_width);
+        if (ImGui::SmallButton("Edit")) edit_row = i;
+        ImGui::SameLine();
         if (ImGui::SmallButton("Remove")) remove_row = i;
         ImGui::PopID();
     }
     if (g_app.core_configs.empty()) ImGui::TextDisabled("No saved configs.");
     ImGui::EndChild();
 
-    if (ImGui::Button("+ Add config") && (int)g_app.core_configs.size() < kMaxCoreConfigs) {
-        AppState::CoreConfigEntry entry;
-        // A name the library can hold: the engine drops a duplicate entry, and a
-        // config that is not in that document cannot be selected as a protocol.
-        for (int suffix = (int)g_app.core_configs.size() + 1;; ++suffix) {
-            std::string name = "Config " + std::to_string(suffix);
-            if (!core_config_name_free(name.c_str(), -1)) continue;
-            entry.name = std::move(name);
-            break;
-        }
-        g_app.core_configs.push_back(std::move(entry));
-        g_app.refresh_core_listeners();
-        s_core_edit = (int)g_app.core_configs.size() - 1;
-        s_core_buf_for = -1;
-    }
+    // Nothing is stored until Save: a config the engine cannot parse is one
+    // library that does not start, and a draft is not a config yet.
+    ImGui::BeginDisabled((int)g_app.core_configs.size() >= kMaxCoreConfigs);
+    if (ImGui::Button("+ Add config")) open_core_editor(-1);
+    ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextDisabled("%d/%d", (int)g_app.core_configs.size(), kMaxCoreConfigs);
     ImGui::Separator();
 
-    if (s_core_edit >= 0 && s_core_edit < (int)g_app.core_configs.size()) {
-        if (s_core_buf_for != s_core_edit) {
-            const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)s_core_edit];
-            snprintf(s_core_name_buf, sizeof(s_core_name_buf), "%s", entry.name.c_str());
-            s_core_backend_buf = entry.backend;
-            // One spare byte for the terminator past the largest accepted config.
-            if (s_core_text_buf.size() < (size_t)kMaxCoreConfigText + 1)
-                s_core_text_buf.assign((size_t)kMaxCoreConfigText + 1, '\0');
-            snprintf(s_core_text_buf.data(), s_core_text_buf.size(), "%s", entry.text.c_str());
-            s_core_buf_for = s_core_edit;
-            core_config_check(s_core_edit);
-        }
-        bool changed = false;
-        ImGui::PushItemWidth(240);
-        changed |= ImGui::InputText("Name", s_core_name_buf, sizeof(s_core_name_buf));
-        ImGui::SameLine();
-        const char* backends[] = {"Xray", "sing-box"};
-        changed |= ImGui::Combo("Core", &s_core_backend_buf, backends, 2);
-        ImGui::PopItemWidth();
-        ImGui::TextUnformatted("Config (a share link or the core's own JSON)");
-        float editor_height = ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeightWithSpacing()
-            - ImGui::GetFrameHeightWithSpacing() - 8.0f;
-        if (editor_height < 120.0f) editor_height = 120.0f;
-        changed |= ImGui::InputTextMultiline("##core_text", s_core_text_buf.data(),
-                                             s_core_text_buf.size(), ImVec2(-FLT_MIN, editor_height));
-        if (changed) {
-            AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)s_core_edit];
-            // A duplicate name is refused here and the stored one stays: a typo
-            // must not drop the config the session runs from the library.
-            if (core_config_name_free(s_core_name_buf, s_core_edit)) entry.name = s_core_name_buf;
-            entry.backend = s_core_backend_buf == 1 ? 1 : 0;
-            entry.text = s_core_text_buf.data();
-            AppState::refresh_core_listeners(entry);
-            core_config_check(s_core_edit);
-        }
-        ImGui::TextColored(s_core_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
-                                               : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
-                           "%s", s_core_status);
-    } else {
-        ImGui::TextDisabled("Select a saved config to edit it, or add one.");
-    }
-
+    // After the loop, so it never reads a vector whose size changed under it.
+    if (edit_row >= 0) open_core_editor(edit_row);
     if (remove_row >= 0) {
         g_app.core_configs.erase(g_app.core_configs.begin() + remove_row);
+        // Re-points the protocol choice and the chain, and drops the editor's
+        // own row number with the config it named.
         core_configs_forget(remove_row);
         g_app.refresh_core_listeners();
     }
-    ImGui::Separator();
+    // The editor is a modal of its own, opened from the buttons above and drawn
+    // inside this one so it stays scoped to the dialog that owns it.
+    render_core_editor();
     core_listener_block(0);
     core_listener_block(1);
     ImGui::Spacing();
