@@ -15,11 +15,11 @@
 //!
 //! * share-link / native-config parsing for [`CoreProfile`] — session configuration,
 //!   parsed once with the rest of [`crate::config::SessionConfig`]. The grammar
-//!   covers both cores' protocols, including the sing-box-only Hysteria2, TUIC
-//!   and AnyTLS, and every transport and security setting either core's own
-//!   grammar defines. [`Outbound::carried_by`] answers whether a core can run
-//!   one whole — a setting neither can express is refused with the reason
-//!   naming the core that can, never dropped,
+//!   covers both cores' protocols, including the sing-box-only Hysteria2,
+//!   Hysteria v1, TUIC, AnyTLS and NaiveProxy, and every transport and security
+//!   setting either core's own grammar defines. [`Outbound::carried_by`]
+//!   answers whether a core can run one whole — a setting neither can express
+//!   is refused with the reason naming the core that can, never dropped,
 //! * [`Plan`] and [`plan_listeners`] — what the session asks of the core,
 //! * [`Rules`] — the app's split-routing rules, validated,
 //! * [`Dialect`] + [`start`] — the only per-core seam: the config dialect and
@@ -202,6 +202,18 @@ pub struct ShadowSocksPlugin {
     pub options: Option<String>,
 }
 
+/// A WireGuard peer, as a share link names one: the key it is verified against,
+/// the networks it carries, and how often to keep its NAT mapping alive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireGuardPeer {
+    /// Padded standard base64, which is the one spelling both cores decode.
+    pub public_key: String,
+    pub preshared_key: Option<String>,
+    /// Empty keeps the cores' own `0.0.0.0/0, ::/0`.
+    pub allowed_ips: Vec<String>,
+    pub keepalive: Option<u32>,
+}
+
 /// Which protocol the outbound speaks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Protocol {
@@ -266,6 +278,41 @@ pub enum Protocol {
     AnyTls {
         password: String,
     },
+    /// WireGuard — a userspace tunnel both cores implement, Xray-core as an
+    /// outbound and sing-box as an `endpoint` (its outbound form was removed in
+    /// 1.13). A link describes one peer: the endpoint is the profile's server.
+    WireGuard {
+        /// Client private key, padded standard base64.
+        secret_key: String,
+        /// Local interface addresses, each at full width (`/32`, `/128`), which
+        /// is the only prefix Xray-core's own parser accepts.
+        address: Vec<String>,
+        peer: WireGuardPeer,
+        mtu: Option<u32>,
+        /// The three bytes a WARP-style endpoint reads; empty for a plain peer.
+        reserved: Vec<u8>,
+    },
+    /// Hysteria v1 — QUIC with Brutal congestion control. sing-box's `hysteria`
+    /// outbound implements it; Xray-core reaches hysteria through its own
+    /// transport and finalmask instead, which a v1 link does not spell out.
+    Hysteria {
+        auth: Option<String>,
+        /// XPlus packet obfuscation password.
+        obfs: Option<String>,
+        /// The bandwidth Brutal shapes to, which sing-box will not start without.
+        up_mbps: u32,
+        down_mbps: u32,
+        ports: Vec<String>,
+        hop_interval: Option<u64>,
+        pin: Option<String>,
+    },
+    /// NaiveProxy — HTTP/2 or QUIC inside a Chromium TLS handshake. sing-box
+    /// only, and only where the build carries cronet.
+    Naive {
+        user: Option<String>,
+        password: Option<String>,
+        quic: bool,
+    },
 }
 
 impl Protocol {
@@ -281,6 +328,9 @@ impl Protocol {
             Protocol::Hysteria2 { .. } => "hysteria2",
             Protocol::Tuic { .. } => "tuic",
             Protocol::AnyTls { .. } => "anytls",
+            Protocol::WireGuard { .. } => "wireguard",
+            Protocol::Hysteria { .. } => "hysteria",
+            Protocol::Naive { .. } => "naive",
         }
     }
 
@@ -291,7 +341,14 @@ impl Protocol {
     /// reaching the core as a config it cannot parse.
     pub fn xray_carries(&self) -> bool {
         match self {
-            Protocol::Hysteria2 { .. } | Protocol::Tuic { .. } | Protocol::AnyTls { .. } => false,
+            // Hysteria v1 joins the QUIC and AnyTLS families: Xray-core carries
+            // hysteria as a transport of its own, not as an outbound a v1 link
+            // describes, and it has no naive outbound at all.
+            Protocol::Hysteria2 { .. }
+            | Protocol::Tuic { .. }
+            | Protocol::AnyTls { .. }
+            | Protocol::Hysteria { .. }
+            | Protocol::Naive { .. } => false,
             // Xray's cipher list is the AEAD set plus Shadowsocks 2022; the
             // stream ciphers sing-box still carries are gone from it.
             Protocol::Shadowsocks { method, plugin, .. } => {
@@ -369,6 +426,94 @@ fn sing_box_cipher(method: &str) -> bool {
     )
 }
 
+/// SOCKS5's UDP-over-TCP framing, which a link spells `uot` and sing-box
+/// `udp_over_tcp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Uot {
+    /// The framing version the link named; `None` is the core's own.
+    pub version: Option<u8>,
+}
+
+/// How VLESS and VMess frame the UDP traffic they carry, which a link spells
+/// `packetEncoding` and sing-box `packet_encoding`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketEncoding {
+    PacketAddr,
+    Xudp,
+}
+
+impl PacketEncoding {
+    /// The spelling the link and sing-box's `packet_encoding` share.
+    pub fn name(self) -> &'static str {
+        match self {
+            PacketEncoding::PacketAddr => "packetaddr",
+            PacketEncoding::Xudp => "xudp",
+        }
+    }
+}
+
+/// Dial-layer settings a link can name for any scheme. Reading them here rather
+/// than in each parser is what keeps a scheme whose grammar is otherwise empty
+/// (`socks`, `http`) from dropping its query.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DialOptions {
+    /// `tfo`: TCP fast open, which both cores set on the socket.
+    pub tfo: bool,
+    /// `uot`: SOCKS5 UDP over TCP, a sing-box socks-outbound field.
+    pub uot: Option<Uot>,
+    /// `packetEncoding`: VLESS and VMess UDP framing, a sing-box field.
+    pub packet_encoding: Option<PacketEncoding>,
+}
+
+impl DialOptions {
+    fn parse(query: &Query) -> Result<Self, String> {
+        let tfo = ["tfo", "fastopen", "tcpfastopen", "tcp-fast-open"]
+            .iter()
+            .any(|key| query.flag(key));
+        let uot = match query.first(&["uot", "udp-over-tcp", "udp_over_tcp"]) {
+            None => None,
+            Some(raw) => match raw.to_ascii_lowercase().as_str() {
+                "0" | "false" | "no" | "off" => None,
+                "1" | "true" | "yes" | "on" => Some(Uot { version: None }),
+                other => return Err(format!("uot={other:?} is neither on nor off")),
+            },
+        };
+        // The version implies the framing it belongs to, so a link naming only
+        // the version still turns it on.
+        let uot = match query.first(&["uotversion", "uot_version", "uot-version"]) {
+            None => uot,
+            Some(raw) => {
+                let version = raw
+                    .trim()
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|version| matches!(version, 1 | 2))
+                    .ok_or_else(|| format!("uotVersion {raw:?} is not 1 or 2"))?;
+                Some(Uot {
+                    version: Some(version),
+                })
+            }
+        };
+        let packet_encoding = match query.first(&["packetencoding", "packet_encoding"]) {
+            None => None,
+            Some(raw) => Some(match raw.to_ascii_lowercase().as_str() {
+                "packetaddr" | "packet_addr" | "packet" => PacketEncoding::PacketAddr,
+                "xudp" => PacketEncoding::Xudp,
+                other => {
+                    return Err(format!(
+                        "packetEncoding {other:?} is not one sing-box implements (packetaddr, xudp)"
+                    ))
+                }
+            }),
+        };
+        Ok(Self {
+            tfo,
+            uot,
+            packet_encoding,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outbound {
     pub protocol: Protocol,
@@ -379,6 +524,8 @@ pub struct Outbound {
     /// `fm`: Xray's finalmask, carried as the JSON object the link encoded.
     /// Only Xray-core has the setting.
     pub finalmask: Option<String>,
+    /// The settings every scheme can carry on top of its own grammar.
+    pub dial: DialOptions,
     /// `#fragment` of the link, carried through for log lines only.
     pub remark: Option<String>,
 }
@@ -429,6 +576,10 @@ impl Outbound {
                 Protocol::Vmess { security, .. } => refuse(&format!(
                     "the vmess security {security:?} was removed from Xray-core"
                 )),
+                Protocol::Hysteria { .. } => refuse(
+                    "Xray-core reaches hysteria through its own transport and finalmask, \
+                     which a hysteria v1 link does not spell out",
+                ),
                 _ => refuse(&format!("a {name} link runs on sing-box only")),
             };
         }
@@ -507,6 +658,14 @@ impl Outbound {
         if self.finalmask.is_some() && backend == SingBox {
             return refuse("finalmask is an Xray-core setting");
         }
+        // Xray-core reads fast open from the socket options like sing-box, and
+        // has no field at all for the two UDP framings.
+        if self.dial.uot.is_some() && backend == Xray {
+            return refuse("UDP over TCP (uot) is a sing-box setting");
+        }
+        if self.dial.packet_encoding.is_some() && backend == Xray {
+            return refuse("packetEncoding is a sing-box setting");
+        }
         None
     }
 }
@@ -552,14 +711,19 @@ impl CoreProfile {
             "hysteria2" | "hy2" => parse_hysteria2(rest)?,
             "tuic" => parse_tuic(rest)?,
             "anytls" => parse_anytls(rest)?,
+            "hysteria" => parse_hysteria(rest)?,
+            "naive" | "naive+https" => parse_naive(rest, false)?,
+            "naive+quic" => parse_naive(rest, true)?,
+            // Both cores run this one, each in its own shape.
+            "wireguard" => parse_wireguard(rest)?,
             other => {
                 return Err(format!(
                     "unsupported scheme {other:?} (vless, vmess, trojan, ss, socks5, http, \
-                     hysteria2, tuic, anytls)"
+                     hysteria2, hysteria, tuic, anytls, naive, wireguard)"
                 ))
             }
         };
-        Ok(CoreProfile::Link(outbound))
+        Ok(CoreProfile::Link(with_dial_options(rest, outbound)?))
     }
 
     /// Outbound endpoint, when the profile names one.
@@ -571,23 +735,63 @@ impl CoreProfile {
     }
 }
 
+/// The dial-layer settings a link can name on top of its scheme's own grammar,
+/// read once for every scheme and checked against the protocol that will hold
+/// them: a setting no config of the core can carry is refused by name.
+fn with_dial_options(rest: &str, mut outbound: Outbound) -> Result<Outbound, String> {
+    let (body, _) = split_fragment(rest);
+    let (_, params) = split_query(body);
+    let query = Query::parse(params);
+    outbound.dial = DialOptions::parse(&query)?;
+    let name = outbound.protocol.name();
+    if outbound.dial.uot.is_some() && !matches!(outbound.protocol, Protocol::Socks { .. }) {
+        return Err(format!("uot is a socks5 setting; a {name} link has no field for it"));
+    }
+    if outbound.dial.packet_encoding.is_some()
+        && !matches!(
+            outbound.protocol,
+            Protocol::Vless { .. } | Protocol::Vmess { .. }
+        )
+    {
+        return Err(format!(
+            "packetEncoding is a vless and vmess setting; a {name} link has no field for it"
+        ));
+    }
+    if outbound.dial.tfo && matches!(outbound.protocol, Protocol::WireGuard { .. }) {
+        return Err(
+            "a wireguard link dials its peer over UDP; tcp fast open has nothing to open".into(),
+        );
+    }
+    Ok(outbound)
+}
+
 /// The core a native config was written for, when its outbounds make it
 /// unambiguous.
 ///
 /// The two dialects differ in one place that matters here: an Xray outbound
-/// carries a `protocol`, a sing-box outbound a `type`. Share links are
-/// understood by both cores, and an empty or missing `outbounds` says nothing,
-/// so both of those answer `None`.
+/// carries a `protocol`, a sing-box outbound a `type` — and sing-box keeps
+/// WireGuard and the other endpoints in `endpoints`, whose entries name their
+/// type the same way. A config with neither section, an empty one, or one
+/// naming both dialects answers `None`.
 pub fn native_dialect(text: &str) -> Option<FcaeBackend> {
     let value: Value = serde_json::from_str(text).ok()?;
-    let outbounds = value.get("outbounds")?.as_array()?;
     let (mut xray, mut sing_box) = (false, false);
-    for outbound in outbounds {
-        let Some(object) = outbound.as_object() else {
+    let mut declared = false;
+    for section in ["outbounds", "endpoints"] {
+        let Some(entries) = value.get(section).and_then(Value::as_array) else {
             continue;
         };
-        xray |= object.contains_key("protocol");
-        sing_box |= object.contains_key("type");
+        declared = true;
+        for entry in entries {
+            let Some(object) = entry.as_object() else {
+                continue;
+            };
+            xray |= object.contains_key("protocol");
+            sing_box |= object.contains_key("type");
+        }
+    }
+    if !declared {
+        return None;
     }
     match (xray, sing_box) {
         (true, false) => Some(FcaeBackend::Xray),
@@ -642,6 +846,7 @@ fn parse_vless(rest: &str) -> Result<Outbound, String> {
         transport,
         security,
         finalmask: parse_finalmask(&query)?,
+        dial: DialOptions::default(),
         server,
         port,
         remark,
@@ -785,6 +990,7 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         transport,
         security,
         finalmask: None,
+        dial: DialOptions::default(),
         server,
         port,
         remark,
@@ -818,6 +1024,7 @@ fn parse_vmess_uri(body: &str, remark: Option<String>) -> Result<Outbound, Strin
         transport,
         security,
         finalmask: parse_finalmask(&query)?,
+        dial: DialOptions::default(),
         server,
         port,
         remark,
@@ -878,6 +1085,7 @@ fn parse_trojan(rest: &str) -> Result<Outbound, String> {
         transport,
         security,
         finalmask: parse_finalmask(&query)?,
+        dial: DialOptions::default(),
         server,
         port,
         remark,
@@ -917,6 +1125,7 @@ fn parse_shadowsocks(rest: &str) -> Result<Outbound, String> {
         transport: Transport::Tcp,
         security: Security::None,
         finalmask: None,
+        dial: DialOptions::default(),
         server,
         port,
         remark,
@@ -939,6 +1148,7 @@ fn parse_socks(rest: &str) -> Result<Outbound, String> {
         server,
         port,
         finalmask: None,
+        dial: DialOptions::default(),
         remark,
     })
 }
@@ -970,6 +1180,7 @@ fn parse_http(rest: &str, tls: bool) -> Result<Outbound, String> {
         server,
         port,
         finalmask: None,
+        dial: DialOptions::default(),
         remark,
     })
 }
@@ -1026,6 +1237,7 @@ fn parse_hysteria2(rest: &str) -> Result<Outbound, String> {
             })
         }
     };
+    tls_by_contract(&query, "hysteria2")?;
     Ok(Outbound {
         protocol: Protocol::Hysteria2 {
             password,
@@ -1050,6 +1262,7 @@ fn parse_hysteria2(rest: &str) -> Result<Outbound, String> {
         server,
         port,
         finalmask: None,
+        dial: DialOptions::default(),
         remark,
     })
 }
@@ -1089,6 +1302,7 @@ fn parse_tuic(rest: &str) -> Result<Outbound, String> {
             ));
         }
     }
+    tls_by_contract(&query, "tuic")?;
     Ok(Outbound {
         protocol: Protocol::Tuic {
             uuid,
@@ -1110,6 +1324,7 @@ fn parse_tuic(rest: &str) -> Result<Outbound, String> {
         server,
         port,
         finalmask: None,
+        dial: DialOptions::default(),
         remark,
     })
 }
@@ -1126,6 +1341,7 @@ fn parse_anytls(rest: &str) -> Result<Outbound, String> {
         return Err("an anytls link needs its password".into());
     }
     let (server, port) = split_host_port(trim_trailing_path(target), Some(443))?;
+    tls_by_contract(&query, "anytls")?;
     Ok(Outbound {
         protocol: Protocol::AnyTls { password },
         transport: Transport::Tcp,
@@ -1142,8 +1358,323 @@ fn parse_anytls(rest: &str) -> Result<Outbound, String> {
         server,
         port,
         finalmask: None,
+        dial: DialOptions::default(),
         remark,
     })
+}
+
+/// Hysteria v1, which sing-box's `hysteria` outbound implements: the auth, the
+/// XPlus obfuscation password and the bandwidth Brutal shapes to.
+fn parse_hysteria(rest: &str) -> Result<Outbound, String> {
+    let (body, remark) = split_fragment(rest);
+    let (authority, params) = split_query(body);
+    let query = Query::parse(params);
+    // The authentication string is a query parameter in this scheme; a link
+    // that spells it in the authority is read the same way, and one that does
+    // both is refused rather than guessed at.
+    let (userinfo, target) = match authority.rsplit_once('@') {
+        Some((userinfo, target)) => (Some(userinfo), target),
+        None => (None, authority),
+    };
+    let auth = match (query.string("auth"), userinfo) {
+        (Some(auth), None) => Some(auth),
+        (Some(_), Some(_)) => {
+            return Err(
+                "a hysteria link carries auth in the authority or as a parameter, not both".into(),
+            )
+        }
+        (None, Some(userinfo)) => Some(percent_decode(userinfo)),
+        (None, None) => None,
+    };
+    let (server, port) = split_host_port(trim_trailing_path(target), Some(443))?;
+    // sing-box's hysteria always carries its QUIC datagrams; the `protocol` a v1
+    // link names is the packet obfuscation the original client grew out of, and
+    // only `udp` matches what sing-box puts on the wire.
+    if let Some(protocol) = query.string("protocol") {
+        if !protocol.eq_ignore_ascii_case("udp") {
+            return Err(format!(
+                "hysteria protocol={protocol:?} is not one sing-box implements (udp)"
+            ));
+        }
+    }
+    let obfs = match query.string("obfs") {
+        None => {
+            if query.first(&["obfsparam", "obfs_param"]).is_some() {
+                return Err("hysteria obfsParam needs obfs=xplus".into());
+            }
+            None
+        }
+        Some(kind) if kind.eq_ignore_ascii_case("xplus") => {
+            let password = query
+                .first(&["obfsparam", "obfs_param"])
+                .ok_or("hysteria obfs=xplus needs obfsParam, its password")?;
+            Some(percent_decode(password))
+        }
+        Some(kind) => {
+            return Err(format!(
+                "hysteria obfs={kind:?} is not one sing-box implements (xplus)"
+            ))
+        }
+    };
+    // Brutal shapes the tunnel to a bandwidth the link names, and sing-box's
+    // hysteria client refuses to start without one.
+    let up_mbps = query
+        .mbps(&["up", "upmbps", "up_mbps"])?
+        .ok_or("a hysteria link needs upmbps, the bandwidth Brutal shapes to")?;
+    let down_mbps = query
+        .mbps(&["down", "downmbps", "down_mbps"])?
+        .ok_or("a hysteria link needs downmbps, the bandwidth Brutal shapes to")?;
+    tls_by_contract(&query, "hysteria")?;
+    Ok(Outbound {
+        protocol: Protocol::Hysteria {
+            auth,
+            obfs,
+            up_mbps,
+            down_mbps,
+            ports: query.ports(&["mport", "mports", "ports"])?,
+            hop_interval: query.seconds(&["hop-interval", "hop_interval"])?,
+            pin: query.pin()?,
+        },
+        transport: Transport::Tcp,
+        security: tls_security(
+            query
+                .string("sni")
+                .or_else(|| query.string("peer"))
+                .or_else(|| host_name(&server)),
+            query.list("alpn"),
+            None,
+            query.flag("insecure") || query.flag("allowinsecure"),
+            Some(&query),
+        ),
+        server,
+        port,
+        finalmask: None,
+        dial: DialOptions::default(),
+        remark,
+    })
+}
+
+/// NaiveProxy. Chromium performs the handshake itself, so the TLS block carries
+/// a name and nothing else, and the two shapes differ only in their framing.
+fn parse_naive(rest: &str, quic: bool) -> Result<Outbound, String> {
+    let (body, remark) = split_fragment(rest);
+    let (authority, params) = split_query(body);
+    let query = Query::parse(params);
+    let (userinfo, target) = match authority.rsplit_once('@') {
+        Some((userinfo, target)) => (Some(userinfo), target),
+        None => (None, authority),
+    };
+    let (server, port) = split_host_port(trim_trailing_path(target), Some(443))?;
+    let (user, password) = split_credentials(userinfo);
+    // The traffic shape is the point of the protocol: sing-box hands the
+    // connection to cronet, which refuses every handshake setting it cannot
+    // mirror from Chrome.
+    for (key, what) in [
+        ("insecure", "allowInsecure"),
+        ("allowinsecure", "allowInsecure"),
+        ("alpn", "alpn"),
+        ("fp", "uTLS fingerprint"),
+    ] {
+        if query.get(key).is_some() {
+            return Err(format!("naive takes no {what}: Chromium performs the handshake"));
+        }
+    }
+    tls_by_contract(&query, "naive")?;
+    Ok(Outbound {
+        protocol: Protocol::Naive {
+            user,
+            password,
+            quic,
+        },
+        transport: Transport::Tcp,
+        security: tls_security(
+            query
+                .string("sni")
+                .or_else(|| query.string("peer"))
+                .or_else(|| host_name(&server)),
+            Vec::new(),
+            None,
+            false,
+            Some(&query),
+        ),
+        server,
+        port,
+        finalmask: None,
+        dial: DialOptions::default(),
+        remark,
+    })
+}
+
+/// WireGuard, in the shape share links spell it: the private key in the
+/// authority, the peer's key and the interface address in the query.
+fn parse_wireguard(rest: &str) -> Result<Outbound, String> {
+    let (body, remark) = split_fragment(rest);
+    let (authority, params) = split_query(body);
+    let query = Query::parse(params);
+    // A WireGuard link describes a bare tunnel. A transport or a TLS layer named
+    // on one has nowhere to go, so it is reported rather than dropped.
+    if let Some(network) = query.get("type").or_else(|| query.get("net")) {
+        if !matches!(network.to_ascii_lowercase().as_str(), "tcp" | "raw" | "none") {
+            return Err(format!(
+                "a wireguard link has no transport layer; type={network:?} cannot be honoured"
+            ));
+        }
+    }
+    if let Some(security) = query.get("security") {
+        if !security.eq_ignore_ascii_case("none") {
+            return Err(format!(
+                "a wireguard link has no TLS layer; security={security:?} cannot be honoured"
+            ));
+        }
+    }
+    // Xray-core's wireguard handler dials the peer through its own bind and
+    // never consults finalmask, so an `fm` here would be silently ignored.
+    if query.get("fm").is_some() {
+        return Err(
+            "finalmask (fm) does not reach a wireguard outbound: it dials its peer directly".into(),
+        );
+    }
+    let (userinfo, target) = authority
+        .rsplit_once('@')
+        .ok_or("a wireguard link must be wireguard://<private-key>@<host>:<port>")?;
+    let secret_key = wireguard_key(&percent_decode(userinfo), "the wireguard private key")?;
+    let (server, port) = split_host_port(trim_trailing_path(target), Some(51820))?;
+    let public_key = query
+        .first(&["publickey", "public_key", "peer_public_key", "peerpublickey"])
+        .ok_or("a wireguard link needs publickey, the key its peer is verified against")?;
+    let preshared_key = query
+        .first(&["presharedkey", "preshared_key", "pre_shared_key", "psk"])
+        .map(|key| wireguard_key(key, "the wireguard preshared key"))
+        .transpose()?;
+    let address = query
+        .first(&["address", "local_address", "ip"])
+        .ok_or("a wireguard link needs address, the address its interface is given")?
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| wireguard_cidr(item, "the wireguard address", true))
+        .collect::<Result<Vec<_>, String>>()?;
+    if address.is_empty() {
+        return Err("a wireguard link needs address, the address its interface is given".into());
+    }
+    let allowed_ips = match query.first(&["allowedips", "allowed_ips", "allowed-ips"]) {
+        Some(list) => list
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| wireguard_cidr(item, "the wireguard allowedips entry", false))
+            .collect::<Result<Vec<_>, String>>()?,
+        None => Vec::new(),
+    };
+    let keepalive = match query.first(&[
+        "persistent-keepalive-interval",
+        "persistent_keepalive_interval",
+        "persistent-keepalive",
+        "persistent_keepalive",
+        "keepalive-interval",
+        "keepalive_interval",
+        "keepalive",
+    ]) {
+        Some(raw) => {
+            let seconds = raw
+                .trim()
+                .trim_end_matches(['s', 'S'])
+                .parse::<u16>()
+                .map_err(|_| {
+                    format!("wireguard keepalive {raw:?} is not 1–65535 seconds")
+                })?;
+            Some(u32::from(seconds))
+        }
+        None => None,
+    };
+    Ok(Outbound {
+        protocol: Protocol::WireGuard {
+            secret_key,
+            address,
+            peer: WireGuardPeer {
+                public_key,
+                preshared_key,
+                allowed_ips,
+                keepalive,
+            },
+            mtu: query.number("mtu")?.filter(|mtu| *mtu > 0),
+            reserved: match query.first(&["reserved"]) {
+                Some(raw) => wireguard_reserved(raw)?,
+                None => Vec::new(),
+            },
+        },
+        transport: Transport::Tcp,
+        security: Security::None,
+        finalmask: None,
+        dial: DialOptions::default(),
+        server,
+        port,
+        remark,
+    })
+}
+
+/// A WireGuard key: base64 in either alphabet, padded or not, or the 64-hex form
+/// Xray-core also takes. Normalised to padded standard base64, which both cores
+/// decode; a key of the wrong width is refused rather than handed to a core that
+/// would refuse it at start.
+fn wireguard_key(raw: &str, what: &str) -> Result<String, String> {
+    let text = raw.trim();
+    let key = match hex_decode(text) {
+        Some(bytes) if text.len() == 64 => bytes,
+        _ => b64_bytes(text)
+            .ok_or_else(|| format!("{what} {:?} is not a base64 key", excerpt(text)))?,
+    };
+    if key.len() != 32 {
+        return Err(format!("{what} is {} bytes; a WireGuard key is 32", key.len()));
+    }
+    Ok(STANDARD.encode(key))
+}
+
+/// A CIDR both cores' grammars take. `single_host` is the interface address,
+/// which Xray-core accepts only at full width.
+fn wireguard_cidr(raw: &str, what: &str, single_host: bool) -> Result<String, String> {
+    let text = raw.trim();
+    let (address, bits) = match text.split_once('/') {
+        Some((address, bits)) => (address, Some(bits)),
+        None => (text, None),
+    };
+    let address: IpAddr = address
+        .parse()
+        .map_err(|_| format!("{what} {text:?} is not an IP address"))?;
+    let width = if address.is_ipv4() { 32 } else { 128 };
+    let bits = match bits {
+        Some(bits) => bits
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|bits| *bits <= width)
+            .ok_or_else(|| format!("{what} {text:?} has no prefix length within /{width}"))?,
+        None => width,
+    };
+    if single_host && bits != width {
+        return Err(format!("{what} {text:?} must name a single host (/{width})"));
+    }
+    Ok(format!("{address}/{bits}"))
+}
+
+/// WARP's reserved bytes, which both cores take as exactly three or not at all.
+fn wireguard_reserved(raw: &str) -> Result<Vec<u8>, String> {
+    let text = raw.trim().trim_start_matches('[').trim_end_matches(']');
+    let bytes = text
+        .split(',')
+        .map(|item| {
+            item.trim()
+                .parse::<u8>()
+                .map_err(|_| format!("the wireguard reserved field {raw:?} is not three bytes"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if bytes.len() != 3 {
+        return Err(format!(
+            "the wireguard reserved field {raw:?} is {} bytes; the field is three",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
 /// `hysteria2://…@host:443/?…` and friends carry a path separator no other
@@ -1384,6 +1915,21 @@ fn parse_security(
 /// A `tls` block from what a link names, plus the advanced parameters Xray's
 /// grammar adds on top of them. `query` is `None` where the caller has no link
 /// to read those from.
+/// A protocol whose handshake is TLS whatever the link says. Naming another
+/// security on one is refused rather than quietly upgraded; `none` is what the
+/// family's clients write when they leave the field out.
+fn tls_by_contract(query: &Query, name: &str) -> Result<(), String> {
+    let Some(security) = query.get("security").map(str::to_ascii_lowercase) else {
+        return Ok(());
+    };
+    if matches!(security.as_str(), "tls" | "xtls" | "none") {
+        return Ok(());
+    }
+    Err(format!(
+        "{name} is TLS by definition; security={security:?} cannot be honoured"
+    ))
+}
+
 fn tls_security(
     sni: Option<String>,
     alpn: Vec<String>,
@@ -1632,18 +2178,19 @@ fn hex_value(byte: u8) -> Option<u8> {
 /// some clients, and occasionally padding; accept every variant rather than
 /// telling the user their working link is wrong.
 fn b64_decode(text: &str) -> Option<String> {
+    String::from_utf8(b64_bytes(text)?).ok()
+}
+
+/// The same four alphabets, for the callers that need the octets rather than a
+/// string: a WireGuard key is raw bytes, not text.
+fn b64_bytes(text: &str) -> Option<Vec<u8>> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
-    for engine in [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD] {
-        if let Ok(bytes) = engine.decode(text) {
-            if let Ok(decoded) = String::from_utf8(bytes) {
-                return Some(decoded);
-            }
-        }
-    }
-    None
+    [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD]
+        .into_iter()
+        .find_map(|engine| engine.decode(text).ok())
 }
 
 struct Query(HashMap<String, String>);
@@ -4391,6 +4938,346 @@ mod tests {
             other => panic!("expected TLS, got {other:?}"),
         }
         assert!(!anytls.protocol.xray_carries());
+    }
+
+    /// A 32-byte key in the padded standard base64 both cores decode, spelled
+    /// out in hex in the test that normalises it.
+    const WIREGUARD_KEY: &str = "HBtvDj96H5wrPU5fYHGCk6S1xtfo+QobLD1OX2BxgpM=";
+
+    /// A link whose key is 16 bytes: base64, the right alphabet, the wrong size.
+    const SHORT_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAA==";
+
+    fn wireguard_link(query: &str) -> String {
+        format!("wireguard://{WIREGUARD_KEY}@engage.example.net:51820?{query}")
+    }
+
+    #[test]
+    fn a_wireguard_link_normalises_keys_and_addresses_for_both_cores() {
+        // Hex is the other spelling Xray-core takes for a key.
+        let outbound = link(&format!(
+            "wireguard://{}@engage.example.net:51820?publickey={WIREGUARD_KEY}\
+             &address=172.16.0.2/32,2606%3A4700%3A110%3A%3A2/128&allowedips=0.0.0.0/0\
+             &mtu=1280&reserved=%5B0%2C0%2C0%5D&persistent-keepalive=25s#warp",
+            "1c1b6f0e3f7a1f9c2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293"
+        ));
+        assert_eq!(outbound.remark.as_deref(), Some("warp"));
+        match &outbound.protocol {
+            Protocol::WireGuard {
+                secret_key,
+                address,
+                peer,
+                mtu,
+                reserved,
+            } => {
+                // One key, one length, one alphabet: what both cores decode.
+                assert_eq!(secret_key, WIREGUARD_KEY);
+                assert_eq!(
+                    address,
+                    &vec![
+                        "172.16.0.2/32".to_string(),
+                        "2606:4700:110::2/128".to_string()
+                    ]
+                );
+                assert_eq!(peer.public_key, WIREGUARD_KEY);
+                assert_eq!(peer.allowed_ips, vec!["0.0.0.0/0".to_string()]);
+                assert_eq!(peer.keepalive, Some(25));
+                assert_eq!(*mtu, Some(1280));
+                assert_eq!(reserved, &vec![0, 0, 0]);
+            }
+            other => panic!("expected wireguard, got {other:?}"),
+        }
+        // The one protocol this round added that both cores run.
+        assert!(outbound.carried_by(FcaeBackend::Xray));
+        assert!(outbound.carried_by(FcaeBackend::SingBox));
+    }
+
+    #[test]
+    fn a_wireguard_link_is_refused_where_a_core_would_refuse_it() {
+        for (link, expected) in [
+            // The peer's key is what the tunnel is verified against, and the
+            // interface needs an address.
+            (wireguard_link("address=10.0.0.2"), "publickey"),
+            (
+                format!("wireguard://{WIREGUARD_KEY}@example.net:51820?publickey={WIREGUARD_KEY}"),
+                "address",
+            ),
+            (
+                format!(
+                    "wireguard://{SHORT_KEY}@example.net:51820?publickey={WIREGUARD_KEY}&address=10.0.0.2"
+                ),
+                "32",
+            ),
+            // Xray-core's interface address takes no subnet but a host's.
+            (
+                wireguard_link(&format!("publickey={WIREGUARD_KEY}&address=10.0.0.0/24")),
+                "single host",
+            ),
+            // Two bytes where the field is three.
+            (
+                wireguard_link(&format!("publickey={WIREGUARD_KEY}&address=10.0.0.2&reserved=0,0")),
+                "three",
+            ),
+            // A bare tunnel has no transport and no TLS layer to name one on.
+            (
+                wireguard_link(&format!("publickey={WIREGUARD_KEY}&address=10.0.0.2&type=ws")),
+                "transport",
+            ),
+            (
+                wireguard_link(&format!("publickey={WIREGUARD_KEY}&address=10.0.0.2&security=tls")),
+                "TLS",
+            ),
+            // The core's wireguard handler dials the peer itself, so a mask has
+            // nothing to reach.
+            (
+                wireguard_link(&format!("publickey={WIREGUARD_KEY}&address=10.0.0.2&fm=%7B%7D")),
+                "finalmask",
+            ),
+        ] {
+            let error = CoreProfile::parse(&link).expect_err("a core would refuse it");
+            assert!(error.contains(expected), "{link}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_hysteria_link_carries_its_bandwidth_and_xplus_obfs() {
+        let outbound = link(
+            "hysteria://engage.example.net:443?auth=secret&peer=www.example.com&insecure=1\
+             &upmbps=50&downmbps=100&obfs=xplus&obfsParam=salt&mport=8000-8100\
+             &hop-interval=30&protocol=udp#fast",
+        );
+        match &outbound.protocol {
+            Protocol::Hysteria {
+                auth,
+                obfs,
+                up_mbps,
+                down_mbps,
+                ports,
+                hop_interval,
+                ..
+            } => {
+                assert_eq!(auth.as_deref(), Some("secret"));
+                assert_eq!(obfs.as_deref(), Some("salt"));
+                // Brutal shapes the tunnel to these, and sing-box will not start
+                // without them.
+                assert_eq!((*up_mbps, *down_mbps), (50, 100));
+                assert_eq!(ports, &vec!["8000:8100".to_string()]);
+                assert_eq!(*hop_interval, Some(30));
+            }
+            other => panic!("expected hysteria, got {other:?}"),
+        }
+        match outbound.security {
+            Security::Tls {
+                sni,
+                allow_insecure,
+                ..
+            } => {
+                assert_eq!(sni.as_deref(), Some("www.example.com"));
+                assert!(allow_insecure);
+            }
+            other => panic!("expected TLS, got {other:?}"),
+        }
+        assert!(outbound.carried_by(FcaeBackend::SingBox));
+        assert!(!outbound.carried_by(FcaeBackend::Xray));
+
+        // A link that spells auth in the authority is read the same way.
+        let outbound = link("hysteria://secret@example.net:443?upmbps=10&downmbps=10");
+        match &outbound.protocol {
+            Protocol::Hysteria { auth, .. } => assert_eq!(auth.as_deref(), Some("secret")),
+            other => panic!("expected hysteria, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hysteria_link_is_refused_where_sing_box_would_refuse_it() {
+        for (link, expected) in [
+            ("hysteria://example.net:443?downmbps=100", "upmbps"),
+            ("hysteria://example.net:443?upmbps=100", "downmbps"),
+            // The packet mode and the obfuscation are the ones sing-box has.
+            (
+                "hysteria://example.net:443?upmbps=1&downmbps=1&protocol=faketcp",
+                "protocol",
+            ),
+            (
+                "hysteria://example.net:443?upmbps=1&downmbps=1&obfs=xor&obfsParam=s",
+                "xplus",
+            ),
+            (
+                "hysteria://example.net:443?upmbps=1&downmbps=1&obfsParam=s",
+                "obfs=xplus",
+            ),
+            (
+                "hysteria://example.net:443?upmbps=1&downmbps=1&obfs=xplus",
+                "obfsParam",
+            ),
+            (
+                "hysteria://secret@example.net:443?auth=other&upmbps=1&downmbps=1",
+                "not both",
+            ),
+            // TLS is the protocol's own handshake, not a choice.
+            (
+                "hysteria://example.net:443?upmbps=1&downmbps=1&security=reality",
+                "TLS by definition",
+            ),
+        ] {
+            let error = CoreProfile::parse(link).expect_err("sing-box would refuse it");
+            assert!(error.contains(expected), "{link}: {error}");
+        }
+    }
+
+    /// The protocols whose handshake is TLS by contract take no other security,
+    /// and the family's clients write `none` when they leave the field out.
+    #[test]
+    fn a_tls_by_contract_link_refuses_another_security() {
+        for link in [
+            "hysteria2://secret@example.net:443?security=reality",
+            "hysteria://example.net:443?upmbps=1&downmbps=1&security=reality",
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pass@example.net:443?security=reality",
+            "anytls://secret@example.net:443?security=reality",
+            "naive+https://u:p@example.net:443?security=reality",
+        ] {
+            let error = CoreProfile::parse(link).expect_err("TLS is the protocol's own");
+            assert!(error.contains("TLS by definition"), "{link}: {error}");
+        }
+        let outbound = link("hysteria2://secret@example.net:443?security=none");
+        assert!(matches!(outbound.security, Security::Tls { .. }));
+    }
+
+    #[test]
+    fn naive_links_carry_credentials_and_no_handshake_settings() {
+        let plain = link("naive+https://user:pa%3Ass@example.com:443?peer=www.example.com#n");
+        match &plain.protocol {
+            Protocol::Naive {
+                user,
+                password,
+                quic,
+            } => {
+                assert_eq!(user.as_deref(), Some("user"));
+                assert_eq!(password.as_deref(), Some("pa:ss"));
+                assert!(!quic);
+            }
+            other => panic!("expected naive, got {other:?}"),
+        }
+        match plain.security {
+            Security::Tls { sni, alpn, .. } => {
+                assert_eq!(sni.as_deref(), Some("www.example.com"));
+                assert!(alpn.is_empty());
+            }
+            other => panic!("expected TLS, got {other:?}"),
+        }
+        assert!(plain.carried_by(FcaeBackend::SingBox));
+        assert!(!plain.carried_by(FcaeBackend::Xray));
+
+        let quic = link("naive+quic://user:pass@example.com:443");
+        match &quic.protocol {
+            Protocol::Naive { quic, .. } => assert!(*quic),
+            other => panic!("expected naive, got {other:?}"),
+        }
+
+        // Chromium performs the handshake, and sing-box refuses every TLS
+        // setting it cannot mirror from Chrome.
+        for (link, expected) in [
+            ("naive+https://u:p@example.com:443?insecure=1", "allowInsecure"),
+            ("naive+https://u:p@example.com:443?alpn=h2", "alpn"),
+            ("naive+https://u:p@example.com:443?fp=chrome", "uTLS"),
+            ("naive+https://u:p@example.com:443?security=reality", "TLS by definition"),
+        ] {
+            let error = CoreProfile::parse(link).expect_err("sing-box would refuse it");
+            assert!(error.contains(expected), "{link}: {error}");
+        }
+    }
+
+    /// A scheme whose own grammar is just an authority still carries the
+    /// settings every link can name.
+    #[test]
+    fn dial_options_survive_a_scheme_with_no_query_of_its_own() {
+        let outbound = link("socks5://u:p@127.0.0.1:1080?tfo=1&uot=1&uotVersion=2");
+        assert!(outbound.dial.tfo);
+        assert_eq!(outbound.dial.uot, Some(Uot { version: Some(2) }));
+        assert_eq!(outbound.dial.packet_encoding, None);
+        assert!(outbound.carried_by(FcaeBackend::SingBox));
+        // Xray-core has no field for UDP over TCP at all.
+        assert!(!outbound.carried_by(FcaeBackend::Xray));
+
+        // The flag alone is the version-less spelling.
+        let outbound = link("socks5://127.0.0.1:1080?uot=true");
+        assert_eq!(outbound.dial.uot, Some(Uot { version: None }));
+
+        // VLESS and VMess frame their UDP traffic with this one; Xray-core
+        // cannot express either value.
+        let outbound = link(&format!(
+            "vless://{UUID}@example.com:443?packetEncoding=xudp&tfo=true"
+        ));
+        assert_eq!(outbound.dial.packet_encoding, Some(PacketEncoding::Xudp));
+        assert!(outbound.dial.tfo);
+        assert!(outbound.carried_by(FcaeBackend::SingBox));
+        assert!(!outbound.carried_by(FcaeBackend::Xray));
+
+        // Present but falsey is off, which is what the link asked for.
+        let outbound = link("http://u:p@example.com:8080?tfo=0&uot=off");
+        assert!(!outbound.dial.tfo);
+        assert_eq!(outbound.dial.uot, None);
+    }
+
+    #[test]
+    fn dial_options_are_refused_where_no_field_can_hold_them() {
+        for (profile, expected) in [
+            // Each UDP framing belongs to one protocol.
+            (
+                format!("vless://{UUID}@example.com:443?uot=1"),
+                "socks5 setting",
+            ),
+            (
+                "socks5://127.0.0.1:1080?packetEncoding=xudp".to_string(),
+                "vless and vmess",
+            ),
+            // Values neither core implements, refused rather than guessed at.
+            (
+                "socks5://127.0.0.1:1080?uot=maybe".to_string(),
+                "neither on nor off",
+            ),
+            (
+                "socks5://127.0.0.1:1080?uotVersion=3".to_string(),
+                "1 or 2",
+            ),
+            (
+                format!("vless://{UUID}@example.com:443?packetEncoding=xudp2"),
+                "packetaddr, xudp",
+            ),
+            // A wireguard link carries datagrams, so there is no stream to open.
+            (
+                wireguard_link(&format!(
+                    "publickey={WIREGUARD_KEY}&address=10.0.0.2&tfo=1"
+                )),
+                "nothing to open",
+            ),
+        ] {
+            let error = CoreProfile::parse(&profile).expect_err("no config can hold it");
+            assert!(error.contains(expected), "{profile}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_native_config_is_recognised_by_its_endpoints_too() {
+        // sing-box reaches WireGuard through `endpoints`, and such a config has
+        // no outbound to read a type from.
+        assert_eq!(
+            native_dialect(
+                r#"{"inbounds": [{"type": "socks"}],
+                    "endpoints": [{"type": "wireguard", "tag": "wg"}]}"#
+            ),
+            Some(FcaeBackend::SingBox)
+        );
+        assert_eq!(
+            native_dialect(r#"{"outbounds": [{"protocol": "freedom"}]}"#),
+            Some(FcaeBackend::Xray)
+        );
+        // Nothing to go on, and both dialects at once, are both ambiguous.
+        assert_eq!(native_dialect(r#"{"inbounds": []}"#), None);
+        assert_eq!(native_dialect(r#"{"outbounds": []}"#), None);
+        assert_eq!(
+            native_dialect(r#"{"outbounds": [{"protocol": "freedom"}, {"type": "direct"}]}"#),
+            None
+        );
     }
 
     #[test]

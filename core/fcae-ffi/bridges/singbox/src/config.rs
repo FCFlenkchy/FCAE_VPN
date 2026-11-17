@@ -61,7 +61,14 @@ fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Result<Value, 
     }
 
     let mut outbounds = Vec::with_capacity(4);
-    outbounds.push(outbound_config(outbound, plan.upstream.is_some(), plan.dial)?);
+    // WireGuard is an endpoint in sing-box 1.11+, and its outbound form was
+    // removed in 1.13. An endpoint's tag is a route target like any other, so
+    // `final` below names it either way.
+    let mut endpoints = Vec::new();
+    match wireguard_endpoint(outbound, plan.upstream.is_some(), plan.dial) {
+        Some(endpoint) => endpoints.push(endpoint),
+        None => outbounds.push(outbound_config(outbound, plan.upstream.is_some(), plan.dial)?),
+    }
     if let Some(upstream) = plan.upstream {
         outbounds.push(upstream_config(upstream));
     }
@@ -69,12 +76,86 @@ fn config(plan: &Plan<'_>, outbound: &Outbound, rules: &Rules) -> Result<Value, 
     outbounds.push(json!({"type": "direct", "tag": DIRECT_TAG}));
     outbounds.push(json!({"type": "block", "tag": BLOCK_TAG}));
 
-    Ok(json!({
-        "log": log(plan.level),
-        "inbounds": inbounds,
-        "outbounds": outbounds,
-        "route": {"rules": routing_rules(rules), "final": PROXY_TAG},
-    }))
+    let mut config = Map::new();
+    config.insert("log".into(), log(plan.level));
+    config.insert("inbounds".into(), Value::Array(inbounds));
+    if !endpoints.is_empty() {
+        config.insert("endpoints".into(), Value::Array(endpoints));
+    }
+    config.insert("outbounds".into(), Value::Array(outbounds));
+    config.insert(
+        "route".into(),
+        json!({"rules": routing_rules(rules), "final": PROXY_TAG}),
+    );
+    Ok(Value::Object(config))
+}
+
+/// WireGuard as sing-box wants it: an `endpoint`, whose tag the route names in
+/// place of an outbound. `None` for every other protocol.
+fn wireguard_endpoint(
+    outbound: &Outbound,
+    chained: bool,
+    dial: Option<IpAddr>,
+) -> Option<Value> {
+    let Protocol::WireGuard {
+        secret_key,
+        address,
+        peer,
+        mtu,
+        reserved,
+    } = &outbound.protocol
+    else {
+        return None;
+    };
+    // A peer's networks are required here, and an absent one means what the
+    // cores default the field to.
+    let allowed_ips = if peer.allowed_ips.is_empty() {
+        vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
+    } else {
+        peer.allowed_ips.clone()
+    };
+    let mut endpoint = json!({
+        "type": "wireguard",
+        "tag": PROXY_TAG,
+        "address": address,
+        "private_key": secret_key,
+        "peers": [{
+            "address": dial_address(outbound, dial),
+            "port": outbound.port,
+            "public_key": peer.public_key,
+            "allowed_ips": allowed_ips,
+        }],
+    });
+    if let Some(key) = &peer.preshared_key {
+        endpoint["peers"][0]["pre_shared_key"] = json!(key);
+    }
+    if let Some(seconds) = peer.keepalive {
+        endpoint["peers"][0]["persistent_keepalive_interval"] = json!(seconds);
+    }
+    if let Some(mtu) = mtu {
+        endpoint["mtu"] = json!(mtu);
+    }
+    // The field belongs to the peer here, and the core takes three bytes or
+    // none.
+    if !reserved.is_empty() {
+        endpoint["peers"][0]["reserved"] = json!(reserved);
+    }
+    if chained {
+        // An endpoint takes the dial fields, so the peer is reached through the
+        // upstream proxy. It must not also name a listen port, which the core
+        // rejects next to a detour.
+        endpoint["detour"] = json!(UPSTREAM_TAG);
+    }
+    Some(endpoint)
+}
+
+/// The address the core dials: the one the platform resolved when it had to,
+/// otherwise the profile's own server.
+fn dial_address(outbound: &Outbound, dial: Option<IpAddr>) -> String {
+    match dial {
+        Some(address) => address.to_string(),
+        None => outbound.server.clone(),
+    }
 }
 
 /// sing-box's log block. `disabled` is the only way to switch its logger off;
@@ -105,10 +186,7 @@ fn outbound_config(
     chained: bool,
     dial: Option<IpAddr>,
 ) -> Result<Value, String> {
-    let server = match dial {
-        Some(address) => address.to_string(),
-        None => outbound.server.clone(),
-    };
+    let server = dial_address(outbound, dial);
     let mut value = match &outbound.protocol {
         // `generate` refuses a link carrying Xray's VLESS encryption before this
         // point, and sing-box's grammar has no field to put it in.
@@ -265,6 +343,61 @@ fn outbound_config(
             "server_port": outbound.port,
             "password": password,
         }),
+        // WireGuard is generated as an endpoint; `config` never asks for an
+        // outbound here.
+        Protocol::WireGuard { .. } => {
+            return Err("a wireguard profile is generated as an endpoint".into())
+        }
+        Protocol::Hysteria {
+            auth,
+            obfs,
+            up_mbps,
+            down_mbps,
+            ports,
+            hop_interval,
+            ..
+        } => {
+            let mut value = json!({
+                "type": "hysteria",
+                "tag": PROXY_TAG,
+                "server": server,
+                "server_port": outbound.port,
+                "up_mbps": up_mbps,
+                "down_mbps": down_mbps,
+            });
+            if let Some(auth) = auth {
+                value["auth_str"] = json!(auth);
+            }
+            // XPlus's password: the scheme itself is the only obfuscation this
+            // outbound implements.
+            if let Some(password) = obfs {
+                value["obfs"] = json!(password);
+            }
+            if !ports.is_empty() {
+                value["server_ports"] = json!(ports);
+            }
+            if let Some(seconds) = hop_interval {
+                value["hop_interval"] = json!(format!("{seconds}s"));
+            }
+            value
+        }
+        Protocol::Naive {
+            user,
+            password,
+            quic,
+        } => {
+            let mut value = json!({
+                "type": "naive",
+                "tag": PROXY_TAG,
+                "server": server,
+                "server_port": outbound.port,
+            });
+            with_credentials(&mut value, user.as_deref(), password.as_deref());
+            if *quic {
+                value["quic"] = json!(true);
+            }
+            value
+        }
     };
 
     match tls_config(&outbound.security, &outbound.server) {
@@ -290,8 +423,26 @@ fn outbound_config(
             }
         }
     }
-    if let Protocol::Hysteria2 { pin: Some(pin), .. } = &outbound.protocol {
+    // Both QUIC v1 and v2 links may pin the server's key; sing-box reads the
+    // same field for either.
+    if let Protocol::Hysteria2 { pin: Some(pin), .. } | Protocol::Hysteria { pin: Some(pin), .. } =
+        &outbound.protocol
+    {
         value["tls"]["certificate_public_key_sha256"] = json!([pin]);
+    }
+    // The two UDP framings a link can name, and the socket flag both cores set;
+    // the parser keeps each on the protocol that has a field for it.
+    if let Some(uot) = &outbound.dial.uot {
+        value["udp_over_tcp"] = match uot.version {
+            Some(version) => json!({"enabled": true, "version": version}),
+            None => json!(true),
+        };
+    }
+    if let Some(encoding) = outbound.dial.packet_encoding {
+        value["packet_encoding"] = json!(encoding.name());
+    }
+    if outbound.dial.tfo {
+        value["tcp_fast_open"] = json!(true);
     }
 
     if let Some(transport) = transport_config(outbound, dial.is_some())? {
@@ -310,8 +461,10 @@ fn is_tls_by_contract(protocol: &Protocol) -> bool {
         protocol,
         Protocol::Trojan { .. }
             | Protocol::Hysteria2 { .. }
+            | Protocol::Hysteria { .. }
             | Protocol::Tuic { .. }
             | Protocol::AnyTls { .. }
+            | Protocol::Naive { .. }
     )
 }
 
@@ -920,6 +1073,121 @@ mod tests {
         // Plain VLESS is unaffected.
         let config = build(&plan(&vless(), &routing, None));
         assert_eq!(config["outbounds"][0]["type"], "vless");
+    }
+
+    /// A WireGuard profile, in the spelling a share link uses.
+    const WIREGUARD: &str = "wireguard://HBtvDj96H5wrPU5fYHGCk6S1xtfo+QobLD1OX2BxgpM=\
+                             @engage.example.net:51820\
+                             ?publickey=HBtvDj96H5wrPU5fYHGCk6S1xtfo+QobLD1OX2BxgpM=\
+                             &address=172.16.0.2/32&reserved=0,0,0&keepalive=25";
+
+    #[test]
+    fn a_wireguard_link_becomes_an_endpoint_the_route_names() {
+        let profile = Profile::parse(WIREGUARD).expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        // The outbound form of this protocol was removed in sing-box 1.13.
+        let endpoint = &config["endpoints"][0];
+        assert_eq!(endpoint["type"], "wireguard");
+        assert_eq!(endpoint["tag"], PROXY_TAG);
+        assert_eq!(endpoint["address"][0], "172.16.0.2/32");
+        assert_eq!(endpoint["peers"][0]["address"], "engage.example.net");
+        assert_eq!(endpoint["peers"][0]["port"], 51820);
+        assert_eq!(endpoint["peers"][0]["persistent_keepalive_interval"], 25);
+        assert_eq!(endpoint["peers"][0]["reserved"], json!([0, 0, 0]));
+        // Required here, and the same networks the absence means elsewhere.
+        assert_eq!(endpoint["peers"][0]["allowed_ips"], json!(["0.0.0.0/0", "::/0"]));
+        // An endpoint tag is a route target: `final` still names the proxy, and
+        // no outbound stands in for it.
+        assert_eq!(config["route"]["final"], PROXY_TAG);
+        assert_eq!(config["outbounds"][0]["tag"], DIRECT_TAG);
+    }
+
+    #[test]
+    fn a_chained_wireguard_endpoint_dials_through_the_upstream() {
+        let profile = Profile::parse(WIREGUARD).expect("profile parses");
+        let routing = routing();
+        let upstream: UpstreamProxy = "socks5://127.0.0.1:9050".parse().expect("upstream");
+        let config = build(&plan(&profile, &routing, Some(&upstream)));
+        assert_eq!(config["endpoints"][0]["detour"], UPSTREAM_TAG);
+        // A detour and a listen port are the same field twice, and the core
+        // refuses the pair.
+        assert!(config["endpoints"][0].get("listen_port").is_none());
+    }
+
+    #[test]
+    fn the_resolved_peer_address_replaces_the_name_only() {
+        let profile = Profile::parse(WIREGUARD).expect("profile parses");
+        let routing = routing();
+        let mut plan = plan(&profile, &routing, None);
+        plan.dial = Some("203.0.113.7".parse().expect("an address"));
+        let config = build(&plan);
+        assert_eq!(config["endpoints"][0]["peers"][0]["address"], "203.0.113.7");
+    }
+
+    #[test]
+    fn a_hysteria_link_becomes_a_hysteria_outbound() {
+        let profile = Profile::parse(
+            "hysteria://example.com:443?auth=secret&peer=www.example.com&upmbps=50\
+             &downmbps=100&obfs=xplus&obfsParam=salt&mport=8000-8100&hop-interval=30",
+        )
+        .expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["type"], "hysteria");
+        assert_eq!(outbound["auth_str"], "secret");
+        assert_eq!(outbound["up_mbps"], 50);
+        assert_eq!(outbound["down_mbps"], 100);
+        assert_eq!(outbound["obfs"], "salt");
+        assert_eq!(outbound["server_ports"][0], "8000:8100");
+        assert_eq!(outbound["hop_interval"], "30s");
+        assert_eq!(outbound["tls"]["server_name"], "www.example.com");
+    }
+
+    #[test]
+    fn a_naive_link_becomes_a_naive_outbound() {
+        let profile = Profile::parse("naive+quic://user:pass@example.com:443?sni=www.example.com")
+            .expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["type"], "naive");
+        assert_eq!(outbound["username"], "user");
+        assert_eq!(outbound["password"], "pass");
+        assert_eq!(outbound["quic"], true);
+        assert_eq!(outbound["tls"]["server_name"], "www.example.com");
+        // Chromium's handshake is the point of the protocol: nothing else may be
+        // set on it.
+        assert!(outbound["tls"].get("utls").is_none());
+        assert!(outbound["tls"].get("alpn").is_none());
+    }
+
+    #[test]
+    fn dial_options_reach_the_fields_they_name() {
+        let profile = Profile::parse("socks5://u:p@127.0.0.1:1080?uot=1&uotVersion=2&tfo=1")
+            .expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["type"], "socks");
+        assert_eq!(outbound["udp_over_tcp"], json!({"enabled": true, "version": 2}));
+        assert_eq!(outbound["tcp_fast_open"], true);
+
+        // The version-less spelling is the boolean the core takes.
+        let profile = Profile::parse("socks5://127.0.0.1:1080?uot=1").expect("profile parses");
+        let config = build(&plan(&profile, &routing, None));
+        assert_eq!(config["outbounds"][0]["udp_over_tcp"], true);
+
+        // A VLESS link's UDP framing.
+        let profile = Profile::parse(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?packetEncoding=packetaddr",
+        )
+        .expect("profile parses");
+        let config = build(&plan(&profile, &routing, None));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["packet_encoding"], "packetaddr");
+        assert!(outbound.get("tcp_fast_open").is_none());
     }
 
     #[test]

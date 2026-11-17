@@ -182,12 +182,60 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
                 password.as_deref(),
             )]}),
         ),
+        Protocol::WireGuard {
+            secret_key,
+            address,
+            peer,
+            mtu,
+            reserved,
+        } => {
+            // Xray-core's wireguard is a userspace tunnel in the outbound's own
+            // settings: the interface address bare (the parser hands every one at
+            // full width, and the core drops the prefix), the peer as one
+            // `host:port`.
+            let bare: Vec<&str> = address
+                .iter()
+                .map(|entry| entry.split('/').next().unwrap_or(entry.as_str()))
+                .collect();
+            let mut settings = json!({
+                "secretKey": secret_key,
+                "address": bare,
+                "peers": [{
+                    "endpoint": endpoint_address(&outbound.server, outbound.port),
+                    "publicKey": peer.public_key,
+                }],
+                // The app owns the TUN device, and a route may run this core
+                // twice: a kernel TUN would take routing table 10230 for itself
+                // and fight the session's own routes.
+                "noKernelTun": true,
+            });
+            if let Some(key) = &peer.preshared_key {
+                settings["peers"][0]["preSharedKey"] = json!(key);
+            }
+            if let Some(seconds) = peer.keepalive {
+                settings["peers"][0]["keepAlive"] = json!(seconds);
+            }
+            if !peer.allowed_ips.is_empty() {
+                settings["peers"][0]["allowedIPs"] = json!(peer.allowed_ips);
+            }
+            if let Some(mtu) = mtu {
+                settings["mtu"] = json!(mtu);
+            }
+            // The field is empty or exactly three bytes, the core refuses
+            // anything else.
+            if !reserved.is_empty() {
+                settings["reserved"] = json!(reserved);
+            }
+            ("wireguard", settings)
+        }
         // sing-box's own protocols: Xray-core has no outbound for any of them,
         // so the session is refused with the reason instead of a config the
         // core would reject with a protocol name nobody can act on.
-        Protocol::Hysteria2 { .. } | Protocol::Tuic { .. } | Protocol::AnyTls { .. } => {
-            return Err(outbound.refusal(FcaeBackend::Xray))
-        }
+        Protocol::Hysteria2 { .. }
+        | Protocol::Hysteria { .. }
+        | Protocol::Tuic { .. }
+        | Protocol::AnyTls { .. }
+        | Protocol::Naive { .. } => return Err(outbound.refusal(FcaeBackend::Xray)),
     };
 
     let mut value = json!({"tag": PROXY_TAG, "protocol": protocol, "settings": settings});
@@ -196,6 +244,16 @@ fn outbound_config(outbound: &Outbound, chained: bool) -> Result<Value, String> 
         value["streamSettings"] = Value::Object(stream);
     }
     Ok(value)
+}
+
+/// A peer as one `host:port`, the way Xray's wireguard settings take it. An
+/// IPv6 literal needs its brackets back once the port is appended.
+fn endpoint_address(server: &str, port: u16) -> String {
+    if server.contains(':') {
+        format!("[{server}]:{port}")
+    } else {
+        format!("{server}:{port}")
+    }
 }
 
 fn account_server(address: &str, port: u16, user: Option<&str>, password: Option<&str>) -> Value {
@@ -379,6 +437,11 @@ fn stream_settings(
         let finalmask: Value = serde_json::from_str(finalmask)
             .map_err(|error| format!("finalmask fm is not JSON: {error}"))?;
         stream.insert("finalmask".into(), finalmask);
+    }
+    if outbound.dial.tfo {
+        // The core takes either a flag or a queue length here; a link names the
+        // flag.
+        stream.insert("socketSettings".into(), json!({"tcpFastOpen": true}));
     }
     if chained {
         stream.insert("dialerProxy".into(), json!(UPSTREAM_TAG));
@@ -907,6 +970,12 @@ mod tests {
             ),
             // A method Xray dropped in favour of the AEAD set.
             ("ss://YWVzLTI1Ni1jZmI6c2VjcmV0@example.com:8388", "sing-box"),
+            // The two UDP framings sing-box names.
+            ("socks5://u:p@127.0.0.1:1080?uot=1", "sing-box"),
+            (
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?packetEncoding=xudp",
+                "sing-box",
+            ),
         ] {
             let profile = Profile::parse(link).expect("profile parses");
             let error = generate(&plan(&profile, &routing, None)).expect_err("xray cannot carry it");
@@ -920,6 +989,8 @@ mod tests {
             "hysteria2://secret@example.com:443",
             "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pass@example.com:443",
             "anytls://secret@example.com:443",
+            "hysteria://example.com:443?upmbps=10&downmbps=10",
+            "naive+https://user:pass@example.com:443",
         ] {
             let profile = Profile::parse(text).expect("profile parses");
             let routing = routing();
@@ -927,6 +998,64 @@ mod tests {
                 generate(&plan(&profile, &routing, None)).expect_err("xray cannot carry it");
             assert!(error.contains("sing-box"), "{text}: {error}");
         }
+    }
+
+    /// A WireGuard profile both cores can run, spelled the way a share link
+    /// spells one.
+    const WIREGUARD: &str = "wireguard://HBtvDj96H5wrPU5fYHGCk6S1xtfo+QobLD1OX2BxgpM=\
+                             @engage.example.net:51820\
+                             ?publickey=HBtvDj96H5wrPU5fYHGCk6S1xtfo+QobLD1OX2BxgpM=\
+                             &address=172.16.0.2/32&allowedips=0.0.0.0/0&mtu=1280&reserved=0,0,0";
+
+    #[test]
+    fn fast_open_becomes_a_socket_setting() {
+        let profile =
+            Profile::parse("socks5://u:p@127.0.0.1:1080?tfo=1").expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        assert_eq!(
+            config["outbounds"][0]["streamSettings"]["socketSettings"]["tcpFastOpen"],
+            true
+        );
+        // Unset is unset: the core keeps its own default.
+        let profile = vless();
+        let config = build(&plan(&profile, &routing, None));
+        let stream = &config["outbounds"][0]["streamSettings"];
+        assert!(stream.get("socketSettings").is_none());
+    }
+
+    #[test]
+    fn a_wireguard_link_becomes_xrays_userspace_outbound() {
+        let profile = Profile::parse(WIREGUARD).expect("profile parses");
+        let routing = routing();
+        let config = build(&plan(&profile, &routing, None));
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["protocol"], "wireguard");
+        let settings = &outbound["settings"];
+        // Bare, because that is what the core's interface address takes.
+        assert_eq!(settings["address"][0], "172.16.0.2");
+        assert_eq!(settings["peers"][0]["endpoint"], "engage.example.net:51820");
+        assert_eq!(settings["peers"][0]["allowedIPs"][0], "0.0.0.0/0");
+        assert_eq!(settings["reserved"], json!([0, 0, 0]));
+        assert_eq!(settings["mtu"], 1280);
+        // The app owns the TUN device; a second kernel TUN would fight it.
+        assert_eq!(settings["noKernelTun"], true);
+        // A bare tunnel has no transport layer to describe.
+        assert!(outbound.get("streamSettings").is_none(), "{outbound}");
+    }
+
+    /// The peer's packets leave through the outbound's own dialer, so a chained
+    /// position reaches the upstream the same way every other transport does.
+    #[test]
+    fn a_chained_wireguard_hop_dials_through_the_upstream() {
+        let profile = Profile::parse(WIREGUARD).expect("profile parses");
+        let routing = routing();
+        let upstream: UpstreamProxy = "socks5://127.0.0.1:9050".parse().expect("upstream");
+        let config = build(&plan(&profile, &routing, Some(&upstream)));
+        assert_eq!(
+            config["outbounds"][0]["streamSettings"]["dialerProxy"],
+            UPSTREAM_TAG
+        );
     }
 
     #[test]
