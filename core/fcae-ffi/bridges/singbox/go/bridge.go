@@ -33,7 +33,6 @@ import "C"
 import (
 	"context"
 	stdjson "encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -74,6 +73,9 @@ type sbCore struct {
 	// instance per hop, so the settings' single number is not the answer to
 	// "what is listening".
 	listeners []coreListener
+	// What this config calls itself -- `vless reality` -- so a session running
+	// two instances of this core names each of them instead of numbering them.
+	label string
 }
 
 // sbInbounds reads every inbound of a sing-box config, in the order the config
@@ -90,6 +92,7 @@ func sbInbounds(text string) []coreListener {
 	var cfg struct {
 		Inbounds []struct {
 			Type       string             `json:"type"`
+			Listen     stdjson.RawMessage `json:"listen"`
 			ListenPort stdjson.RawMessage `json:"listen_port"`
 		} `json:"inbounds"`
 	}
@@ -99,10 +102,55 @@ func sbInbounds(text string) []coreListener {
 	out := make([]coreListener, 0, len(cfg.Inbounds))
 	for _, inbound := range cfg.Inbounds {
 		if port := coreConfigPort(inbound.ListenPort); port > 0 {
-			out = append(out, coreListener{proto: coreConfigName(inbound.Type), port: port})
+			out = append(out, coreListener{
+				proto: coreConfigName(inbound.Type),
+				port:  port,
+				any:   coreConfigScope(inbound.Listen),
+			})
 		}
 	}
 	return out
+}
+
+// sbFlavor is the config's first real outbound and the transport carrying it:
+// the vocabulary a share link uses, so `vless reality` on screen names the same
+// thing the link the user pasted named.
+//
+// The first outbound that is not an engine built-in is the one the route ends
+// in. `tls` is read for both of its spellings, because sing-box reports a
+// Reality server as TLS with the Reality block switched on.
+func sbFlavor(text string) string {
+	var cfg struct {
+		Outbounds []struct {
+			Type      string `json:"type"`
+			Transport struct {
+				Type string `json:"type"`
+			} `json:"transport"`
+			TLS struct {
+				Enabled bool `json:"enabled"`
+				Reality struct {
+					Enabled bool `json:"enabled"`
+				} `json:"reality"`
+			} `json:"tls"`
+		} `json:"outbounds"`
+	}
+	if err := stdjson.Unmarshal([]byte(text), &cfg); err != nil {
+		return ""
+	}
+	for _, outbound := range cfg.Outbounds {
+		switch strings.ToLower(strings.TrimSpace(outbound.Type)) {
+		case "", "direct", "block", "dns":
+			continue
+		}
+		security := ""
+		if outbound.TLS.Reality.Enabled {
+			security = "reality"
+		} else if outbound.TLS.Enabled {
+			security = "tls"
+		}
+		return coreTransportWords(outbound.Type, outbound.Transport.Type, security)
+	}
+	return ""
 }
 
 var (
@@ -156,7 +204,7 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 		_ = created.Close()
 		return C.CString("sing-box: " + err.Error())
 	}
-	core := &sbCore{box: created, traffic: traffic, listeners: sbInbounds(text)}
+	core := &sbCore{box: created, traffic: traffic, listeners: sbInbounds(text), label: sbFlavor(text)}
 	sbMu.Lock()
 	sbNextID++
 	id := sbNextID
@@ -204,9 +252,13 @@ func sb_stop_all() {
 }
 
 // sb_listeners writes what this shim is actually running: one
-// `handle|type|port` record per inbound of every live instance, in a
-// `;`-separated list. Returns the bytes written without the terminator, or the
-// bytes it needs when the buffer is too small (nothing is written then).
+// `instance|label|type|port|scope` record per inbound of every live instance,
+// in a `;`-separated list. Returns the bytes written without the terminator, or
+// the bytes it needs when the buffer is too small (nothing is written then).
+//
+// The instance number is this instance's position among the live ones, not the
+// handle it was given: handles are handed out for the life of the process, so a
+// handle would label the first session's box #1 and the tenth session's #23.
 //
 //export sb_listeners
 func sb_listeners(buf *C.char, capacity C.int) C.int {
@@ -220,9 +272,10 @@ func sb_listeners(buf *C.char, capacity C.int) C.int {
 	}
 	sort.Slice(handles, func(i, j int) bool { return handles[i] < handles[j] })
 	var records []string
-	for _, id := range handles {
-		for _, listener := range sbCores[id].listeners {
-			records = append(records, fmt.Sprintf("%d|%s|%d", id, listener.proto, listener.port))
+	for position, id := range handles {
+		core := sbCores[id]
+		for _, listener := range core.listeners {
+			records = append(records, coreRecord(position+1, core.label, listener))
 		}
 	}
 	sbMu.Unlock()

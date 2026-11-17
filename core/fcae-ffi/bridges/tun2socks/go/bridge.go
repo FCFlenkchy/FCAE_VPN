@@ -1338,7 +1338,8 @@ func runIdleGuard(stop <-chan struct{}) {
 }
 
 // coreListener is one inbound a core shim brought up: the core's own protocol
-// name, exactly as its config spells it, and the port it bound.
+// name, exactly as its config spells it, the port it bound and where it bound
+// it.
 //
 // The app cannot answer "what is listening" from its own settings: a saved
 // config declares the ports its inbounds bind, a chain runs one instance per
@@ -1347,6 +1348,11 @@ func runIdleGuard(stop <-chan struct{}) {
 type coreListener struct {
 	proto string
 	port  int
+	// any is true when the inbound binds every interface rather than loopback
+	// alone. A chained hop only ever serves the hop below it on 127.0.0.1, so
+	// offering its port on the LAN address would name an address that refuses
+	// the connection.
+	any bool
 }
 
 // coreConfigName is a config's inbound type, lower-cased, with the empty name
@@ -1375,6 +1381,54 @@ func coreConfigPort(raw json.RawMessage) int {
 		}
 	}
 	return 0
+}
+
+// coreConfigScope reports whether an inbound binds every interface. A config
+// that names no address takes the core's default, which is every interface for
+// both cores; only an explicit loopback address is unreachable from elsewhere.
+func coreConfigScope(raw json.RawMessage) bool {
+	var text string
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return true
+		}
+	}
+	text = strings.Trim(strings.TrimSpace(text), "[]")
+	if text == "" {
+		return true
+	}
+	if address, err := netip.ParseAddr(text); err == nil {
+		return !address.IsLoopback()
+	}
+	return !strings.EqualFold(text, "localhost")
+}
+
+// coreRecord is one `instance|label|proto|port|scope` record: an inbound, the
+// instance that runs it, and what that instance calls itself.
+//
+// The label is the flavour the config declares — its first real outbound and
+// the transport that carries it, `vless reality` rather than an index — so a
+// session that runs the same core twice can be told apart on screen. It is
+// empty when the config carries no outbound of its own, which is a config that
+// only serves local proxies.
+func coreRecord(instance int, label string, listener coreListener) string {
+	scope := "local"
+	if listener.any {
+		scope = "any"
+	}
+	return fmt.Sprintf("%d|%s|%s|%d|%s", instance, label, listener.proto, listener.port, scope)
+}
+
+// coreTransportWords joins the parts of a config's own description, skipping
+// the empty ones, so a label never starts or ends with a space.
+func coreTransportWords(words ...string) string {
+	kept := words[:0]
+	for _, word := range words {
+		if word = strings.ToLower(strings.TrimSpace(word)); word != "" {
+			kept = append(kept, word)
+		}
+	}
+	return strings.Join(kept, " ")
 }
 
 // writeCoreRecords copies a `;`-separated record list into a caller buffer.

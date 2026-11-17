@@ -39,7 +39,7 @@
 extern "C" void fcae_sponsor_set_ui_active(bool active);
 extern "C" void fcae_ui_diagnostic(uint32_t event, uint32_t value);
 // A `fcae-ffi` export rather than part of the `fcae-abi` header: what the live
-// cores are listening on, as `core|instance|protocol|port` records.
+// cores are listening on, as `core|instance|label|protocol|port|scope` records.
 extern "C" uint32_t fcae_live_listeners(char* out, uint32_t capacity);
 
 
@@ -563,7 +563,6 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, t.tx_bytes_sec);
     h = fnv_value(h, t.total_rx);
     h = fnv_value(h, t.total_tx);
-    h = fnv_cstr(h, t.connected_peer);
     h = fnv_cstr(h, t.lan_ip);
     h = fnv_cstr(h, t.last_error);
     h = fnv_value(h, s_error_detail_visible);
@@ -3168,26 +3167,21 @@ static const ImVec4 kCoreTagColor(0.55f, 0.72f, 0.98f, 1.0f);
 static constexpr float kCoreTagGap = 8.0f;
 
 /// The protocol list as the user sees it: the built-in transports followed by
-/// one entry per saved core config, named after it and tagged with the core
-/// that runs it so a chained route reads the way it was written.
+/// one entry per saved core config, named after it.
 ///
-/// A row is `name  xray`; the editor draws the name and the tag with a gap and
-/// two colours between them, so `names` keeps them apart and `rows` is the flat
-/// text a combo box can take.
+/// The name is the whole row. Which core runs a saved config is what the
+/// settings dialog that manages them says, where the choice between Xray and
+/// sing-box is being made; a protocol chooser offers a route, and a row that
+/// carried its core there would read as a different protocol per entry.
 struct TransportLabels {
-    /// The row's own text, without the tag.
     std::vector<std::string> names;
-    /// `name`, two spaces, the core tag — what a combo box shows.
-    std::vector<std::string> rows;
     std::vector<const char*> pointers;
 };
 
 static void transport_labels(TransportLabels& labels) {
     const size_t count = (size_t)kCoreTransportBase + g_app.core_configs.size();
     labels.names.clear();
-    labels.rows.clear();
     labels.names.reserve(count);
-    labels.rows.reserve(count);
     for (const char* name : kTransportNames) {
         labels.names.emplace_back(name);
     }
@@ -3195,13 +3189,9 @@ static void transport_labels(TransportLabels& labels) {
         const std::string& name = g_app.core_configs[i].name;
         labels.names.push_back(name.empty() ? "Saved config " + std::to_string(i + 1) : name);
     }
-    for (size_t i = 0; i < labels.names.size(); ++i) {
-        const char* tag = transport_tag((int)i);
-        labels.rows.push_back(tag ? labels.names[i] + "  " + tag : labels.names[i]);
-    }
     labels.pointers.clear();
-    labels.pointers.reserve(labels.rows.size());
-    for (const std::string& row : labels.rows) labels.pointers.push_back(row.c_str());
+    labels.pointers.reserve(labels.names.size());
+    for (const std::string& name : labels.names) labels.pointers.push_back(name.c_str());
 }
 
 static int transport_count() {
@@ -3453,9 +3443,9 @@ static void render_core_configs() {
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize)) return;
 
     // The library first: one list of configs, because that is what both cores
-    // run. A row carries the name the user gave it and the core that runs it as
-    // the same `name  xray` tag the protocol list uses, so the two lists read
-    // alike instead of one of them hiding half its rows under a heading.
+    // run. A row carries the name the user gave it and the core that runs it,
+    // because choosing a core is what this list is for -- the protocol list
+    // names the route and leaves the core here.
     ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Saved configs");
     ImGui::BeginChild("##core_list", ImVec2(0, 146), ImGuiChildFlags_Borders);
     int remove_row = -1;
@@ -3591,16 +3581,10 @@ static void render_protocol_editor() {
     if (s_protocol_draft < 0 || s_protocol_draft >= transport_choices) s_protocol_draft = 0;
     const int protocol_before = s_protocol_draft;
     for (int i = 0; i < transport_choices; ++i) {
-        // The radio carries the name alone and the tag follows it with a gap in
-        // its own colour, so a saved config never reads as one long white run.
         // The position is the row's identity here: two saved configs may well
         // share a name, and a radio button's own id is its label.
         ImGui::PushID(i);
         changed |= ImGui::RadioButton(labels.names[(size_t)i].c_str(), &s_protocol_draft, i);
-        if (const char* tag = transport_tag(i)) {
-            ImGui::SameLine(0.0f, kCoreTagGap);
-            ImGui::TextColored(kCoreTagColor, "%s", tag);
-        }
         ImGui::PopID();
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
@@ -4854,11 +4838,56 @@ void render_ui() {
             live_len = 0;
             live_listeners[0] = '\0';
         }
-        // `core|instance|protocol|port;...` split without allocating per frame.
-        int core_listeners = 0;
-        for (uint32_t i = 0; i < live_len; ++i)
-            if (live_listeners[i] == ';') ++core_listeners;
-        if (live_len) ++core_listeners;
+        // `core|instance|label|protocol|port|scope;...`, grouped per instance:
+        // one header naming the instance and one line per inbound it answers on.
+        // A listener bound to loopback alone offers no LAN address, because a
+        // chained hop serves only the hop below it.
+        struct LiveListener {
+            std::string proto;
+            std::string port;
+            bool any;
+        };
+        struct LiveGroup {
+            std::string core;
+            std::string instance;
+            std::string label;
+            std::vector<LiveListener> lines;
+        };
+        std::vector<LiveGroup> live_groups;
+        for (const char* cursor = live_listeners; *cursor; ) {
+            const char* end = strchr(cursor, ';');
+            const size_t len = end ? (size_t)(end - cursor) : strlen(cursor);
+            const char* bars[5] = {};
+            const char* at = cursor;
+            for (int slot = 0; slot < 5; ++slot) {
+                const size_t room = len - (size_t)(at - cursor);
+                const char* bar = (const char*)memchr(at, '|', room);
+                if (!bar) break;
+                bars[slot] = bar;
+                at = bar + 1;
+            }
+            if (bars[4]) {
+                auto field = [&](int index) {
+                    const char* start = index == 0 ? cursor : bars[index - 1] + 1;
+                    const char* stop = index < 5 ? bars[index] : cursor + len;
+                    return std::string(start, (size_t)(stop - start));
+                };
+                LiveListener listener{field(3), field(4), field(5) == "any"};
+                for (auto& c : listener.proto) c = (char)toupper((unsigned char)c);
+                // The app calls its own listener SOCKS5 everywhere else, so a
+                // core's `socks` inbound is named the same way here.
+                if (listener.proto == "SOCKS") listener.proto = "SOCKS5";
+                const std::string core = field(0);
+                const std::string instance = field(1);
+                if (live_groups.empty() || live_groups.back().core != core
+                        || live_groups.back().instance != instance) {
+                    live_groups.push_back(LiveGroup{core, instance, field(2), {}});
+                }
+                live_groups.back().lines.push_back(std::move(listener));
+            }
+            if (!end) break;
+            cursor = end + 1;
+        }
 
         ImGui::TextUnformatted("Connection info");
         ImGui::Spacing();
@@ -4877,8 +4906,6 @@ void render_ui() {
                 else
                     ImGui::TextWrapped("%s local: %s 127.0.0.1:%u", backend, kind, port);
             };
-            if (telem.connected_peer[0])
-                ImGui::TextWrapped("Peer: %s", telem.connected_peer);
             const int final_backend = !g_app.chain_transports.empty()
                 ? transport_carrier(g_app.chain_transports.back()) : telem.backend;
             const char* final_name = final_backend == FCAE_BACKEND_FIREFOX ? "Firefox"
@@ -4896,56 +4923,60 @@ void render_ui() {
             const bool tor_in_route = g_app.protocol == 4
                 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end(), 4)
                        != g_app.chain_transports.end();
-            // The cores answer for themselves below, so their settings' single
-            // port is not printed twice -- and never printed *instead* of what
-            // the session is actually serving. Only the exit core may stand in
-            // for its settings line; a hop's listeners are additional.
-            const bool core_reports =
-                (final_backend == FCAE_BACKEND_XRAY && strstr(live_listeners, "Xray|")) ||
-                (final_backend == FCAE_BACKEND_SINGBOX && strstr(live_listeners, "sing-box|"));
+            // The core the route ends in answers for itself below, so its
+            // settings' single port is never printed *instead* of what the
+            // session is actually serving. A hop's listeners are additional:
+            // only the exit may stand in for its own settings line.
+            const char* exit_core = final_backend == FCAE_BACKEND_XRAY ? "Xray"
+                : final_backend == FCAE_BACKEND_SINGBOX ? "sing-box" : nullptr;
+            // The exit is the last instance of its core that started, so the
+            // user's own name for its saved config belongs to the last group.
+            size_t exit_group = live_groups.size();
+            bool core_reports = false;
+            if (exit_core) {
+                for (size_t i = 0; i < live_groups.size(); ++i) {
+                    if (live_groups[i].core != exit_core) continue;
+                    core_reports = true;
+                    exit_group = i;
+                }
+            }
             if (final_backend != FCAE_BACKEND_PSIPHON && !core_reports) {
                 if (g_app.protocol != 4 && g_app.listener_socks_enabled())
                     endpoint(final_name, "SOCKS5",
                              g_app.listener_socks_port() ? g_app.listener_socks_port() : g_app.default_listener_socks_port());
                 if (g_app.protocol != 4 && g_app.listener_http_enabled())
                     endpoint(final_name, "HTTP", g_app.listener_http_port());
-                if (g_app.tor_http_enabled && tor_in_route)
-                    endpoint("Tor", "HTTP", g_app.tor_http_port);
-                if (tor_in_route)
-                    endpoint("Tor", "SOCKS5", g_app.tor_socks_port ? g_app.tor_socks_port : 1821);
             }
+            // Tor listens on ports of its own wherever it sits in the route, so
+            // a core that answers for its listeners never speaks for Tor's.
+            if (g_app.tor_http_enabled && tor_in_route)
+                endpoint("Tor", "HTTP", g_app.tor_http_port);
+            if (tor_in_route)
+                endpoint("Tor", "SOCKS5", g_app.tor_socks_port ? g_app.tor_socks_port : 1821);
             if (final_backend == FCAE_BACKEND_PSIPHON) {
                 endpoint("Psiphon", "SOCKS5", fcae_psiphon_socks_port());
                 endpoint("Psiphon", "HTTP", fcae_psiphon_http_port());
             }
-            // Every live core instance, as the core reports it: the instance
-            // number is the hop it belongs to, and the protocol is the core's
-            // own name for the inbound, never a guess made from the settings.
-            if (live_len > 0 && core_listeners > 0) {
-                const char* cursor = live_listeners;
-                while (*cursor) {
-                    const char* end = strchr(cursor, ';');
-                    const size_t len = end ? (size_t)(end - cursor) : strlen(cursor);
-                    // core|instance|protocol|port
-                    const char* bar1 = (const char*)memchr(cursor, '|', len);
-                    const char* bar2 = bar1 ? (const char*)memchr(bar1 + 1, '|', len - (bar1 + 1 - cursor)) : nullptr;
-                    const char* bar3 = bar2 ? (const char*)memchr(bar2 + 1, '|', len - (bar2 + 1 - cursor)) : nullptr;
-                    if (bar1 && bar2 && bar3) {
-                        std::string core(cursor, (size_t)(bar1 - cursor));
-                        std::string instance(bar1 + 1, (size_t)(bar2 - bar1 - 1));
-                        std::string proto(bar2 + 1, (size_t)(bar3 - bar2 - 1));
-                        std::string port(bar3 + 1, len - (size_t)(bar3 + 1 - cursor));
-                        for (auto& c : proto) c = (char)toupper((unsigned char)c);
-                        if (share)
-                            ImGui::TextWrapped("%s #%s: %s 127.0.0.1:%s | LAN: %s:%s",
-                                core.c_str(), instance.c_str(), proto.c_str(), port.c_str(),
-                                lip, port.c_str());
-                        else
-                            ImGui::TextWrapped("%s #%s: %s 127.0.0.1:%s",
-                                core.c_str(), instance.c_str(), proto.c_str(), port.c_str());
-                    }
-                    if (!end) break;
-                    cursor = end + 1;
+            // Every live core instance, as the core reports it: the header
+            // names the instance by the config it runs -- the user's own name
+            // when the route ends there, the config's own `vless reality`
+            // otherwise -- and the protocol is the core's name for the inbound,
+            // never a guess made from the settings.
+            for (size_t i = 0; i < live_groups.size(); ++i) {
+                const LiveGroup& group = live_groups[i];
+                const char* named = (i == exit_group && final_core && !final_core->name.empty())
+                    ? final_core->name.c_str() : group.label.c_str();
+                if (*named)
+                    ImGui::TextWrapped("%s %s #%s", group.core.c_str(), named, group.instance.c_str());
+                else
+                    ImGui::TextWrapped("%s #%s", group.core.c_str(), group.instance.c_str());
+                for (const LiveListener& line : group.lines) {
+                    if (share && line.any)
+                        ImGui::TextWrapped("    %s 127.0.0.1:%s | LAN: %s:%s",
+                            line.proto.c_str(), line.port.c_str(), lip, line.port.c_str());
+                    else
+                        ImGui::TextWrapped("    %s 127.0.0.1:%s",
+                            line.proto.c_str(), line.port.c_str());
                 }
             }
         }

@@ -85,6 +85,9 @@ type xrayCore struct {
 	// settled once the listener binds -- so the settings' one number is not the
 	// answer to "what is listening".
 	listeners []coreListener
+	// What this config calls itself -- `vless reality` -- so a session running
+	// two instances of this core names each of them instead of numbering them.
+	label string
 }
 
 // xrayInbounds reads every inbound of a core config, in the order the core
@@ -99,6 +102,7 @@ func xrayInbounds(text string) []coreListener {
 		Inbounds []struct {
 			Protocol string          `json:"protocol"`
 			Port     json.RawMessage `json:"port"`
+			Listen   json.RawMessage `json:"listen"`
 		} `json:"inbounds"`
 	}
 	if err := json.Unmarshal([]byte(text), &cfg); err != nil {
@@ -107,10 +111,52 @@ func xrayInbounds(text string) []coreListener {
 	out := make([]coreListener, 0, len(cfg.Inbounds))
 	for _, inbound := range cfg.Inbounds {
 		if port := coreConfigPort(inbound.Port); port > 0 {
-			out = append(out, coreListener{proto: coreConfigName(inbound.Protocol), port: port})
+			out = append(out, coreListener{
+				proto: coreConfigName(inbound.Protocol),
+				port:  port,
+				any:   coreConfigScope(inbound.Listen),
+			})
 		}
 	}
 	return out
+}
+
+// xrayFlavor is the config's first real outbound and the transport carrying it:
+// the vocabulary a share link uses, so `vless reality` on screen names the same
+// thing the link the user pasted named.
+//
+// The first outbound that is not an engine built-in is the one the config
+// routes through, and the fields are read the way Xray spells them: a config
+// this app generated and a hand-written one answer the same way.
+func xrayFlavor(text string) string {
+	var cfg struct {
+		Outbounds []struct {
+			Protocol       string `json:"protocol"`
+			StreamSettings struct {
+				Network  string `json:"network"`
+				Security string `json:"security"`
+			} `json:"streamSettings"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal([]byte(text), &cfg); err != nil {
+		return ""
+	}
+	for _, outbound := range cfg.Outbounds {
+		switch strings.ToLower(strings.TrimSpace(outbound.Protocol)) {
+		case "", "freedom", "blackhole", "dns", "loopback":
+			continue
+		}
+		network := strings.ToLower(strings.TrimSpace(outbound.StreamSettings.Network))
+		if network == "tcp" {
+			network = ""
+		}
+		security := strings.ToLower(strings.TrimSpace(outbound.StreamSettings.Security))
+		if security == "none" {
+			security = ""
+		}
+		return coreTransportWords(outbound.Protocol, network, security)
+	}
+	return ""
 }
 
 var (
@@ -152,7 +198,7 @@ func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 	if err != nil {
 		return C.CString("xray: " + err.Error())
 	}
-	core := &xrayCore{instance: created, listeners: xrayInbounds(text)}
+	core := &xrayCore{instance: created, listeners: xrayInbounds(text), label: xrayFlavor(text)}
 	if manager, ok := created.GetFeature(featurestats.ManagerType()).(featurestats.Manager); ok {
 		core.stats = manager
 	}
@@ -203,9 +249,14 @@ func xray_stop_all() {
 }
 
 // xray_listeners writes what this shim is actually running: one
-// `handle|protocol|port` record per inbound of every live instance, in a
-// `;`-separated list. Returns the bytes written without the terminator, or the
-// bytes it needs when the buffer is too small (nothing is written then).
+// `instance|label|protocol|port|scope` record per inbound of every live
+// instance, in a `;`-separated list. Returns the bytes written without the
+// terminator, or the bytes it needs when the buffer is too small (nothing is
+// written then).
+//
+// The instance number is this instance's position among the live ones, not the
+// handle it was given: handles are handed out for the life of the process, so a
+// handle would label the first session's core #1 and the tenth session's #23.
 //
 //export xray_listeners
 func xray_listeners(buf *C.char, capacity C.int) C.int {
@@ -219,9 +270,10 @@ func xray_listeners(buf *C.char, capacity C.int) C.int {
 	}
 	sort.Slice(handles, func(i, j int) bool { return handles[i] < handles[j] })
 	var records []string
-	for _, id := range handles {
-		for _, listener := range xrayCores[id].listeners {
-			records = append(records, fmt.Sprintf("%d|%s|%d", id, listener.proto, listener.port))
+	for position, id := range handles {
+		core := xrayCores[id]
+		for _, listener := range core.listeners {
+			records = append(records, coreRecord(position+1, core.label, listener))
 		}
 	}
 	xrayMu.Unlock()

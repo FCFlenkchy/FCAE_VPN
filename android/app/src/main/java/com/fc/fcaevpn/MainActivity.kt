@@ -828,12 +828,11 @@ class MainActivity : AppCompatActivity() {
                     val tx = NativeEngine.nativeGetTxBps()
                     val totalRx = NativeEngine.nativeGetTotalRx()
                     val totalTx = NativeEngine.nativeGetTotalTx()
-                    val peer = NativeEngine.nativeGetPeer()
                     val lan = NativeEngine.nativeGetLanIp()
                     val statusMsg = NativeEngine.nativeGetStatusMsg()
                     val errMsg = NativeEngine.nativeGetLastError()
                     handler.post {
-                        if (inForeground && !isDestroyed) applyStatus(state, rtt, rx, tx, totalRx, totalTx, peer, lan, statusMsg, errMsg)
+                        if (inForeground && !isDestroyed) applyStatus(state, rtt, rx, tx, totalRx, totalTx, lan, statusMsg, errMsg)
                     }
                 } catch (e: Throwable) {
                     handler.post {
@@ -2065,18 +2064,6 @@ class MainActivity : AppCompatActivity() {
         paintNotificationEndpoints()
     }
 
-    /** Peer name already on screen, else the engine's, without a poll. */
-    private fun keptPeerName(): String {
-        val shown = if (::peerText.isInitialized) peerText.text?.toString().orEmpty() else ""
-        val marker = "Peer: "
-        val at = shown.indexOf(marker)
-        if (at >= 0) {
-            val line = shown.substring(at + marker.length).substringBefore('\n').trim()
-            if (line.isNotEmpty() && line != "\u2014" && line != "-" && line != "\u2013") return line
-        }
-        return try { NativeEngine.nativeGetPeer() } catch (_: Throwable) { "" }
-    }
-
     /** LAN address already painted, so Stop does not drop the shared line. */
     private fun lanFromShownEndpoints(): String {
         val shown = if (::peerText.isInitialized) peerText.text?.toString().orEmpty() else ""
@@ -2090,7 +2077,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun notificationEndpointsMissing(): Boolean {
         val shown = if (::peerText.isInitialized) peerText.text?.toString().orEmpty() else ""
-        if (!isPurePsiphon() && !isTorOnly() && !shown.contains("Peer:")) return true
         val finalBackend = routeBackends().lastOrNull() ?: 0
         val finalName = backendDisplayName(finalBackend)
         val wantsFinalProxy = !isPurePsiphon() && !isTorOnly() && finalBackend != 1 &&
@@ -2104,7 +2090,7 @@ class MainActivity : AppCompatActivity() {
     private fun paintNotificationEndpoints() {
         if (!::peerText.isInitialized || !notificationPause()) return
         val lan = lastNativeLan.ifEmpty { lanFromShownEndpoints() }
-        val painted = sessionEndpointText(keptPeerName(), lan, listenersUp = true)
+        val painted = sessionEndpointText(lan, listenersUp = true)
         if (painted.isNotEmpty()) peerText.text = painted.trimStart('\n')
     }
 
@@ -2614,7 +2600,7 @@ class MainActivity : AppCompatActivity() {
             protocols.addView(android.widget.RadioButton(this).apply {
                 // id 0 is View.NO_ID, which a RadioGroup cannot track.
                 id = index + 1
-                text = taggedLabel(label)
+                text = label
                 setTextColor(Color.parseColor("#FFE0E4EE"))
                 buttonTintList = ColorStateList.valueOf(Color.parseColor("#FF60A5FA"))
                 textSize = 14f
@@ -2898,13 +2884,21 @@ class MainActivity : AppCompatActivity() {
      * [backendForProtocolPosition] and [coreProtocolFromSelection] for the
      * (backend, protocol) mapping.
      */
+    /**
+     * The protocol list: the built-in transports, then one row per saved config,
+     * named after it and nothing else.
+     *
+     * Which core runs a saved config belongs to the dialog that manages them,
+     * where that choice is being made; a protocol chooser offers a route, and a
+     * row carrying its core there would read as a different protocol per entry.
+     */
     private fun protocolChoices(): List<String> =
-        BUILTIN_PROTOCOL_LABELS + coreConfigEntries().map { "${it.name}  ${it.backendTag}" }
+        BUILTIN_PROTOCOL_LABELS + coreConfigEntries().map { it.name }
 
     /**
-     * [label] with its core tag in its own colour: a saved config reads
-     * `name  xray`, the name in the list's white and the tag beside it. A
-     * built-in transport has no tag and comes back unchanged.
+     * [label] with its core tag in its own colour: the saved-configs list in the
+     * settings dialog reads `name  xray`, the name in the list's white and the
+     * tag beside it. A row without a tag comes back unchanged.
      */
     private fun taggedLabel(label: String): CharSequence {
         val tag = CORE_TAGS.firstOrNull { label.endsWith("  $it") } ?: return label
@@ -2924,9 +2918,9 @@ class MainActivity : AppCompatActivity() {
      * longer exist.
      *
      * [target] is the position to land on, or null to keep the position the
-     * spinner already holds. A saved config's label carries its core tag, so a
-     * label is not a name: the caller resolves the config it wants and passes
-     * the position it has in the list it just stored.
+     * spinner already holds. A label is not an identity -- two saved configs may
+     * carry the same name -- so the caller resolves the config it wants and
+     * passes the position it has in the list it just stored.
      */
     private fun refreshProtocolChoices(target: Int? = null) {
         if (!::spinnerProtocol.isInitialized) return
@@ -6057,47 +6051,84 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Append one line per inbound the live proxy cores report, exactly as the
-     * cores report them. True only when the exit core answered, so the caller
-     * does not also print the settings' single port for a session the cores
-     * have already answered for -- a hop's lines never suppress it.
+     * Append what the live proxy cores report: a header per instance naming the
+     * config it runs, then one line per inbound it answers on. True only when
+     * the exit core answered, so the caller does not also print the settings'
+     * single port for a session the cores have answered for -- a hop's lines
+     * never suppress it.
+     *
+     * [exitName] is the user's own name for the config the route ends in, and
+     * it goes on the last instance of the exit core, which is the hop that end
+     * is. A LAN address is offered only for an inbound the core bound beyond
+     * loopback: a chained hop serves only the hop below it.
      */
-    private fun appendCoreListeners(out: StringBuilder, lan: String, exitIsCore: String): Boolean {
+    private fun appendCoreListeners(
+        out: StringBuilder,
+        lan: String,
+        exitIsCore: String,
+        exitName: String
+    ): Boolean {
         val reported = try {
             NativeEngine.nativeLiveListeners()
         } catch (_: Throwable) {
             ""
         }
         if (reported.isEmpty()) return false
+        val records = reported.split(';')
+        // The records of one instance are adjacent, so a header is due where
+        // (core, instance) changes -- and the exit's own name belongs to the
+        // last of those groups that its core reports.
+        var exitGroupAt = -1
+        var group = ""
+        records.forEachIndexed { index, record ->
+            val fields = record.split('|')
+            if (fields.size != 6) return@forEachIndexed
+            val key = fields[0] + " " + fields[1]
+            if (key != group) {
+                group = key
+                if (fields[0] == exitIsCore) exitGroupAt = index
+            }
+        }
         var added = false
         var exitListed = false
-        for (record in reported.split(';')) {
+        group = ""
+        records.forEachIndexed { index, record ->
             val fields = record.split('|')
-            if (fields.size != 4) continue
-            val (core, instance, proto, port) = fields
-            if (port.toIntOrNull()?.let { it in 1..65535 } != true) continue
-            val kind = proto.uppercase(java.util.Locale.ROOT)
-            out.append("\n$core #$instance: $kind 127.0.0.1:$port")
-            if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") {
-                out.append(" | LAN: $lan:$port")
+            if (fields.size != 6) return@forEachIndexed
+            val core = fields[0]
+            val instance = fields[1]
+            val proto = fields[3]
+            val port = fields[4].toIntOrNull() ?: return@forEachIndexed
+            if (core.isEmpty() || port !in 1..65535) return@forEachIndexed
+            if (core + " " + instance != group) {
+                group = core + " " + instance
+                val named = if (index == exitGroupAt) exitName else fields[2]
+                out.append("\n$core")
+                if (named.isNotEmpty()) out.append(" $named")
+                out.append(" #$instance")
+                added = true
+                if (core == exitIsCore) exitListed = true
+            }
+            // The app calls its own listener SOCKS5 everywhere else, so a core's
+            // `socks` inbound is named the same way here.
+            val kind = proto.uppercase(java.util.Locale.ROOT).let { if (it == "SOCKS") "SOCKS5" else it }
+            out.append("\n  ").append(kind).append(" 127.0.0.1:").append(port)
+            if (fields[5] == "any" && switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") {
+                out.append(" | LAN: ").append(lan).append(':').append(port)
             }
             added = true
-            if (core == exitIsCore) exitListed = true
         }
-        return if (added) exitListed else false
+        return added && exitListed
     }
 
     /**
-     * Peer and listener lines. Widget and in-app Stop reach this from the
-     * poll, and only while native state is 4 or 6. Notification Stop calls
-     * it with listenersUp already true: the TUN can be down and the lines
-     * still have to be there, in that same frame.
+     * Listener lines. Widget and in-app Stop reach this from the poll, and
+     * only while native state is 4 or 6. Notification Stop calls it with
+     * listenersUp already true: the TUN can be down and the lines still have
+     * to be there, in that same frame.
      */
-    private fun sessionEndpointText(peer: String, lan: String, listenersUp: Boolean): String {
-        val peerLine = StringBuilder()
-        if (!isPurePsiphon() && !isTorOnly() && peer.isNotBlank()) {
-            peerLine.append("Peer: $peer")
-        }
+    private fun sessionEndpointText(lan: String, listenersUp: Boolean): String {
+        val lines = StringBuilder()
         if (listenersUp && !isPurePsiphon()) {
             fun endpoints(backend: String, socks: String?, http: String?) {
                 val local = mutableListOf<String>()
@@ -6108,8 +6139,8 @@ class MainActivity : AppCompatActivity() {
                 }
                 socks?.let { add("SOCKS5", it) }
                 http?.let { add("HTTP", it) }
-                if (local.isNotEmpty()) peerLine.append("\n$backend local: " + local.joinToString(" | "))
-                if (shared.isNotEmpty()) peerLine.append("\n$backend LAN: " + shared.joinToString(" | "))
+                if (local.isNotEmpty()) lines.append("\n$backend local: " + local.joinToString(" | "))
+                if (shared.isNotEmpty()) lines.append("\n$backend LAN: " + shared.joinToString(" | "))
             }
             if (!isTorOnly()) {
                 val finalBackend = routeBackends().lastOrNull() ?: 0
@@ -6119,7 +6150,8 @@ class MainActivity : AppCompatActivity() {
                 // Only the core that is the exit replaces its settings line; a
                 // hop's listeners are additional.
                 val coreListed = finalBackend in 3..4 &&
-                    appendCoreListeners(peerLine, lan, backendDisplayName(finalBackend))
+                    appendCoreListeners(lines, lan, backendDisplayName(finalBackend),
+                        finalCoreConfig()?.name.orEmpty())
                 if (finalBackend != 1 && !coreListed) {
                     endpoints(backendDisplayName(finalBackend),
                         if (finalSocksEnabled())
@@ -6132,8 +6164,8 @@ class MainActivity : AppCompatActivity() {
                 if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
         }
         if (listenersUp && isFinalPsiphon() && (pendingPsiSocks > 0 || pendingPsiHttp > 0))
-            peerLine.append("\n" + psiphonEndpointText(nativeLanFallback(lan)))
-        return peerLine.toString()
+            lines.append("\n" + psiphonEndpointText(nativeLanFallback(lan)))
+        return lines.toString()
     }
 
     private fun applyStatus(
@@ -6143,7 +6175,6 @@ class MainActivity : AppCompatActivity() {
         tx: Long,
         totalRx: Long,
         totalTx: Long,
-        peer: String,
         lan: String,
         statusMsg: String,
         errMsg: String
@@ -6242,7 +6273,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Gate listeners on the native state; Notification Stop renders them after polling stops.
-            val peerLine = StringBuilder(sessionEndpointText(peer, lan, state == 4 || state == 6))
+            val peerLine = StringBuilder(sessionEndpointText(lan, state == 4 || state == 6))
             if (errorDetailVisible) peerLine.append(peerErrorSuffix)
             peerText.text = peerLine.toString()
 

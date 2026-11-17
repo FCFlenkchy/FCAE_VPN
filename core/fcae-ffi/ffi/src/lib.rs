@@ -1344,10 +1344,20 @@ pub unsafe extern "C" fn fcae_core_listeners(
     listeners.kinds
 }
 
-/// One `core|instance|protocol|port` record for an inbound a live core reports.
+/// One `core|instance|label|protocol|port|scope` record for an inbound a live
+/// core reports.
+///
+/// `label` is what the instance calls itself (`vless reality`), and `scope` is
+/// `any` for an inbound bound to every interface and `local` for a loopback
+/// one: a chained hop serves only the hop below it, so offering its port on the
+/// LAN address would name an address that refuses the connection.
 #[cfg(any(feature = "xray", feature = "singbox"))]
 fn core_record(core: &str, listener: &fcae_runtime::sing_xray::CoreListener) -> String {
-    format!("{core}|{}|{}|{}", listener.instance, listener.proto, listener.port)
+    let scope = if listener.any { "any" } else { "local" };
+    format!(
+        "{core}|{}|{}|{}|{}|{scope}",
+        listener.instance, listener.label, listener.proto, listener.port
+    )
 }
 
 /// Every inbound of every live instance of every core compiled in.
@@ -1372,7 +1382,7 @@ fn listener_records() -> Vec<String> {
 }
 
 /// What the live proxy cores are listening on, one record per inbound:
-/// `core|instance|protocol|port`, records separated by `;`.
+/// `core|instance|label|protocol|port|scope`, records separated by `;`.
 ///
 /// The connection info in the UI reads this instead of the settings: a saved
 /// config declares the ports of its own inbounds, a chain runs one instance per

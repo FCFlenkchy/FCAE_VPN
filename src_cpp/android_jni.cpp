@@ -17,7 +17,7 @@
 // they are embedding hooks rather than part of the cross-platform ABI.
 extern "C" bool fcae_sponsor_initialize_android_context(void* java_vm, void* context);
 extern "C" void fcae_sponsor_set_ui_active(bool active);
-// What the live cores are listening on, as `core|instance|protocol|port`
+// What the live cores are listening on, as `core|instance|label|protocol|port|scope`
 // records separated by `;`.
 extern "C" uint32_t fcae_live_listeners(char* out, uint32_t capacity);
 
@@ -1291,7 +1291,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeGetLanIp(JNIEnv* env, jclass) {
     return env->NewStringUTF(ip);
 }
 
-// What the live proxy cores are listening on: `core|instance|protocol|port`
+// What the live proxy cores are listening on: `core|instance|label|protocol|port|scope`
 // records separated by `;`. The app's settings name one port for a session
 // that may run several core instances, so the connection line reads this
 // instead of deciding for the cores.

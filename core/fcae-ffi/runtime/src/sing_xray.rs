@@ -2142,22 +2142,32 @@ pub struct CoreFfi {
     /// Installs the host log sink (NULL clears it) and its level gate, from the
     /// scale [`log_gate`] produces.
     pub set_log: unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>, c_int),
-    /// Every inbound of every live instance as `handle|proto|port` records,
-    /// `;`-separated: what the core is actually listening on, which is not
-    /// what the app's settings say. Answers the bytes it needs when the buffer
-    /// is too small, so the caller can ask again.
+    /// Every inbound of every live instance as `instance|label|proto|port|scope`
+    /// records, `;`-separated: what the core is actually listening on, which is
+    /// not what the app's settings say. Answers the bytes it needs when the
+    /// buffer is too small, so the caller can ask again.
     pub listeners: unsafe extern "C" fn(*mut c_char, c_int) -> c_int,
 }
 
 /// One inbound a live core instance is listening on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreListener {
-    /// The instance's handle in its shim: two hops of one core have different
-    /// ones, which is what keeps their listeners apart on screen.
+    /// The instance's position among the live ones in its shim: two hops of one
+    /// core have different ones, which is what keeps their listeners apart on
+    /// screen. It counts from one and is not the internal handle, which grows
+    /// for the life of the process.
     pub instance: u64,
+    /// What the instance calls itself, from the config it was given: `vless
+    /// reality`, not an index. Empty when the config declares no outbound of
+    /// its own, which is a config that only serves local proxies.
+    pub label: String,
     /// The core's own protocol name, as its config spells it.
     pub proto: String,
     pub port: u16,
+    /// Whether the inbound binds every interface rather than loopback alone. A
+    /// chained hop serves only the hop below it, so its port must not be
+    /// offered on the LAN address.
+    pub any: bool,
 }
 
 /// What the live instances of one core are listening on.
@@ -2189,19 +2199,31 @@ pub fn live_listeners(ffi: CoreFfi) -> Vec<CoreListener> {
     Vec::new()
 }
 
-/// `handle|proto|port;...` into typed records, skipping anything unreadable.
+/// `instance|label|proto|port|scope;...` into typed records, skipping anything
+/// unreadable.
 fn parse_listeners(text: &str) -> Vec<CoreListener> {
     let mut out = Vec::new();
     for record in text.split(';').filter(|record| !record.is_empty()) {
         let mut fields = record.split('|');
-        let (Some(handle), Some(proto), Some(port)) = (fields.next(), fields.next(), fields.next())
-        else {
+        let (Some(instance), Some(label), Some(proto), Some(port), Some(scope)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
             continue;
         };
-        let (Ok(instance), Ok(port)) = (handle.parse::<u64>(), port.parse::<u16>()) else {
+        let (Ok(instance), Ok(port)) = (instance.parse::<u64>(), port.parse::<u16>()) else {
             continue;
         };
-        out.push(CoreListener { instance, proto: proto.to_string(), port });
+        out.push(CoreListener {
+            instance,
+            label: label.to_string(),
+            proto: proto.to_string(),
+            port,
+            any: scope == "any",
+        });
     }
     out
 }
@@ -3438,6 +3460,36 @@ mod tests {
             assert!(Instant::now() < deadline, "the abandoned start was never stopped");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A record carries what names an instance -- its own flavour, and whether
+    /// its port reaches beyond loopback -- so the connection info can say which
+    /// core serves which port instead of numbering them.
+    #[test]
+    fn listener_records_keep_their_label_and_scope() {
+        let parsed = parse_listeners(
+            "1|vless reality|socks|1827|local;\
+             1|vless reality|http|1828|any;\
+             2||socks|9000|local",
+        );
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].instance, 1);
+        assert_eq!(parsed[0].label, "vless reality");
+        assert_eq!(parsed[0].proto, "socks");
+        assert_eq!(parsed[0].port, 1827);
+        assert!(!parsed[0].any, "a loopback listener is not offered on the LAN");
+        assert_eq!(parsed[1].proto, "http");
+        assert!(parsed[1].any, "a wildcard listener answers on the LAN address");
+        assert_eq!(parsed[2].instance, 2);
+        assert_eq!(parsed[2].label, "", "a config with no outbound names nothing");
+    }
+
+    /// A record this side cannot read in full is not guessed at.
+    #[test]
+    fn a_short_listener_record_is_skipped() {
+        assert!(parse_listeners("1|socks|1827").is_empty());
+        assert!(parse_listeners("1|vless|socks|port|any").is_empty());
+        assert_eq!(parse_listeners("1|vless|socks|1827|any;").len(), 1);
     }
 
     /// The regression behind "sing-box stayed in memory after a disconnect":
