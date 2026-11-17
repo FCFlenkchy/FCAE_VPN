@@ -101,10 +101,50 @@ impl EmbeddedFiles {
         })?;
         let mut locks = Vec::with_capacity(files.len());
         for (name, bytes) in files { locks.push(stage(&dir.join(name), bytes)?); }
+        prune(label, &dir);
         Ok(Self { dir, locks })
     }
 
     pub fn directory(&self) -> &Path { &self.dir }
+}
+
+/// Delete the copies of a staged label that this build no longer uses.
+///
+/// The folder is named after the bytes it holds, which is what lets two
+/// versions coexist without either being able to replace a mapped DLL -- and
+/// what makes every update leave the previous one behind. A single-file app
+/// that unpacks native libraries must not turn into a folder of them: an old
+/// `wintun-<digest>/wintun.dll` is dead weight, and a pile of unsigned DLLs
+/// beside the executable is exactly what a heuristic scanner counts.
+///
+/// Only directories this staging code could have created are touched -- the
+/// label, a dash and sixteen hex digits -- and nothing here is fatal: a copy an
+/// older instance still has mapped cannot be deleted on Windows, and that is
+/// the one case where leaving it is right.
+fn prune(label: &str, current: &Path) {
+    let Some(parent) = current.parent() else { return };
+    let prefix = format!("{label}-");
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.as_path() == current || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(digest) = path
+            .file_name()
+            .and_then(|sibling| sibling.to_str())
+            .and_then(|sibling| sibling.strip_prefix(prefix.as_str()))
+        else {
+            continue;
+        };
+        if digest.len() != 16 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => log::info!("[deps] removed superseded {}", path.display()),
+            Err(error) => log::debug!("[deps] kept {}: {error}", path.display()),
+        }
+    }
 }
 
 fn verified(path: &Path, bytes: &[u8]) -> std::io::Result<File> {
