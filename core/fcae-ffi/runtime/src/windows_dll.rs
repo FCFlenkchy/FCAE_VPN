@@ -274,7 +274,8 @@ const INVALID_DEVINFO: HDEVINFO = -1;
 /// reaches.
 fn adapter_present(adapter: &str) -> bool {
     let mut luid = NET_LUID_LH::default();
-    unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) == 0 } || wintun_adapter_luid(adapter).is_ok()
+    let by_guid = unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) == 0 };
+    by_guid || wintun_adapter_luid(adapter).is_ok()
 }
 
 /// Wintun names every device instance after the requested creation GUID, and
