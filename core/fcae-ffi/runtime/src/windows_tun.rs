@@ -147,6 +147,47 @@ fn best_route(peer: IpAddr) -> Result<MIB_IPFORWARD_ROW2> {
     Ok(row)
 }
 
+/// The next hop an exclusion row derived from `physical` must use.
+///
+/// An unspecified next hop means "on-link": Windows resolves the destination's
+/// own link-layer address, which is only right for a route no wider than the
+/// connected subnet it came from. Reusing it for a wider block turns every
+/// address in that block into an ARP on the local wire — answered by nothing
+/// beyond the subnet, and dropped — so the block goes to the interface's
+/// default gateway instead, the way the Unix path builds the same row. `None`
+/// when the interface has no gateway: the row would have no usable next hop.
+fn exclusion_gateway(physical: &MIB_IPFORWARD_ROW2, family: u16) -> Option<IpAddr> {
+    let on_link = ip_of(&physical.NextHop);
+    if !on_link.is_unspecified() {
+        return Some(on_link);
+    }
+    let luid = unsafe { physical.InterfaceLuid };
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = ptr::null_mut();
+    if unsafe { GetIpForwardTable2(family, &mut table) } != 0 || table.is_null() {
+        return None;
+    }
+    // The interface's default route: the lowest metric wins, the same choice
+    // Windows makes between two gateways on one interface.
+    let mut gateway: Option<(u32, IpAddr)> = None;
+    unsafe {
+        let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        for row in rows {
+            if row.InterfaceLuid.Value != luid.Value || row.DestinationPrefix.PrefixLength != 0 {
+                continue;
+            }
+            let next = ip_of(&row.NextHop);
+            if next.is_unspecified() {
+                continue;
+            }
+            if gateway.is_none_or(|(metric, _)| row.Metric < metric) {
+                gateway = Some((row.Metric, next));
+            }
+        }
+        FreeMibTable(table.cast());
+    }
+    gateway.map(|(_, next)| next)
+}
+
 /// Whether a private prefix needs a route of its own on Windows.
 ///
 /// Loopback, link-local, multicast and the reserved blocks have an on-link
@@ -289,13 +330,18 @@ impl TunGuard {
                     log::warn!("[tun] private range {network}/{bits} already routes through FCAE; skipping its exclusion");
                     continue;
                 }
+                let family = if network.is_ipv4() { AF_INET } else { AF_INET6 };
+                let Some(gateway) = exclusion_gateway(&physical, family) else {
+                    log::debug!("[tun] {network}/{bits} has no gateway on its interface; keeping its existing route");
+                    continue;
+                };
                 let mut bypass = MIB_IPFORWARD_ROW2::default();
                 unsafe { InitializeIpForwardEntry(&mut bypass); }
                 bypass.InterfaceLuid = physical.InterfaceLuid;
                 bypass.InterfaceIndex = physical.InterfaceIndex;
                 bypass.DestinationPrefix.Prefix = sockaddr(network);
                 bypass.DestinationPrefix.PrefixLength = bits;
-                bypass.NextHop = physical.NextHop;
+                bypass.NextHop = sockaddr(gateway);
                 bypass.Metric = 0;
                 bypass.Protocol = MIB_IPPROTO_NETMGMT;
                 // One prefix that cannot be programmed is not a reason to refuse
@@ -675,6 +721,16 @@ mod tests {
         assert!(prefix("fc00::1/64", AF_INET).is_err());
         assert!(prefix("127.0.0.1/8", AF_INET).is_err());
         assert!(prefix("198.18.0.1", AF_INET).is_err());
+    }
+
+    #[test]
+    fn a_route_with_a_real_next_hop_keeps_it() {
+        let mut physical = MIB_IPFORWARD_ROW2::default();
+        physical.NextHop = sockaddr("192.168.1.1".parse().unwrap());
+        assert_eq!(
+            exclusion_gateway(&physical, AF_INET),
+            Some(IpAddr::from([192, 168, 1, 1]))
+        );
     }
 
     #[test]
