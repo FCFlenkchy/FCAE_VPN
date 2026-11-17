@@ -11,7 +11,8 @@ use sha2::{Digest, Sha256};
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::System::LibraryLoader::{
-    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
+    AddDllDirectory, GetProcAddress, LoadLibraryExW, SetDefaultDllDirectories,
+    LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 
@@ -59,6 +60,7 @@ impl Library {
             return Err(CoreError::Internal("embedded DLL entry is missing".into()));
         }
         let files = EmbeddedFiles::stage(label, files)?;
+        register_search_directory(&files.dir);
         Self::load(files.dir.join(entry).as_os_str(), LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32, files.locks)
     }
 
@@ -181,6 +183,57 @@ fn stage(path: &Path, bytes: &[u8]) -> Result<File> {
     result.map_err(|e| CoreError::Internal(format!("cannot stage {}: {e}", path.display())))
 }
 
+/// Make the staged copy answer to the bare name every engine loads:
+/// `LoadLibraryExW(L"wintun.dll", …, APPLICATION_DIR | SYSTEM32)` in zeptun,
+/// hev and Go's wintun bindings. Those flags exclude user directories, so the
+/// directory is registered and the process defaults are widened to include
+/// them; the module this process already loaded by full path still wins the
+/// name lookup, which is what the engines then reach.
+fn register_search_directory(dir: &Path) {
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        if SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) == 0 {
+            log::warn!("[tun] cannot set the DLL search directories: {}", std::io::Error::last_os_error());
+            return;
+        }
+        if AddDllDirectory(wide.as_ptr()).is_null() {
+            log::warn!("[tun] cannot register {} for DLL search: {}", dir.display(), std::io::Error::last_os_error());
+        }
+    }
+}
+
+/// Wintun reports driver and device failures only through its own logger;
+/// without it a failed `WintunCreateAdapter` leaves a bare Win32 code.
+extern "system" fn relay(level: i32, _timestamp: u64, message: *const u16) {
+    if message.is_null() { return; }
+    let mut len = 0;
+    while unsafe { *message.add(len) } != 0 { len += 1; }
+    let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(message, len) });
+    match level {
+        0 => log::info!("[wintun] {text}"),
+        1 => log::warn!("[wintun] {text}"),
+        _ => log::error!("[wintun] {text}"),
+    }
+}
+
+type Logger = extern "system" fn(i32, u64, *const u16);
+type SetLogger = unsafe extern "system" fn(logger: Option<Logger>);
+type DriverVersion = unsafe extern "system" fn() -> u32;
+
+/// Attach the logger and report the loaded driver, so the adapter step an
+/// engine fails in is visible in the app log.
+fn instrument(library: &Library) {
+    match unsafe { library.symbol::<SetLogger>(c"WintunSetLogger") } {
+        Ok(set) => unsafe { set(Some(relay)) },
+        Err(error) => log::debug!("[tun] Wintun has no logger: {error}"),
+    }
+    match unsafe { library.symbol::<DriverVersion>(c"WintunGetRunningDriverVersion") }.map(|version| unsafe { version() }) {
+        Ok(0) => log::debug!("[tun] no Wintun driver loaded yet"),
+        Ok(version) => log::info!("[tun] Wintun driver {}.{} already running", version >> 16, version & 0xffff),
+        Err(error) => log::debug!("[tun] Wintun driver version unavailable: {error}"),
+    }
+}
+
 static WINTUN: OnceLock<std::result::Result<Library, String>> = OnceLock::new();
 
 pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
@@ -192,7 +245,10 @@ pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
             Library::load(OsStr::new("wintun.dll"), LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32, Vec::new())
         };
         match &library {
-            Ok(_) => log::info!("[tun] Wintun library loaded"),
+            Ok(library) => {
+                instrument(library);
+                log::info!("[tun] Wintun library loaded");
+            }
             Err(error) => log::error!("[tun] Wintun library load failed: {error}"),
         }
         library.map_err(|e| e.to_string())
