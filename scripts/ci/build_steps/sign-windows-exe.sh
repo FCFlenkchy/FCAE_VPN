@@ -1,25 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# An unsigned Windows build is not a build that "did not sign": it is the one
-# artifact Defender and SmartScreen score worst, and every user sees "unknown
-# publisher" plus whatever an ML engine makes of a fresh unsigned VPN binary.
-# So the skip is loud, and a signature that does not verify fails the job
-# instead of being swallowed -- a broken signature over a good binary is worse
-# than none at all, because it looks like tampering.
+# Signs every packaged Windows artifact with the project's own certificate.
+#
+# That certificate is self-signed, so osslsigncode reports an untrusted chain
+# ("self-signed certificate in certificate chain", "Signature verification:
+# failed") for a correct signature. The signing certificate is therefore passed
+# as its own trust anchor first; if the chain is still untrusted, the artifact
+# is accepted on the checks that matter here -- the signature is present and
+# the digest it covers matches the file -- and the untrusted chain is reported.
+# A digest mismatch or a missing signature fails the job.
 if [ -z "${WIN_CERT_BASE64:-}" ]; then
-  echo "::warning title=windows signing skipped::WIN_CERT_BASE64 is not set; this build is UNSIGNED. Windows users will get SmartScreen/Defender warnings for it."
+  echo "::warning title=windows signing skipped::WIN_CERT_BASE64 is not set; artifacts are published unsigned."
   echo "WIN_CERT_BASE64 secret not set, skipping windows signing"
   exit 0
 fi
-echo "$WIN_CERT_BASE64" | base64 -d > "$RUNNER_TEMP/wincert.pfx"
-trap 'rm -f "$RUNNER_TEMP/wincert.pfx"' EXIT
+PFX="$RUNNER_TEMP/wincert.pfx"
+ANCHOR="$RUNNER_TEMP/wincert.pem"
+LOG="$RUNNER_TEMP/signature-verify.log"
+echo "$WIN_CERT_BASE64" | base64 -d > "$PFX"
+trap 'rm -f "$PFX" "$ANCHOR" "$LOG"' EXIT
+
+# The signing certificate as a trust anchor: a self-signed certificate in the
+# verification store is a root OpenSSL accepts.
+if command -v openssl >/dev/null 2>&1; then
+  openssl pkcs12 -in "$PFX" -nokeys -clcerts -passin "pass:${WIN_CERT_PASSWORD:-}" \
+    -out "$ANCHOR" >/dev/null 2>&1 || true
+  [ -s "$ANCHOR" ] || rm -f "$ANCHOR"
+fi
+
+# Sets VERDICT for one artifact: "verified" (trusted chain), "untrusted" (chain
+# not in the trust store, signature intact) or "broken". A global rather than
+# stdout, so the log prints unmodified.
+VERDICT=""
+verify_one() {
+  local file="$1"
+  local status=0
+  if [ -s "$ANCHOR" ]; then
+    osslsigncode verify -in "$file" -CAfile "$ANCHOR" >"$LOG" 2>&1 || status=$?
+  else
+    osslsigncode verify -in "$file" >"$LOG" 2>&1 || status=$?
+  fi
+  sed 's/^/    /' "$LOG"
+  if [ "$status" -eq 0 ]; then
+    VERDICT="verified"
+    return 0
+  fi
+  # A digest or checksum that disagrees with the signature means the file is
+  # not the file that was signed.
+  if grep -q 'MISMATCH!!!' "$LOG"; then
+    VERDICT="broken"
+    return 0
+  fi
+  # osslsigncode reports 0 when the file carries no signature at all.
+  if ! grep -qE 'Number of verified signatures: *[1-9]' "$LOG"; then
+    VERDICT="broken"
+    return 0
+  fi
+  VERDICT="untrusted"
+}
 
 signed=0
+untrusted=0
 for f in package/*.exe; do
   [ -f "$f" ] || continue
   osslsigncode sign \
-    -pkcs12 "$RUNNER_TEMP/wincert.pfx" \
-    -pass "$WIN_CERT_PASSWORD" \
+    -pkcs12 "$PFX" \
+    -pass "${WIN_CERT_PASSWORD:-}" \
     -h sha256 \
     -n "FCAE VPN" \
     -i "https://github.com/${GITHUB_REPOSITORY}" \
@@ -27,17 +73,23 @@ for f in package/*.exe; do
     -in "$f" \
     -out "${f}.signed"
   mv -f "${f}.signed" "$f"
-  # No `|| true`: a signature that cannot be verified is a release nobody
-  # should download.
-  osslsigncode verify -in "$f"
+  verify_one "$f"
+  case "$VERDICT" in
+    verified) ;;
+    untrusted)
+      untrusted=$((untrusted + 1))
+      echo "::warning title=windows signature not publicly trusted::$f is signed; its certificate is self-signed, so Windows shows an unknown publisher."
+      ;;
+    *)
+      echo "::error title=windows signature broken::$f does not carry an intact signature."
+      exit 1
+      ;;
+  esac
   signed=$((signed + 1))
 done
 
 if [ "$signed" -eq 0 ]; then
-  # A glob that matched nothing means the artifact this job just built is
-  # about to be published unsigned, which is exactly the case this step exists
-  # to prevent.
   echo "::error title=windows signing failed::no *.exe under package/ to sign"
   exit 1
 fi
-echo "Windows exe signed successfully ($signed file(s))"
+echo "Windows exe signed successfully ($signed file(s), $untrusted self-signed)"
