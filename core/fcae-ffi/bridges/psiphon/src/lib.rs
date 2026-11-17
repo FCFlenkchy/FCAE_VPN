@@ -491,6 +491,44 @@ impl Backend for PsiphonBackend {
         }
     }
 
+    /// Stop the controller without a runtime, and wait for it here.
+    ///
+    /// The tunnel is a goroutine tree plus its share of the shared Go heap, and
+    /// the only thing that reclaims it is a `psi_stop` that actually returns:
+    /// a controller left running still redials, still holds both listeners and
+    /// refuses every later start with "a Psiphon tunnel is already running".
+    /// The async drain cannot be reached when the worker that owned it is gone,
+    /// so the stop is asked for through the same single-flight thread it uses
+    /// elsewhere and joined on this one.
+    fn reclaim_blocking(&self) {
+        #[cfg(all(feature = "enabled", psiphon_linked))]
+        {
+            // A stop is only worth a thread when there is something to stop:
+            // this runs on every disconnect, including the many that follow a
+            // controller that is already down.
+            let pending = STOP_THREAD.lock().is_some();
+            if pending || ffi::state() != ffi::STATE_STOPPED {
+                if let Err(error) = ffi::request_stop() {
+                    log::warn!("[psiphon] cannot request the controller stop: {error}");
+                    return;
+                }
+                if let Some(thread) = STOP_THREAD.lock().take() {
+                    if thread.join().is_err() {
+                        log::warn!("[psiphon] the controller stop thread panicked");
+                    }
+                }
+            }
+        }
+        #[cfg(not(all(feature = "enabled", psiphon_linked)))]
+        {
+            // The tunnel belongs to the Android service that started it; what
+            // this side owns is the attach lease that asked for it, and a lease
+            // left behind keeps the pending request alive for a session that is
+            // over.
+            HOST_ATTACH.lock().take();
+        }
+    }
+
     fn recover_stale_state(&self) {
         // Psiphon runs in-process; a dead process leaves no orphan to reap.
         // Its datastore is crash-safe and recovered on next start.

@@ -143,6 +143,40 @@ fn reclaim_targets(own: Vec<Arc<dyn Backend>>) -> Vec<Arc<dyn Backend>> {
     targets
 }
 
+/// Run one teardown step so a panic cannot take the rest of the teardown with
+/// it.
+///
+/// The steps of a session end are independent engines, and every one of them is
+/// third-party code: a panic in the first must not decide that the others stay
+/// resident for the life of the process, which is exactly what an unwinding
+/// worker thread used to do -- it skipped the runtime shutdown, the remaining
+/// engines and the state the UI waits for.
+fn guarded(step: &str, work: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
+        log::error!("[session] {step} panicked; the teardown continues");
+    }
+}
+
+/// Release every engine this process can carry, without a session and without
+/// a runtime to run on.
+///
+/// The session worker's own teardown is the first word on this; this is the
+/// last one, called on the paths where no worker gets to say it: a start that
+/// was cancelled, a worker that died inside its cleanup, a disconnect that
+/// arrived for a session that was already gone. Both the TUN engine and every
+/// registered backend are asked, because the engines are process-global -- one
+/// Go runtime under tun2socks, Xray-core, sing-box and Psiphon, one Aether
+/// engine, one Firefox engine -- so "the session used it" and "the process
+/// still holds it" are different questions. Every implementation is idempotent:
+/// over a clean teardown this closes nothing.
+fn reclaim_engines(tun_bridge: &dyn TunBridge, stop_timeout: Duration) {
+    guarded("the TUN engine reclaim", || tun_bridge.reclaim(stop_timeout));
+    for provider in reclaim_targets(Vec::new()) {
+        let name = provider.id().as_str();
+        guarded(&format!("the {name} reclaim"), || provider.reclaim_blocking());
+    }
+}
+
 /// Platform privilege probe, injected for the same reason as `TunBridge`.
 pub type PrivilegeCheck = fn() -> bool;
 
@@ -399,21 +433,30 @@ impl Supervisor {
                 // takes down what it started, a panic or a cancelled start may
                 // not have, and a session that ended before it started
                 // anything still owes the process a clear one.
-                tun_bridge.reclaim(stop_timeout);
+                //
+                // Each step is guarded: they are independent engines written by
+                // other people, and one of them unwinding used to skip the ones
+                // after it -- the runtime shutdown, the remaining engines, the
+                // state the UI waits for -- leaving an engine with nothing left
+                // that knows it is running.
+                guarded("the TUN engine reclaim", || tun_bridge.reclaim(stop_timeout));
                 // A cancelled start may not have returned a BackendHandle.
                 // Drain every provider while its runtime is still alive, not
                 // just the carrier. Dropping the runtime early force-cancelled
                 // Tor despite the no-abort policy in BackendHandle::stop, and
                 // let the reaper release the next-start barrier too soon.
                 for provider in reclaim_targets(drain_backends) {
-                    let released = rt.block_on(async {
-                        tokio::time::timeout(RECLAIM_BUDGET, provider.drain()).await
+                    let name = provider.id().as_str();
+                    guarded(&format!("the {name} drain"), || {
+                        let released = rt.block_on(async {
+                            tokio::time::timeout(RECLAIM_BUDGET, provider.drain()).await
+                        });
+                        if released.is_err() {
+                            log::warn!(
+                                "[session] an engine did not release itself within {RECLAIM_BUDGET:?}"
+                            );
+                        }
                     });
-                    if released.is_err() {
-                        log::warn!(
-                            "[session] an engine did not release itself within {RECLAIM_BUDGET:?}"
-                        );
-                    }
                 }
                 // Bounded, because this thread *is* the next session's gate: the
                 // reaper clears the start barrier when it ends, so waiting here
@@ -423,7 +466,14 @@ impl Supervisor {
                 // refused to connect again. A blocking task that outlives the
                 // budget is a Go stop nothing can interrupt; it is left detached
                 // rather than allowed to hold the process.
-                rt.shutdown_timeout(stop_timeout.max(Duration::from_secs(1)));
+                guarded("the runtime shutdown", || {
+                    rt.shutdown_timeout(stop_timeout.max(Duration::from_secs(1)));
+                });
+                // The net under the net: whatever a drain could not release is
+                // released without the runtime this thread just gave up, so a
+                // teardown that lost a step above still ends with every engine
+                // closed.
+                reclaim_engines(tun_bridge.as_ref(), stop_timeout);
 
                 match outcome {
                     Ok(Ok(())) => {
@@ -466,8 +516,15 @@ impl Supervisor {
         let (running, already_stopping) = {
             let mut slot = self.running.lock();
             let Some(running) = slot.take() else {
-                // Another stop may already own the worker. Only its reaper
-                // may clear `stopping`, never a duplicate Disconnect.
+                // No worker to join. If none is being torn down either, then
+                // nothing owns the process-global engines, and anything still
+                // open belongs to a session that ended without saying so --
+                // the case that left a core resident for the life of the
+                // process. The reclaim runs off this thread: a Disconnect is
+                // never allowed to wait on an engine, and `stopping` is what a
+                // connect waits behind meanwhile.
+                drop(slot);
+                self.reclaim_when_idle();
                 return Ok(());
             };
             let already_stopping = self.stopping.swap(true, Ordering::SeqCst);
@@ -486,20 +543,73 @@ impl Supervisor {
 
         if running.thread.is_finished() {
             let _ = running.thread.join();
+            // The worker's own teardown has run; this is the net under it, and
+            // it is cheap because every engine is already closed.
+            reclaim_engines(self.cfg.tun_bridge.as_ref(), self.cfg.stop_timeout);
             self.stopping.store(false, Ordering::SeqCst);
         } else {
             // No polling/sleep budget on the UI thread. Keep the barrier set
             // until cleanup completes, including when Disconnect is repeated.
+            //
+            // The worker is handed over through a slot rather than moved into
+            // the closure: a reaper that cannot be spawned must still be able
+            // to finish the teardown here, or the barrier stays set for the
+            // life of the process and every later connect times out waiting on
+            // a reaper that does not exist.
             let flag = self.stopping.clone();
-            std::thread::Builder::new()
+            let bridge = self.cfg.tun_bridge.clone();
+            let stop_timeout = self.cfg.stop_timeout;
+            let worker = Arc::new(Mutex::new(Some(running)));
+            let handed = worker.clone();
+            let spawned = std::thread::Builder::new()
                 .name("fcae-session-reaper".into())
                 .spawn(move || {
-                    let _ = running.thread.join();
+                    if let Some(running) = handed.lock().take() {
+                        let _ = running.thread.join();
+                    }
+                    // After the join and before the barrier lifts: a connect
+                    // waits behind `stopping`, so nothing can be starting an
+                    // engine while this closes the ones left behind.
+                    reclaim_engines(bridge.as_ref(), stop_timeout);
                     flag.store(false, Ordering::SeqCst);
-                })
-                .map_err(|e| CoreError::Internal(format!("failed to spawn session reaper: {e}")))?;
+                });
+            if spawned.is_err() {
+                log::error!("[session] cannot spawn the reaper; finishing the teardown here");
+                if let Some(running) = worker.lock().take() {
+                    let _ = running.thread.join();
+                }
+                reclaim_engines(self.cfg.tun_bridge.as_ref(), self.cfg.stop_timeout);
+                self.stopping.store(false, Ordering::SeqCst);
+            }
         }
         Ok(())
+    }
+
+    /// Reclaim the engines when nothing is running and nothing is being torn
+    /// down. Called by [`Self::stop`] for a session that is already gone.
+    ///
+    /// It takes the same start barrier a teardown does, so a connect that
+    /// arrives meanwhile waits for the reclaim instead of racing it, and a
+    /// process that is exiting waits for it through [`Self::wait_stopped`].
+    fn reclaim_when_idle(&self) {
+        if self.stopping.swap(true, Ordering::SeqCst) {
+            // A teardown owns the barrier and will reclaim on its own path.
+            return;
+        }
+        let bridge = self.cfg.tun_bridge.clone();
+        let stop_timeout = self.cfg.stop_timeout;
+        let flag = self.stopping.clone();
+        let spawned = std::thread::Builder::new()
+            .name("fcae-idle-reclaim".into())
+            .spawn(move || {
+                reclaim_engines(bridge.as_ref(), stop_timeout);
+                flag.store(false, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            // Nothing to wait for: releasing the barrier is the honest answer,
+            // and the next start re-checks every engine anyway.
+            self.stopping.store(false, Ordering::SeqCst);
+        }
     }
 
     /// Wait for the [`stop`] reaper to finish: the session worker has then

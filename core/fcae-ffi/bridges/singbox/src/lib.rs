@@ -26,6 +26,7 @@ extern "C" {
     fn sb_string_free(value: *mut c_char);
     fn sb_stats(handle: u64, uplink: *mut i64, downlink: *mut i64) -> c_int;
     fn sb_set_log(sink: LogSink, gate: c_int);
+    fn sb_listeners(buf: *mut c_char, capacity: c_int) -> c_int;
 }
 
 /// Host log sink, implemented here and called from the core's own goroutines.
@@ -48,6 +49,7 @@ impl Dialect for SingBoxDialect {
         string_free: sb_string_free,
         stats: sb_stats,
         set_log: sb_set_log,
+        listeners: sb_listeners,
     };
     const LOG_SINK: unsafe extern "C" fn(c_int, *const c_char) = log_sink;
     // The core's own DNS transport reads /etc/resolv.conf and nothing else.
@@ -96,6 +98,26 @@ impl Backend for SingBoxBackend {
     async fn drain(&self) {
         halt_all(SingBoxDialect::FFI).await;
     }
+
+    /// [`Self::drain`] without a runtime to run it on.
+    ///
+    /// The shim's own `stop_all` is synchronous and idempotent, so it can be
+    /// called straight from a teardown path that has no async context left --
+    /// the last word on a box whose start was abandoned, or whose session
+    /// worker died before it could drain.
+    fn reclaim_blocking(&self) {
+        unsafe { sb_stop_all() };
+    }
+}
+
+/// Every inbound of every live singbox instance, as the core itself reports
+/// them.
+///
+/// The settings name one port for a session that may run several instances --
+/// a chained hop, or a native config with more than one inbound -- so the app
+/// asks the core what is actually listening instead of deciding for it.
+pub fn listeners() -> Vec<fcae_runtime::sing_xray::CoreListener> {
+    fcae_runtime::sing_xray::live_listeners(SingBoxDialect::FFI)
 }
 
 pub fn register() {

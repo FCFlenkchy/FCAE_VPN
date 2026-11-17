@@ -38,6 +38,9 @@
 // UI-lifetime audio gate is an embedding hook rather than a public ABI field.
 extern "C" void fcae_sponsor_set_ui_active(bool active);
 extern "C" void fcae_ui_diagnostic(uint32_t event, uint32_t value);
+// A `fcae-ffi` export rather than part of the `fcae-abi` header: what the live
+// cores are listening on, as `core|instance|protocol|port` records.
+extern "C" uint32_t fcae_live_listeners(char* out, uint32_t capacity);
 
 
 static std::string join_chain_transports(const std::vector<int>& transports) {
@@ -4836,6 +4839,27 @@ void render_ui() {
     constrain_modal();
     if (ImGui::BeginPopupModal("##connection_info_popup", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) {
+        // What the live cores are listening on, asked of the cores themselves.
+        // The settings hold one port for a session that may run several
+        // instances (a chained hop, a native config with more than one
+        // inbound), so they are what the popup falls back to, not what it
+        // shows when the cores can answer.
+        static char live_listeners[4096] = {};
+        static uint32_t live_len = 0;
+        if (connected) {
+            uint32_t needed = fcae_live_listeners(live_listeners, (uint32_t)sizeof(live_listeners));
+            live_len = needed < sizeof(live_listeners) ? needed : 0;
+            live_listeners[live_len] = '\0';
+        } else {
+            live_len = 0;
+            live_listeners[0] = '\0';
+        }
+        // `core|instance|protocol|port;...` split without allocating per frame.
+        int core_listeners = 0;
+        for (uint32_t i = 0; i < live_len; ++i)
+            if (live_listeners[i] == ';') ++core_listeners;
+        if (live_len) ++core_listeners;
+
         ImGui::TextUnformatted("Connection info");
         ImGui::Spacing();
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
@@ -4872,7 +4896,14 @@ void render_ui() {
             const bool tor_in_route = g_app.protocol == 4
                 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end(), 4)
                        != g_app.chain_transports.end();
-            if (final_backend != FCAE_BACKEND_PSIPHON) {
+            // The cores answer for themselves below, so their settings' single
+            // port is not printed twice -- and never printed *instead* of what
+            // the session is actually serving. Only the exit core may stand in
+            // for its settings line; a hop's listeners are additional.
+            const bool core_reports =
+                (final_backend == FCAE_BACKEND_XRAY && strstr(live_listeners, "Xray|")) ||
+                (final_backend == FCAE_BACKEND_SINGBOX && strstr(live_listeners, "sing-box|"));
+            if (final_backend != FCAE_BACKEND_PSIPHON && !core_reports) {
                 if (g_app.protocol != 4 && g_app.listener_socks_enabled())
                     endpoint(final_name, "SOCKS5",
                              g_app.listener_socks_port() ? g_app.listener_socks_port() : g_app.default_listener_socks_port());
@@ -4886,6 +4917,36 @@ void render_ui() {
             if (final_backend == FCAE_BACKEND_PSIPHON) {
                 endpoint("Psiphon", "SOCKS5", fcae_psiphon_socks_port());
                 endpoint("Psiphon", "HTTP", fcae_psiphon_http_port());
+            }
+            // Every live core instance, as the core reports it: the instance
+            // number is the hop it belongs to, and the protocol is the core's
+            // own name for the inbound, never a guess made from the settings.
+            if (live_len > 0 && core_listeners > 0) {
+                const char* cursor = live_listeners;
+                while (*cursor) {
+                    const char* end = strchr(cursor, ';');
+                    const size_t len = end ? (size_t)(end - cursor) : strlen(cursor);
+                    // core|instance|protocol|port
+                    const char* bar1 = (const char*)memchr(cursor, '|', len);
+                    const char* bar2 = bar1 ? (const char*)memchr(bar1 + 1, '|', len - (bar1 + 1 - cursor)) : nullptr;
+                    const char* bar3 = bar2 ? (const char*)memchr(bar2 + 1, '|', len - (bar2 + 1 - cursor)) : nullptr;
+                    if (bar1 && bar2 && bar3) {
+                        std::string core(cursor, (size_t)(bar1 - cursor));
+                        std::string instance(bar1 + 1, (size_t)(bar2 - bar1 - 1));
+                        std::string proto(bar2 + 1, (size_t)(bar3 - bar2 - 1));
+                        std::string port(bar3 + 1, len - (size_t)(bar3 + 1 - cursor));
+                        for (auto& c : proto) c = (char)toupper((unsigned char)c);
+                        if (share)
+                            ImGui::TextWrapped("%s #%s: %s 127.0.0.1:%s | LAN: %s:%s",
+                                core.c_str(), instance.c_str(), proto.c_str(), port.c_str(),
+                                lip, port.c_str());
+                        else
+                            ImGui::TextWrapped("%s #%s: %s 127.0.0.1:%s",
+                                core.c_str(), instance.c_str(), proto.c_str(), port.c_str());
+                    }
+                    if (!end) break;
+                    cursor = end + 1;
+                }
             }
         }
         ImGui::EndChild();

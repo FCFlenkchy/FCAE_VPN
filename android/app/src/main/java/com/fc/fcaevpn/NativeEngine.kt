@@ -435,6 +435,16 @@ object NativeEngine {
     @JvmStatic external fun nativeSponsorManifestRefreshRemainingSecs(): Long
     @JvmStatic external fun nativeSponsorManifestCheckStarted()
     @JvmStatic external fun nativeSponsorRefreshManifestAsync()
+    /**
+     * What the live proxy cores are listening on, as
+     * `core|instance|protocol|port` records separated by `;`.
+     *
+     * Asked of the cores rather than read from the settings: a saved config
+     * declares its own inbound ports and a chain runs one instance per hop, so
+     * the one port in the settings is not what the session is serving from.
+     */
+    @JvmStatic external fun nativeLiveListeners(): String
+
     @JvmStatic external fun nativeSponsorRefreshManifestNowAsync()
     @JvmStatic external fun nativeSponsorSetConnected(connected: Boolean)
     @JvmStatic external fun nativeSponsorSetUiActive(active: Boolean)

@@ -13,10 +13,13 @@
 
 #include "fcae.h"
 
-// Android-only FFI helper: kept out of the generated public C header because
-// it is an embedding hook rather than part of the cross-platform ABI.
+// Android-only FFI helpers: kept out of the generated public C header because
+// they are embedding hooks rather than part of the cross-platform ABI.
 extern "C" bool fcae_sponsor_initialize_android_context(void* java_vm, void* context);
 extern "C" void fcae_sponsor_set_ui_active(bool active);
+// What the live cores are listening on, as `core|instance|protocol|port`
+// records separated by `;`.
+extern "C" uint32_t fcae_live_listeners(char* out, uint32_t capacity);
 
 #define LOG_TAG "FCAE_VPN"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -347,17 +350,30 @@ Java_com_fc_fcaevpn_PsiphonTunnel_nativeStart(JNIEnv* env, jclass, jstring confi
     return rc;
 }
 
+// A stop is a stop, whoever asks for it.
+//
+// This used to return unless the caller was the very object that started the
+// tunnel. A service instance that is recreated while the controller is up --
+// a kill and restart, a start that threw after psi_start, an owner replaced by
+// the next session -- can never be that object again, so its stop was dropped,
+// the Go controller kept redialling with both listeners held and its share of
+// the shared heap, and the next start was refused with -1 ("a Psiphon tunnel is
+// already running") until the whole process was killed. The gate protected
+// nothing: psi_stop is idempotent and takes the controller's own lifecycle
+// lock, so any stop that arrives is the right one.
 extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_PsiphonTunnel_nativeStop(JNIEnv* env, jclass, jobject owner) {
+Java_com_fc_fcaevpn_PsiphonTunnel_nativeStop(JNIEnv* env, jclass, jobject) {
     {
         std::lock_guard<std::mutex> lock(g_psi_owner_mu);
-        if (!g_psi_owner || !env->IsSameObject(g_psi_owner, owner)) return;
+        if (!g_psi_owner) return;
         ++g_psi_stops;
     }
+    // psi_stop() joins the controller, so it runs without the owner lock: the
+    // controller's notices call back into Java through it.
     psi_stop();
     std::lock_guard<std::mutex> lock(g_psi_owner_mu);
     --g_psi_stops;
-    if (!g_psi_starts && !g_psi_stops && g_psi_owner && env->IsSameObject(g_psi_owner, owner)) {
+    if (!g_psi_starts && !g_psi_stops && g_psi_owner) {
         env->DeleteGlobalRef(g_psi_owner);
         g_psi_owner = nullptr;
     }
@@ -1273,6 +1289,19 @@ Java_com_fc_fcaevpn_NativeEngine_nativeGetLanIp(JNIEnv* env, jclass) {
     char ip[64] = {};
     if (fcae_detect_lan_ip(ip, sizeof(ip)) != FCAE_OK) return env->NewStringUTF("");
     return env->NewStringUTF(ip);
+}
+
+// What the live proxy cores are listening on: `core|instance|protocol|port`
+// records separated by `;`. The app's settings name one port for a session
+// that may run several core instances, so the connection line reads this
+// instead of deciding for the cores.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeLiveListeners(JNIEnv* env, jclass) {
+    ensure_init();
+    char text[4096] = {};
+    uint32_t needed = fcae_live_listeners(text, (uint32_t)sizeof(text));
+    if (needed >= sizeof(text)) return env->NewStringUTF("");
+    return env->NewStringUTF(text);
 }
 
 extern "C" JNIEXPORT jstring JNICALL

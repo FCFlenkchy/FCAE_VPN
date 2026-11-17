@@ -47,6 +47,7 @@ import (
     "os"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1336,13 +1337,71 @@ func runIdleGuard(stop <-chan struct{}) {
 	}
 }
 
+// coreListener is one inbound a core shim brought up: the core's own protocol
+// name, exactly as its config spells it, and the port it bound.
+//
+// The app cannot answer "what is listening" from its own settings: a saved
+// config declares the ports its inbounds bind, a chain runs one instance per
+// hop, and every one of them is a real listener. The shims read them from the
+// config they hand the core, so what is reported is what the core runs.
+type coreListener struct {
+	proto string
+	port  int
+}
+
+// coreConfigName is a config's inbound type, lower-cased, with the empty name
+// spelled out instead of reported as nothing.
+func coreConfigName(name string) string {
+	if trimmed := strings.ToLower(strings.TrimSpace(name)); trimmed != "" {
+		return trimmed
+	}
+	return "inbound"
+}
+
+// coreConfigPort reads a port a config may spell as a number or as a string.
+// Zero means the inbound binds no TCP port this app can name.
+func coreConfigPort(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var number int
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return number
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(text)); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+// writeCoreRecords copies a `;`-separated record list into a caller buffer.
+//
+// The size is answered before anything is written, so a caller that guessed
+// short learns what to ask for instead of reading half a list.
+func writeCoreRecords(buf *C.char, capacity C.int, records []string) C.int {
+	text := strings.Join(records, ";")
+	needed := len(text)
+	if needed >= int(capacity) {
+		return C.int(needed + 1)
+	}
+	dst := unsafe.Slice((*byte)(unsafe.Pointer(buf)), int(capacity))
+	copy(dst, text)
+	dst[needed] = 0
+	return C.int(needed)
+}
+
 // retiring is the previous engine run's teardown when it outlived its grace.
 // engine.Start and engine.Stop share one stack and one device, so a new run
 // must not start beside a teardown that is still inside gVisor.
 var retiring <-chan struct{}
 
-// freeingMemory guards the one background collection a stop may start.
+// freeingMemory guards the one background collection a stop may start, and
+// scrubAgain remembers a request that arrived while it ran.
 var freeingMemory atomic.Bool
+var scrubAgain atomic.Bool
 
 // scrubHeap hands back what a teardown just freed.
 //
@@ -1354,16 +1413,29 @@ var freeingMemory atomic.Bool
 // instead of paying a full collection on every retry.
 func scrubHeap() {
 	if !freeingMemory.CompareAndSwap(false, true) {
+		// A collection is already running. It was started for an earlier stop
+		// -- possibly while a session still had an engine up -- so it may hand
+		// back nothing of what the last one just freed. Dropping this request
+		// is how a disconnect could end with the heap it released still
+		// resident until some later session happened to trigger another scrub.
+		scrubAgain.Store(true)
 		return
 	}
 	go func() {
-		defer freeingMemory.Store(false)
-		var stats runtime.MemStats
-		runtime.ReadMemStats(&stats)
-		if stats.HeapIdle-stats.HeapReleased < scrubMinReclaimable {
-			return
+		for {
+			scrubAgain.Store(false)
+			var stats runtime.MemStats
+			runtime.ReadMemStats(&stats)
+			if stats.HeapIdle-stats.HeapReleased >= scrubMinReclaimable {
+				debug.FreeOSMemory()
+			}
+			freeingMemory.Store(false)
+			// A request that landed while this ran gets its own pass, so the
+			// last stop is never the one whose scrub was skipped.
+			if !scrubAgain.Load() || !freeingMemory.CompareAndSwap(false, true) {
+				return
+			}
 		}
-		debug.FreeOSMemory()
 	}()
 }
 

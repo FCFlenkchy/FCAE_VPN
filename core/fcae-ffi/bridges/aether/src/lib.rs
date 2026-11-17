@@ -232,17 +232,59 @@ impl Backend for AetherBackend {
     /// ports for the life of the process and every later connect would fail to
     /// bind them.
     async fn drain(&self) {
-        retire_outstanding_jobs();
+        // The session is over, so no handle can still own a job -- including
+        // one whose handle was never reached.
+        retire_every_job();
         let deadline = tokio::time::Instant::now() + DRAIN_BUDGET;
         while tokio::time::Instant::now() < deadline && !PENDING.lock().is_empty() {
             tokio::time::sleep(REAP_INTERVAL).await;
         }
-        let remaining = PENDING.lock().len();
-        if remaining != 0 {
-            log::warn!(
-                "[aether] {remaining} engine job(s) had not released their listeners when the session ended"
-            );
+        report_unreleased();
+    }
+
+    /// The same retirement without a runtime, for a teardown that has none left.
+    ///
+    /// Aether's job is the tunnel: its own goroutines, its QUIC buffers and its
+    /// share of a runtime that is never shut down. Cancelling it is the only
+    /// thing that gives that back, and the async drain is unreachable when the
+    /// worker that owned it is gone.
+    fn reclaim_blocking(&self) {
+        retire_every_job();
+        let deadline = Instant::now() + DRAIN_BUDGET;
+        while Instant::now() < deadline && !PENDING.lock().is_empty() {
+            std::thread::sleep(REAP_INTERVAL);
         }
+        report_unreleased();
+    }
+}
+
+/// What a drain could not prove was released, said once per session end.
+fn report_unreleased() {
+    let remaining = PENDING.lock().len();
+    if remaining != 0 {
+        log::warn!(
+            "[aether] {remaining} engine job(s) had not released their listeners when the session ended"
+        );
+    }
+}
+
+/// Cancels every job this bridge holds, claimed or not.
+///
+/// Only a session end may call this: while a session is up, a claimed job backs
+/// a live hop and cancelling it would take that hop's tunnel down behind its
+/// back. Once it is over, "claimed" means nothing -- the handle either stopped
+/// its job already or was lost, and a lost handle is exactly what leaves an
+/// engine running with nothing left that knows it exists.
+fn retire_every_job() {
+    let all: Vec<(u64, SocketAddr)> = LIVE_JOBS
+        .lock()
+        .drain()
+        .map(|(id, job)| (id, job.addr))
+        .collect();
+    for (job, addr) in all {
+        log::debug!("[aether] retiring job {job} at session end");
+        ffi_cancel(job);
+        queue_pending(job, addr);
     }
 }
 

@@ -26,6 +26,7 @@ extern "C" {
     fn xray_string_free(value: *mut c_char);
     fn xray_stats(handle: u64, uplink: *mut i64, downlink: *mut i64) -> c_int;
     fn xray_set_log(sink: LogSink, gate: c_int);
+    fn xray_listeners(buf: *mut c_char, capacity: c_int) -> c_int;
 }
 
 /// Host log sink, implemented here and called from the core's own goroutines.
@@ -48,6 +49,7 @@ impl Dialect for XrayDialect {
         string_free: xray_string_free,
         stats: xray_stats,
         set_log: xray_set_log,
+        listeners: xray_listeners,
     };
     const LOG_SINK: unsafe extern "C" fn(c_int, *const c_char) = log_sink;
     // Go's resolver falls back to the platform's own when it cannot read
@@ -103,6 +105,26 @@ impl Backend for XrayBackend {
     async fn drain(&self) {
         halt_all(XrayDialect::FFI).await;
     }
+
+    /// [`Self::drain`] without a runtime to run it on.
+    ///
+    /// The shim's own `stop_all` is synchronous and idempotent, so it can be
+    /// called straight from a teardown path that has no async context left --
+    /// the last word on a core whose start was abandoned, or whose session
+    /// worker died before it could drain.
+    fn reclaim_blocking(&self) {
+        unsafe { xray_stop_all() };
+    }
+}
+
+/// Every inbound of every live xray instance, as the core itself reports
+/// them.
+///
+/// The settings name one port for a session that may run several instances --
+/// a chained hop, or a native config with more than one inbound -- so the app
+/// asks the core what is actually listening instead of deciding for it.
+pub fn listeners() -> Vec<fcae_runtime::sing_xray::CoreListener> {
+    fcae_runtime::sing_xray::live_listeners(XrayDialect::FFI)
 }
 
 pub fn register() {

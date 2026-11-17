@@ -6057,6 +6057,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Append one line per inbound the live proxy cores report, exactly as the
+     * cores report them. True only when the exit core answered, so the caller
+     * does not also print the settings' single port for a session the cores
+     * have already answered for -- a hop's lines never suppress it.
+     */
+    private fun appendCoreListeners(out: StringBuilder, lan: String, exitIsCore: String): Boolean {
+        val reported = try {
+            NativeEngine.nativeLiveListeners()
+        } catch (_: Throwable) {
+            ""
+        }
+        if (reported.isEmpty()) return false
+        var added = false
+        var exitListed = false
+        for (record in reported.split(';')) {
+            val fields = record.split('|')
+            if (fields.size != 4) continue
+            val (core, instance, proto, port) = fields
+            if (port.toIntOrNull()?.let { it in 1..65535 } != true) continue
+            val kind = proto.uppercase(java.util.Locale.ROOT)
+            out.append("\n$core #$instance: $kind 127.0.0.1:$port")
+            if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") {
+                out.append(" | LAN: $lan:$port")
+            }
+            added = true
+            if (core == exitIsCore) exitListed = true
+        }
+        return if (added) exitListed else false
+    }
+
+    /**
      * Peer and listener lines. Widget and in-app Stop reach this from the
      * poll, and only while native state is 4 or 6. Notification Stop calls
      * it with listenersUp already true: the TUN can be down and the lines
@@ -6082,7 +6113,14 @@ class MainActivity : AppCompatActivity() {
             }
             if (!isTorOnly()) {
                 val finalBackend = routeBackends().lastOrNull() ?: 0
-                if (finalBackend != 1) {
+                // A core names its own listeners: a saved config declares its
+                // inbound ports and a chain runs one instance per hop, so the
+                // settings' single port is not what the session serves from.
+                // Only the core that is the exit replaces its settings line; a
+                // hop's listeners are additional.
+                val coreListed = finalBackend in 3..4 &&
+                    appendCoreListeners(peerLine, lan, backendDisplayName(finalBackend))
+                if (finalBackend != 1 && !coreListed) {
                     endpoints(backendDisplayName(finalBackend),
                         if (finalSocksEnabled())
                             effectiveSocksPort().toString() else null,

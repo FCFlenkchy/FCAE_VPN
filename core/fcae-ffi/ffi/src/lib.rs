@@ -1344,6 +1344,66 @@ pub unsafe extern "C" fn fcae_core_listeners(
     listeners.kinds
 }
 
+/// One `core|instance|protocol|port` record for an inbound a live core reports.
+#[cfg(any(feature = "xray", feature = "singbox"))]
+fn core_record(core: &str, listener: &fcae_runtime::sing_xray::CoreListener) -> String {
+    format!("{core}|{}|{}|{}", listener.instance, listener.proto, listener.port)
+}
+
+/// Every inbound of every live instance of every core compiled in.
+#[cfg(any(feature = "xray", feature = "singbox"))]
+fn listener_records() -> Vec<String> {
+    let mut records = Vec::new();
+    #[cfg(feature = "xray")]
+    for listener in fcae_bridge_xray::listeners() {
+        records.push(core_record("Xray", &listener));
+    }
+    #[cfg(feature = "singbox")]
+    for listener in fcae_bridge_singbox::listeners() {
+        records.push(core_record("sing-box", &listener));
+    }
+    records
+}
+
+/// No core in this build, so nothing is listening to report.
+#[cfg(not(any(feature = "xray", feature = "singbox")))]
+fn listener_records() -> Vec<String> {
+    Vec::new()
+}
+
+/// What the live proxy cores are listening on, one record per inbound:
+/// `core|instance|protocol|port`, records separated by `;`.
+///
+/// The connection info in the UI reads this instead of the settings: a saved
+/// config declares the ports of its own inbounds, a chain runs one instance per
+/// hop, and a native config may declare several listeners at once — so the one
+/// port in the settings is not the answer to "what is listening", and naming it
+/// sent the user to a port the session was not serving from.
+///
+/// Returns the bytes written without the terminator, or the bytes it needs when
+/// `capacity` is too small (nothing is written then).
+///
+/// # Safety
+/// `out` must be NULL or point at `capacity` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_live_listeners(out: *mut c_char, capacity: u32) -> u32 {
+    guard_value("fcae_live_listeners", 0, || {
+        let text = listener_records().join(";");
+        let needed = text.len() as u32;
+        if out.is_null() || capacity == 0 {
+            return needed + 1;
+        }
+        if needed >= capacity {
+            return needed + 1;
+        }
+        fill(
+            std::slice::from_raw_parts_mut(out, capacity as usize),
+            &text,
+        );
+        needed
+    })
+}
+
 /// Psiphon's currently bound SOCKS port, or zero when unavailable.
 #[no_mangle]
 pub extern "C" fn fcae_psiphon_socks_port() -> u16 {

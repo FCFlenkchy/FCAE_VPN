@@ -31,7 +31,9 @@ static void xray_invoke_log(xray_log_fn fn, int level, const char *msg) {
 import "C"
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"unsafe"
@@ -77,6 +79,38 @@ type xrayCore struct {
 	// Nil when this config carries no `stats` app; the core then keeps no
 	// traffic totals at all.
 	stats featurestats.Manager
+	// The inbounds this instance actually runs, read from the very config the
+	// core was handed. The app cannot know them: a saved config declares its
+	// own ports, a chain runs one instance per hop, and a dynamic port is only
+	// settled once the listener binds -- so the settings' one number is not the
+	// answer to "what is listening".
+	listeners []coreListener
+}
+
+// xrayInbounds reads every inbound of a core config, in the order the core
+// lists them.
+//
+// Only the fields both dialects agree on are read: a config that spells its
+// port as a string, an inbound with an inherited listener object or an unknown
+// protocol still reports what it can, and an inbound with no port is not a TCP
+// listener this app can name.
+func xrayInbounds(text string) []coreListener {
+	var cfg struct {
+		Inbounds []struct {
+			Protocol string          `json:"protocol"`
+			Port     json.RawMessage `json:"port"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(text), &cfg); err != nil {
+		return nil
+	}
+	out := make([]coreListener, 0, len(cfg.Inbounds))
+	for _, inbound := range cfg.Inbounds {
+		if port := coreConfigPort(inbound.Port); port > 0 {
+			out = append(out, coreListener{proto: coreConfigName(inbound.Protocol), port: port})
+		}
+	}
+	return out
 }
 
 var (
@@ -118,7 +152,7 @@ func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 	if err != nil {
 		return C.CString("xray: " + err.Error())
 	}
-	core := &xrayCore{instance: created}
+	core := &xrayCore{instance: created, listeners: xrayInbounds(text)}
 	if manager, ok := created.GetFeature(featurestats.ManagerType()).(featurestats.Manager); ok {
 		core.stats = manager
 	}
@@ -166,6 +200,32 @@ func xray_stop_all() {
 	// keep the idle scrub armed for the life of the process and suppress the
 	// heap release that runs once the last engine is gone.
 	engineReclaimed(engineXray)
+}
+
+// xray_listeners writes what this shim is actually running: one
+// `handle|protocol|port` record per inbound of every live instance, in a
+// `;`-separated list. Returns the bytes written without the terminator, or the
+// bytes it needs when the buffer is too small (nothing is written then).
+//
+//export xray_listeners
+func xray_listeners(buf *C.char, capacity C.int) C.int {
+	if buf == nil || capacity <= 0 {
+		return 0
+	}
+	xrayMu.Lock()
+	handles := make([]uint64, 0, len(xrayCores))
+	for id := range xrayCores {
+		handles = append(handles, id)
+	}
+	sort.Slice(handles, func(i, j int) bool { return handles[i] < handles[j] })
+	var records []string
+	for _, id := range handles {
+		for _, listener := range xrayCores[id].listeners {
+			records = append(records, fmt.Sprintf("%d|%s|%d", id, listener.proto, listener.port))
+		}
+	}
+	xrayMu.Unlock()
+	return writeCoreRecords(buf, capacity, records)
 }
 
 //export xray_running

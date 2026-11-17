@@ -279,6 +279,19 @@ pub trait Backend: Send + Sync {
     /// Runs on the session worker, never the UI/control thread.
     async fn drain(&self) {}
 
+    /// Release every instance of this backend's engine, synchronously.
+    ///
+    /// [`Self::drain`] is the teardown's first word and it needs a runtime to
+    /// run on; this is its last, and it must not need anything. A session's
+    /// worker thread can end before its cleanup does -- a panic inside one
+    /// engine's teardown, a cancelled start that never returned a handle, a
+    /// process that is being torn down -- and whatever an engine still held
+    /// then was resident for the life of the process with nothing left that
+    /// knew its name. The supervisor calls this on every path where no session
+    /// is running, so the implementations must be idempotent and safe to call
+    /// over an already-clean backend: closing nothing costs nothing.
+    fn reclaim_blocking(&self) {}
+
     fn recover_stale_state(&self) {}
 }
 

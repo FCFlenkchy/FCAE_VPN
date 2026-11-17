@@ -32,6 +32,9 @@ import "C"
 
 import (
 	"context"
+	stdjson "encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"unsafe"
@@ -66,6 +69,40 @@ type sbCore struct {
 	// Nil only if the tracker could not be attached; the core then reports no
 	// traffic totals.
 	traffic *trafficcontrol.Manager
+	// The inbounds this instance actually runs, read from the config the box
+	// was handed: a saved config declares its own ports and a chain runs one
+	// instance per hop, so the settings' single number is not the answer to
+	// "what is listening".
+	listeners []coreListener
+}
+
+// sbInbounds reads every inbound of a sing-box config, in the order the config
+// lists them.
+//
+// The fields every version agrees on, and nothing else: an unknown type or a
+// listener inherited from a shared object still reports what it can, and an
+// inbound without a listen_port is not a TCP listener this app can name.
+//
+// The standard library's json is named explicitly: this file also imports
+// sing's own `common/json`, which is a different decoder and must not be used
+// to read a field list.
+func sbInbounds(text string) []coreListener {
+	var cfg struct {
+		Inbounds []struct {
+			Type       string             `json:"type"`
+			ListenPort stdjson.RawMessage `json:"listen_port"`
+		} `json:"inbounds"`
+	}
+	if err := stdjson.Unmarshal([]byte(text), &cfg); err != nil {
+		return nil
+	}
+	out := make([]coreListener, 0, len(cfg.Inbounds))
+	for _, inbound := range cfg.Inbounds {
+		if port := coreConfigPort(inbound.ListenPort); port > 0 {
+			out = append(out, coreListener{proto: coreConfigName(inbound.Type), port: port})
+		}
+	}
+	return out
 }
 
 var (
@@ -119,7 +156,7 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 		_ = created.Close()
 		return C.CString("sing-box: " + err.Error())
 	}
-	core := &sbCore{box: created, traffic: traffic}
+	core := &sbCore{box: created, traffic: traffic, listeners: sbInbounds(text)}
 	sbMu.Lock()
 	sbNextID++
 	id := sbNextID
@@ -164,6 +201,32 @@ func sb_stop_all() {
 	// keep the idle scrub armed for the life of the process and suppress the
 	// heap release that runs once the last engine is gone.
 	engineReclaimed(engineSingBox)
+}
+
+// sb_listeners writes what this shim is actually running: one
+// `handle|type|port` record per inbound of every live instance, in a
+// `;`-separated list. Returns the bytes written without the terminator, or the
+// bytes it needs when the buffer is too small (nothing is written then).
+//
+//export sb_listeners
+func sb_listeners(buf *C.char, capacity C.int) C.int {
+	if buf == nil || capacity <= 0 {
+		return 0
+	}
+	sbMu.Lock()
+	handles := make([]uint64, 0, len(sbCores))
+	for id := range sbCores {
+		handles = append(handles, id)
+	}
+	sort.Slice(handles, func(i, j int) bool { return handles[i] < handles[j] })
+	var records []string
+	for _, id := range handles {
+		for _, listener := range sbCores[id].listeners {
+			records = append(records, fmt.Sprintf("%d|%s|%d", id, listener.proto, listener.port))
+		}
+	}
+	sbMu.Unlock()
+	return writeCoreRecords(buf, capacity, records)
 }
 
 //export sb_running

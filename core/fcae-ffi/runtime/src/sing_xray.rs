@@ -2142,6 +2142,68 @@ pub struct CoreFfi {
     /// Installs the host log sink (NULL clears it) and its level gate, from the
     /// scale [`log_gate`] produces.
     pub set_log: unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>, c_int),
+    /// Every inbound of every live instance as `handle|proto|port` records,
+    /// `;`-separated: what the core is actually listening on, which is not
+    /// what the app's settings say. Answers the bytes it needs when the buffer
+    /// is too small, so the caller can ask again.
+    pub listeners: unsafe extern "C" fn(*mut c_char, c_int) -> c_int,
+}
+
+/// One inbound a live core instance is listening on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreListener {
+    /// The instance's handle in its shim: two hops of one core have different
+    /// ones, which is what keeps their listeners apart on screen.
+    pub instance: u64,
+    /// The core's own protocol name, as its config spells it.
+    pub proto: String,
+    pub port: u16,
+}
+
+/// What the live instances of one core are listening on.
+///
+/// A saved config declares the ports its inbounds bind and a chain runs one
+/// instance per hop, so the settings hold one number for a session that may
+/// have several. This asks the core itself, through the shim that started it.
+pub fn live_listeners(ffi: CoreFfi) -> Vec<CoreListener> {
+    let mut capacity: usize = 1024;
+    for _ in 0..4 {
+        let mut buf = vec![0u8; capacity];
+        // SAFETY: `buf` is a live, writable buffer of `capacity` bytes and the
+        // shim writes at most that many, NUL-terminated.
+        let answer = unsafe { (ffi.listeners)(buf.as_mut_ptr().cast::<c_char>(), capacity as c_int) };
+        if answer < 0 {
+            return Vec::new();
+        }
+        if answer as usize >= capacity {
+            // The shim answered with the size it needs and wrote nothing.
+            capacity = answer as usize + 1;
+            continue;
+        }
+        let text = match std::str::from_utf8(&buf[..answer as usize]) {
+            Ok(text) => text,
+            Err(_) => return Vec::new(),
+        };
+        return parse_listeners(text);
+    }
+    Vec::new()
+}
+
+/// `handle|proto|port;...` into typed records, skipping anything unreadable.
+fn parse_listeners(text: &str) -> Vec<CoreListener> {
+    let mut out = Vec::new();
+    for record in text.split(';').filter(|record| !record.is_empty()) {
+        let mut fields = record.split('|');
+        let (Some(handle), Some(proto), Some(port)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (Ok(instance), Ok(port)) = (handle.parse::<u64>(), port.parse::<u16>()) else {
+            continue;
+        };
+        out.push(CoreListener { instance, proto: proto.to_string(), port });
+    }
+    out
 }
 
 /// One core's build identity and config grammar — the only per-core code.
@@ -3364,7 +3426,10 @@ mod tests {
             0
         }
         unsafe extern "C" fn set_log(_: Option<unsafe extern "C" fn(c_int, *const c_char)>, _: c_int) {}
-        CoreFfi { start, stop, stop_all, running, string_free, stats, set_log }
+        unsafe extern "C" fn listeners(_: *mut c_char, _: c_int) -> c_int {
+            0
+        }
+        CoreFfi { start, stop, stop_all, running, string_free, stats, set_log, listeners }
     }
 
     fn await_stops(total: usize) {
