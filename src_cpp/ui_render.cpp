@@ -5188,17 +5188,26 @@ void render_ui() {
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Text("TUN engine");
                 ImGui::SameLine(0, 8);
-                ImGui::PushItemWidth(140);
                 FcaeTunEngineInfo tei[4];
                 const char* te_names[4];
                 uint32_t te_n = fcae_tun_engine_count();
                 if (te_n > 4) te_n = 4;
+                // The closed combo previews the selected entry, so it is sized to
+                // the widest name: "hev-socks5-tunnel" was cut in half the moment
+                // it was picked, the popup beside it having always been wide enough.
+                float te_widest = 0.0f;
                 for (uint32_t i = 0; i < te_n; ++i) {
                     memset(&tei[i], 0, sizeof(tei[i]));
                     tei[i].struct_size = sizeof(tei[i]);
                     tei[i].abi_version = FCAE_ABI_VERSION;
                     te_names[i] = fcae_tun_engine_info(i, &tei[i]) == FCAE_OK ? tei[i].display_name : "?";
+                    const float te_name_w = ImGui::CalcTextSize(te_names[i]).x;
+                    if (te_name_w > te_widest) te_widest = te_name_w;
                 }
+                float te_width = te_widest + ImGui::GetStyle().FramePadding.x * 2.0f + ImGui::GetFrameHeight();
+                const float te_room = ImGui::GetContentRegionAvail().x;
+                if (te_width > te_room) te_width = te_room;
+                ImGui::PushItemWidth(te_width);
                 int te_sel = (g_app.tun_engine >= 0 && g_app.tun_engine < (int)te_n) ? g_app.tun_engine : 0;
                 if (ImGui::Combo("##tun_engine", &te_sel, te_names, (int)te_n)) {
                     g_app.tun_engine = te_sel;

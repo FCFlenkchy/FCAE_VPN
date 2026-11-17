@@ -423,8 +423,8 @@ impl Tun2SocksBridge {
     }
 }
 
-impl TunBridge for Tun2SocksBridge {
-    fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
+impl Tun2SocksBridge {
+    fn start_once(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
         #[cfg(windows)]
         fcae_runtime::windows_tun::validate_backend(cfg, endpoints.peer_ip.as_deref())?;
         if !is_supported() {
@@ -562,6 +562,15 @@ impl TunBridge for Tun2SocksBridge {
         self.up_logged.store(true, Ordering::SeqCst);
         log::info!("[tun:tun2socks] up ({device} <-> {proxy})");
         Ok(())
+    }
+}
+
+impl TunBridge for Tun2SocksBridge {
+    fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
+        #[cfg(windows)]
+        return fcae_runtime::windows_dll::start_with_driver_repair(&cfg.tun.name, || self.start_once(cfg, endpoints));
+        #[cfg(not(windows))]
+        self.start_once(cfg, endpoints)
     }
 
     fn abort(&self) {

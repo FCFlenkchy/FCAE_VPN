@@ -278,6 +278,66 @@ pub fn wintun_adapter_luid(name: &str) -> Result<windows_sys::Win32::NetworkMana
     Ok(luid)
 }
 
+static DRIVER_RESET: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+/// Drop the stored Wintun driver so the next create installs the copy embedded
+/// in this build.
+///
+/// Wintun replaces a stored driver only with a newer one, so a package that
+/// cannot install a device fails every adapter with problem 31 and survives
+/// every retry, reboot included. `WintunDeleteDriver` removes the adapters it
+/// left in a problem state and then uninstalls the package. Once per process.
+fn reset_driver() -> Result<()> {
+    DRIVER_RESET
+        .get_or_init(|| {
+            type DeleteDriver = unsafe extern "system" fn() -> i32;
+            let library = WINTUN
+                .get()
+                .and_then(|result| result.as_ref().ok())
+                .ok_or_else(|| "Wintun has not been loaded".to_string())?;
+            let delete: DeleteDriver = unsafe { library.symbol(c"WintunDeleteDriver") }.map_err(|e| e.to_string())?;
+            if unsafe { delete() } == 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            log::info!("[tun] Wintun driver removed; the next adapter installs the embedded copy");
+            Ok(())
+        })
+        .clone()
+        .map_err(CoreError::Internal)
+}
+
+/// Run an adapter-creating start, reinstalling the Wintun driver once when the
+/// adapter never appeared.
+///
+/// Every engine reports a failed device install as a bare start error, so the
+/// missing adapter is the signal: when the adapter is openable the failure was
+/// somewhere else and the driver stays untouched.
+pub fn start_with_driver_repair<T>(adapter: &str, start: impl Fn() -> Result<T>) -> Result<T> {
+    let error = match start() {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    if wintun_adapter_luid(adapter).is_ok() {
+        return Err(error);
+    }
+    log::warn!("[tun] no Wintun adapter '{adapter}' after a failed start ({error}); reinstalling the driver");
+    match reset_driver() {
+        Ok(()) => {}
+        Err(reset) => {
+            log::error!("[tun] cannot reinstall the Wintun driver: {reset}");
+            return Err(error);
+        }
+    }
+    let retried = start();
+    if retried.is_err() {
+        log::error!(
+            "[tun] '{adapter}' still cannot be installed; Windows is refusing the Wintun driver \
+             (a device left in problem state may need removing by hand)"
+        );
+    }
+    retried
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

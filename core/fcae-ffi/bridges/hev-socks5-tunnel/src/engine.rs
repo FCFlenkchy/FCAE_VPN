@@ -485,8 +485,8 @@ impl HevSocks5TunnelBridge {
     }
 }
 
-impl TunBridge for HevSocks5TunnelBridge {
-    fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
+impl HevSocks5TunnelBridge {
+    fn start_once(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
         #[cfg(windows)]
         {
             log::info!("[hev] validating Windows TUN settings");
@@ -578,6 +578,15 @@ impl TunBridge for HevSocks5TunnelBridge {
             log::info!("[tun:hev] up (socks {}, mtu {})", socks, cfg.tun.mtu);
         }
         outcome
+    }
+}
+
+impl TunBridge for HevSocks5TunnelBridge {
+    fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
+        #[cfg(windows)]
+        return fcae_runtime::windows_dll::start_with_driver_repair(&cfg.tun.name, || self.start_once(cfg, endpoints));
+        #[cfg(not(windows))]
+        self.start_once(cfg, endpoints)
     }
 
     /// Lock-free so a Disconnect never waits behind a start that is still
