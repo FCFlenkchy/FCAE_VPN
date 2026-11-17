@@ -3557,28 +3557,34 @@ mod tests {
     fn live_instances_keep_the_order_their_route_started_them_in() {
         const EXIT: u64 = u64::MAX;
         const HOP: u64 = u64::MAX - 1;
+        let listed = |backend: FcaeBackend, handle: u64| {
+            live_instances()
+                .into_iter()
+                .position(|instance| instance.backend == backend && instance.handle == handle)
+        };
         publish_live(FcaeBackend::Xray, EXIT, "Home".into());
         publish_live(FcaeBackend::SingBox, HOP, "Backup".into());
-        let live = live_instances();
-        let find = |backend, handle| {
-            live.iter()
-                .position(|instance| instance.backend == backend && instance.handle == handle)
-                .expect("the instance is listed")
-        };
-        let (exit, hop) = (find(FcaeBackend::Xray, EXIT), find(FcaeBackend::SingBox, HOP));
+        let (exit, hop) = (
+            listed(FcaeBackend::Xray, EXIT).expect("the exit is listed"),
+            listed(FcaeBackend::SingBox, HOP).expect("the hop is listed"),
+        );
         assert!(exit < hop, "the exit is listed before the hop that dials through it");
-        assert_eq!(live[exit].name, "Home", "the instance is named by its saved config");
+        assert_eq!(
+            live_instances()[exit].name,
+            "Home",
+            "the instance is named by its saved config"
+        );
 
         retire_live(FcaeBackend::Xray, EXIT);
-        let live = live_instances();
-        assert!(!live.iter().any(|i| i.backend == FcaeBackend::Xray && i.handle == EXIT));
-        assert!(
-            live.iter().any(|i| i.backend == FcaeBackend::SingBox && i.handle == HOP),
+        assert_eq!(listed(FcaeBackend::Xray, EXIT), None);
+        assert_eq!(
+            listed(FcaeBackend::SingBox, HOP),
+            Some(0),
             "stopping one instance leaves the others alone"
         );
 
         retire_all(FcaeBackend::SingBox);
-        assert!(!live_instances().iter().any(|i| i.backend == FcaeBackend::SingBox && i.handle == HOP));
+        assert_eq!(listed(FcaeBackend::SingBox, HOP), None);
     }
 
     /// A record this side cannot read in full is not guessed at.

@@ -82,8 +82,8 @@ impl Dispatcher {
     /// retired. Returns the command back when no worker can take it.
     fn dispatch(&'static self, command: Command) -> std::result::Result<(), Command> {
         let mut slot = self.worker.lock();
-        if slot.as_ref().map_or(true, |worker| worker.sender.is_closed()) {
-            *slot = spawn_worker(self.worker, self.jobs.clone());
+        if slot.as_ref().is_none_or(|worker| worker.sender.is_closed()) {
+            *slot = spawn_worker(&self.worker, self.jobs.clone());
         }
         let Some(worker) = slot.as_ref() else {
             return Err(command);

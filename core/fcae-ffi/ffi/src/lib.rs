@@ -1391,9 +1391,9 @@ fn listener_records() -> Vec<String> {
     for instance in live {
         let reported: &[CoreListener] = match instance.backend {
             #[cfg(feature = "xray")]
-            FcaeBackend::Xray => &xray,
+            FcaeBackend::Xray => xray.as_slice(),
             #[cfg(feature = "singbox")]
-            FcaeBackend::SingBox => &singbox,
+            FcaeBackend::SingBox => singbox.as_slice(),
             _ => &[],
         };
         let inbounds: Vec<&CoreListener> = reported
@@ -1409,15 +1409,15 @@ fn listener_records() -> Vec<String> {
         // A saved config is named by the user; one started without one is shown
         // under the config's own description of itself.
         let name = if !instance.name.is_empty() {
-            instance.name.as_str()
+            instance.name
         } else if !first.label.is_empty() {
-            first.label.as_str()
+            first.label.clone()
         } else {
-            core
+            core.to_string()
         };
         position += 1;
         for listener in inbounds {
-            records.push(core_record(core, position, name, listener));
+            records.push(core_record(core, position, &name, listener));
         }
     }
     records
