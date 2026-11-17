@@ -395,7 +395,7 @@ impl ChainHop {
 }
 
 /// Which listeners each backend may open when it is a chain hop rather than the
-/// session's exit.
+/// session's exit, and the port each of them was configured on.
 ///
 /// A hop is dialled through its SOCKS5 listener, so that one is required; its
 /// HTTP listener is the user's own switch and is opened exactly when they left
@@ -403,6 +403,11 @@ impl ChainHop {
 /// reason: a hop this app starts is still the core the user configured, and one
 /// of them silently losing half of its listener configuration is what made an
 /// HTTP proxy available on an exit and missing on the hop in front of it.
+///
+/// The ports are the same numbers the exit would use for that backend: a hop is
+/// one instance of one core, so it has no reason to be pushed off the port the
+/// user picked for it. `0` means the caller configured none, and the hop takes
+/// an internal port the way it always did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenerPolicy {
     pub aether_socks: bool,
@@ -415,12 +420,20 @@ pub struct ListenerPolicy {
     pub xray_http: bool,
     pub singbox_socks: bool,
     pub singbox_http: bool,
+    pub aether_socks_port: u16,
+    pub aether_http_port: u16,
+    pub firefox_socks_port: u16,
+    pub firefox_http_port: u16,
+    pub xray_socks_port: u16,
+    pub xray_http_port: u16,
+    pub singbox_socks_port: u16,
+    pub singbox_http_port: u16,
 }
 
 impl Default for ListenerPolicy {
     /// What a caller that names no listeners at all means: every SOCKS5
     /// listener on, every HTTP listener off, which is the pair a chained hop
-    /// needs and nothing more.
+    /// needs and nothing more, and no ports pinned.
     fn default() -> Self {
         Self {
             aether_socks: true,
@@ -433,6 +446,29 @@ impl Default for ListenerPolicy {
             xray_http: false,
             singbox_socks: true,
             singbox_http: false,
+            aether_socks_port: 0,
+            aether_http_port: 0,
+            firefox_socks_port: 0,
+            firefox_http_port: 0,
+            xray_socks_port: 0,
+            xray_http_port: 0,
+            singbox_socks_port: 0,
+            singbox_http_port: 0,
+        }
+    }
+}
+
+impl ListenerPolicy {
+    /// The ports this backend was configured on, `(socks, http)`. A backend
+    /// this policy has no pair for -- Tor is driven by its own settings -- is
+    /// reported as unpinned.
+    pub fn ports(&self, backend: FcaeBackend) -> (u16, u16) {
+        match backend {
+            FcaeBackend::Aether => (self.aether_socks_port, self.aether_http_port),
+            FcaeBackend::Firefox => (self.firefox_socks_port, self.firefox_http_port),
+            FcaeBackend::Xray => (self.xray_socks_port, self.xray_http_port),
+            FcaeBackend::SingBox => (self.singbox_socks_port, self.singbox_http_port),
+            FcaeBackend::Psiphon => (0, 0),
         }
     }
 }
@@ -1043,6 +1079,16 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             let flag = |key: &str, fallback: bool| {
                 document.get(key).and_then(serde_json::Value::as_bool).unwrap_or(fallback)
             };
+            // A port is a port: anything outside 1..=65535 is a value this ABI
+            // cannot mean, so it is read as "not pinned" rather than crashing a
+            // whole policy over one number.
+            let port = |key: &str| {
+                document
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .unwrap_or(0)
+            };
             Some(ListenerPolicy {
                 aether_socks: flag("aetherSocks", defaults.aether_socks),
                 aether_http: flag("aetherHttp", defaults.aether_http),
@@ -1054,6 +1100,14 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
                 xray_http: flag("xrayHttp", defaults.xray_http),
                 singbox_socks: flag("singboxSocks", defaults.singbox_socks),
                 singbox_http: flag("singboxHttp", defaults.singbox_http),
+                aether_socks_port: port("aetherSocksPort"),
+                aether_http_port: port("aetherHttpPort"),
+                firefox_socks_port: port("firefoxSocksPort"),
+                firefox_http_port: port("firefoxHttpPort"),
+                xray_socks_port: port("xraySocksPort"),
+                xray_http_port: port("xrayHttpPort"),
+                singbox_socks_port: port("singboxSocksPort"),
+                singbox_http_port: port("singboxHttpPort"),
             })
         });
 

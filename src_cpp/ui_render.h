@@ -29,7 +29,7 @@ static constexpr int kCoreTransportBase = FCAE_CORE_TRANSPORT_BASE;
 /// Largest saved-configs document the engine accepts, mirroring fcae-runtime's
 /// library limit. The document is what crosses the ABI, so it is bounded as a
 /// whole and not only per config.
-static constexpr size_t kMaxCoreDocument = 256 * 1024;
+static constexpr size_t kMaxCoreDocument = 512 * 1024;
 
 /// Append `text` to `out` as the body of a JSON string (without the quotes).
 static inline void core_json_escape_into(std::string& out, const std::string& text) {
@@ -771,17 +771,29 @@ struct AppState {
         // Every backend's switches, because a hop in a chain is dialled through
         // its own listener too: a core that only appears in the middle of a
         // route still opens the SOCKS5 and HTTP listeners the user configured.
+        // Their ports travel with them for the same reason: a hop is one
+        // instance of one core, so it listens where the user pointed that core
+        // instead of on a number nobody can configure against.
+        const auto port = [](uint16_t value) { return std::to_string((unsigned)value); };
         json.insert(json.size() - 1,
             std::string(",\"FCAEListeners\":{\"aetherSocks\":") + (socks_enabled ? "true" : "false") +
             ",\"aetherHttp\":" + (http_enabled ? "true" : "false") +
+            ",\"aetherSocksPort\":" + port(socks_port) +
+            ",\"aetherHttpPort\":" + port(http_port) +
             ",\"firefoxSocks\":" + (firefox_socks_enabled ? "true" : "false") +
             ",\"firefoxHttp\":" + (firefox_http_enabled ? "true" : "false") +
+            ",\"firefoxSocksPort\":" + port(firefox_socks_port) +
+            ",\"firefoxHttpPort\":" + port(firefox_http_port) +
             ",\"torSocks\":" + (tor_socks_enabled ? "true" : "false") +
             ",\"torHttp\":" + (tor_http_enabled ? "true" : "false") +
             ",\"xraySocks\":" + (xray_socks_enabled ? "true" : "false") +
             ",\"xrayHttp\":" + (xray_http_enabled ? "true" : "false") +
+            ",\"xraySocksPort\":" + port(xray_socks_port) +
+            ",\"xrayHttpPort\":" + port(xray_http_port) +
             ",\"singboxSocks\":" + (singbox_socks_enabled ? "true" : "false") +
-            ",\"singboxHttp\":" + (singbox_http_enabled ? "true" : "false") + "}");
+            ",\"singboxHttp\":" + (singbox_http_enabled ? "true" : "false") +
+            ",\"singboxSocksPort\":" + port(singbox_socks_port) +
+            ",\"singboxHttpPort\":" + port(singbox_http_port) + "}");
         json = merge_psiphon_transport(json, psiphon_transport);
         psiphon_config_json_built = json;
         c.psiphon.config_json   = psiphon_config_json_built.c_str();

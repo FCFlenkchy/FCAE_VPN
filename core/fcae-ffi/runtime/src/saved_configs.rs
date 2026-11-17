@@ -30,8 +30,11 @@ use serde_json::Value;
 use crate::config::backend_label;
 use crate::sing_xray::{native_dialect, CoreProfile};
 
-/// Upper bound on saved configs. A menu longer than this is not a menu.
-pub const MAX_ENTRIES: usize = 64;
+/// Upper bound on saved configs, and the only place a count is checked: the
+/// UIs neither show nor enforce it, because a library is the user's own list.
+/// It exists so a corrupt document cannot ask for an unbounded parse, and the
+/// document's byte limit is what actually bounds a real one.
+pub const MAX_ENTRIES: usize = 1000;
 /// Longest accepted display name, in bytes.
 pub const MAX_NAME: usize = 48;
 /// Largest single config accepted, in bytes. A native config with inlined
@@ -39,8 +42,9 @@ pub const MAX_NAME: usize = 48;
 /// meant to point the core at, which neither core supports here.
 pub const MAX_CONFIG: usize = 128 * 1024;
 /// Largest accepted saved-configs document, in bytes. It has to survive a Binder
-/// transaction on Android, where the whole parcel is ~1 MiB.
-pub const MAX_DOCUMENT: usize = 256 * 1024;
+/// transaction on Android, where the whole parcel is ~1 MiB: a thousand share
+/// links fit, and the margin the rest of the session needs stays free.
+pub const MAX_DOCUMENT: usize = 512 * 1024;
 
 /// One saved config: a name the user picked, the core that reads it, and the
 /// profile itself, already parsed and validated.

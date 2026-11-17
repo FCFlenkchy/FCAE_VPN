@@ -1136,9 +1136,11 @@ static std::string resolve_config_path_for_load() {
     return primary;
 }
 
-/// Upper bound on saved core configs, mirroring fcae-runtime's library limit:
-/// a menu longer than this is not a menu.
-static constexpr int kMaxCoreConfigs = 64;
+/// Upper bound on saved core configs, mirroring fcae-runtime's library limit.
+/// Nothing in the UI shows or enforces it: a library is the user's own list, and
+/// the document's byte limit is what a real one runs into. It is here so a
+/// corrupt config file cannot ask for an unbounded resize.
+static constexpr int kMaxCoreConfigs = 1000;
 /// Largest single saved config, mirroring fcae-runtime's library limit.
 static constexpr size_t kMaxCoreConfigText = 128 * 1024;
 /// Longest saved-config name in bytes, mirroring fcae-runtime's library limit.
@@ -3531,13 +3533,38 @@ static void render_core_editor() {
     // user added meanwhile.
     bool changed = s_core_editor_fresh;
     s_core_editor_fresh = false;
-    ImGui::PushItemWidth(240);
+    // One field per line, each behind its own label, and the core picked out of
+    // a row of two instead of a dropdown: the two cores are the whole choice, so
+    // both are visible and the pick is one click, the way a radio row reads.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float label_width = std::max(ImGui::CalcTextSize("Name").x,
+                                       ImGui::CalcTextSize("Core").x) + style.ItemSpacing.x;
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Name");
+    ImGui::SameLine(label_width);
+    ImGui::PushItemWidth(300);
     // The engine's limit plus the terminator: typing past it does nothing.
-    changed |= ImGui::InputText("Name", s_core_name_buf, kMaxCoreConfigName + 1);
-    ImGui::SameLine();
-    const char* backends[] = { "Xray", "sing-box" };
-    changed |= ImGui::Combo("Core", &s_core_backend_buf, backends, 2);
+    changed |= ImGui::InputText("##core_name", s_core_name_buf, kMaxCoreConfigName + 1);
     ImGui::PopItemWidth();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Core");
+    for (int backend = 0; backend < 2; ++backend) {
+        ImGui::SameLine(backend == 0 ? label_width : 0.0f, style.ItemSpacing.x);
+        const char* tag = backend == 1 ? "sing-box" : "xray";
+        // The tag colour is the one the list gives the same core, so the row the
+        // user is saving already looks like the row it becomes.
+        if (s_core_backend_buf == backend) ImGui::PushStyleColor(ImGuiCol_Text, kCoreTagColor);
+        // As tall as a field, so the row reads as one line of controls.
+        const ImVec2 size(ImGui::CalcTextSize(tag).x + 3.0f * style.FramePadding.x,
+                          ImGui::GetFrameHeight());
+        if (ImGui::Selectable(tag, s_core_backend_buf == backend,
+                              ImGuiSelectableFlags_None, size)) {
+            s_core_backend_buf = backend;
+            changed = true;
+        }
+        if (s_core_backend_buf == backend) ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
     ImGui::TextUnformatted("Config (a share link or the core's own JSON)");
     float text_height = ImGui::GetContentRegionAvail().y
         - ImGui::GetTextLineHeightWithSpacing() - ImGui::GetFrameHeightWithSpacing() - 8.0f;
@@ -3617,10 +3644,10 @@ static void render_core_configs() {
     ImGui::EndChild();
 
     // Nothing is stored until Save: a config the engine cannot parse is one
-    // library that does not start, and a draft is not a config yet.
-    ImGui::BeginDisabled((int)g_app.core_configs.size() >= kMaxCoreConfigs);
+    // library that does not start, and a draft is not a config yet. The count
+    // beside it is the list's place in the library the engine accepts, and
+    // nothing gates on it: the limit is there to be read, not to be hit.
     if (ImGui::Button("+ Add config")) open_core_editor(-1);
-    ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextDisabled("%d/%d", (int)g_app.core_configs.size(), kMaxCoreConfigs);
     ImGui::Separator();

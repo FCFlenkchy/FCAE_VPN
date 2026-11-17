@@ -241,8 +241,12 @@ object NativeEngine {
      */
     const val CORE_TRANSPORT_BASE = 11
 
-    /** Most saved configs a session may carry; mirrors the runtime's limit. */
-    const val MAX_CORE_CONFIGS = 64
+    /**
+     * Most saved configs a session may carry; mirrors the runtime's limit. It is
+     * not a number the UI shows or enforces: the document's byte limit is what a
+     * real library runs into, and this is the parse bound behind it.
+     */
+    const val MAX_CORE_CONFIGS = 1000
 
     /** Largest single saved config, in bytes; mirrors the runtime's limit. */
     const val MAX_CORE_CONFIG_BYTES = 128 * 1024
@@ -251,7 +255,7 @@ object NativeEngine {
      * Largest saved-configs document, in bytes; mirrors the runtime's limit. It
      * is one Intent extra, so it also has to stay inside a Binder transaction.
      */
-    const val MAX_CORE_DOCUMENT_BYTES = 256 * 1024
+    const val MAX_CORE_DOCUMENT_BYTES = 512 * 1024
 
     /** Valid chain-exit positions: the built-in transports, then saved configs. */
     private val CHAIN_POSITIONS = 0 until CORE_TRANSPORT_BASE + MAX_CORE_CONFIGS

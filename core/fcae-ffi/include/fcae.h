@@ -278,7 +278,21 @@ typedef struct {
     const char *access_email;
 } FcaeZeroTrust;
 
-/* Psiphon backend inputs; ignored by other backends. */
+/* Psiphon backend inputs; ignored by other backends.
+ *
+ * `config_json` also carries the "FCAEListeners" object the UI fills in, which
+ * is how a backend that appears only as an intermediate chain hop learns the
+ * listener switches and ports the user configured for it:
+ *
+ *   {"aetherSocks":bool,"aetherHttp":bool,"aetherSocksPort":n,"aetherHttpPort":n,
+ *    "firefoxSocks":…,"firefoxHttp":…,"firefoxSocksPort":n,"firefoxHttpPort":n,
+ *    "xraySocks":…,"xrayHttp":…,"xraySocksPort":n,"xrayHttpPort":n,
+ *    "singboxSocks":…,"singboxHttp":…,"singboxSocksPort":n,"singboxHttpPort":n,
+ *    "torSocks":bool,"torHttp":bool}
+ *
+ * A port is the number that backend's own listener would use for the session's
+ * exit; 0, absent or out of range means "not pinned" and the hop takes an
+ * internal one. A hop never takes a port the exit itself is using. */
 typedef struct {
     const char *config_json;
     const char *embedded_server_list;

@@ -2970,6 +2970,14 @@ class MainActivity : AppCompatActivity() {
         }
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         box.addView(list)
+        // Where the list stands in the library the engine accepts. It is a
+        // placeholder, not a gate: nothing refuses a config for it, and it is
+        // redrawn with the rows so it always counts what is there.
+        val count = TextView(this).apply {
+            setTextColor(Color.parseColor("#FF6B7280"))
+            textSize = 12f
+            gravity = android.view.Gravity.END or android.view.Gravity.CENTER_VERTICAL
+        }
 
         var entries = coreConfigEntries()
         // The two are mutually recursive (the list edits an entry, the editor
@@ -3121,6 +3129,7 @@ class MainActivity : AppCompatActivity() {
 
         renderList = {
             list.removeAllViews()
+            count.text = "${entries.size}/${NativeEngine.MAX_CORE_CONFIGS}"
             // One list of configs, not one per core: what a config is called and
             // which core runs it is the row's own business, and the tag beside
             // the name says which — the same `name  xray` the protocol list uses.
@@ -3156,14 +3165,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        addDialogButton(box, "+ Add config") {
-            if (entries.size >= NativeEngine.MAX_CORE_CONFIGS) {
-                Toast.makeText(this, "That is the most saved configs this build keeps.",
-                    Toast.LENGTH_SHORT).show()
-            } else {
-                editEntry(entries.size)
-            }
+        // No count gate: the list is the user's, and the count beside the button
+        // is read, not enforced.
+        val addRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
         }
+        addDialogButton(addRow, "+ Add config") { editEntry(entries.size) }
+        addRow.addView(count, LinearLayout.LayoutParams(0, dp(20), 1f))
+        box.addView(addRow)
         renderList()
 
         // Listeners next: the library above decides what they can answer on.
@@ -4902,6 +4912,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** A listener port field's value, or [fallback] when it holds no usable port. */
+    private fun fieldPort(field: android.widget.EditText, fallback: Int): Int =
+        field.text.toString().trim().toIntOrNull()?.takeIf { it in 1..65535 } ?: fallback
+
     /** Psiphon start; the foreground owner, not the Activity, owns the Psiphon bind. */
     private fun psiphonConfigJson(): String = org.json.JSONObject()
         .put("FCAETransport", selectedPsiphonTransportIndex())
@@ -4910,17 +4924,28 @@ class MainActivity : AppCompatActivity() {
         // Every backend's switches, because a hop in a chain is dialled through
         // its own listener too: a core that only appears in the middle of a
         // route still opens the SOCKS5 and HTTP listeners the user configured.
+        // Their ports travel with them for the same reason: a hop is one
+        // instance of one core, so it listens where the user pointed that core
+        // instead of on a number nobody can configure against.
         .put("FCAEListeners", org.json.JSONObject()
             .put("aetherSocks", switchSocks.isChecked)
             .put("aetherHttp", switchHttp.isChecked)
+            .put("aetherSocksPort", fieldPort(editSocksPort, 1819))
+            .put("aetherHttpPort", fieldPort(editHttpPort, 1820))
             .put("firefoxSocks", firefoxSocksEnabled)
             .put("firefoxHttp", firefoxHttpEnabled)
+            .put("firefoxSocksPort", fieldPort(editFirefoxSocksPort, FIREFOX_SOCKS_PORT))
+            .put("firefoxHttpPort", fieldPort(editFirefoxHttpPort, FIREFOX_HTTP_PORT))
             .put("torSocks", switchTorSocks.isChecked)
             .put("torHttp", switchTorHttp.isChecked)
             .put("xraySocks", xraySocksEnabled)
             .put("xrayHttp", xrayHttpEnabled)
+            .put("xraySocksPort", fieldPort(editXraySocksPort, XRAY_SOCKS_PORT))
+            .put("xrayHttpPort", fieldPort(editXrayHttpPort, XRAY_HTTP_PORT))
             .put("singboxSocks", singBoxSocksEnabled)
-            .put("singboxHttp", singBoxHttpEnabled))
+            .put("singboxHttp", singBoxHttpEnabled)
+            .put("singboxSocksPort", fieldPort(editSingBoxSocksPort, SING_BOX_SOCKS_PORT))
+            .put("singboxHttpPort", fieldPort(editSingBoxHttpPort, SING_BOX_HTTP_PORT)))
         .toString()
 
     private fun startPsiphon() {

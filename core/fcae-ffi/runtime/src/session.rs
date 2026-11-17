@@ -756,7 +756,7 @@ async fn run_session(
         }
         let mut carrier_config = config.clone();
         if !config.chain.is_empty() {
-            configure_internal_listeners(&mut carrier_config)?;
+            configure_internal_listeners(&mut carrier_config, &config)?;
             carrier_config.require_udp_proxy = config
                 .chain
                 .first()
@@ -1197,7 +1197,7 @@ async fn start_chain_hop(
     hop.lan_sharing = final_hop && config.lan_sharing;
     let upstream = chain_upstream(previous, hop.upstream_requires_udp(), previous_name)?;
     if !final_hop {
-        configure_internal_listeners(&mut hop)?;
+        configure_internal_listeners(&mut hop, config)?;
         hop.require_udp_proxy = next_needs_udp;
     }
     let url = upstream.url();
@@ -1255,7 +1255,37 @@ fn allocate_internal_port(held: &mut Vec<std::net::TcpListener>) -> Result<u16> 
     Ok(port)
 }
 
-fn configure_internal_listeners(config: &mut SessionConfig) -> Result<()> {
+/// The port a hop's own listener binds: the one the user configured for that
+/// core when it is free, or `0` for an internal port.
+///
+/// A hop is one instance of one core with one listener, so it has no reason to
+/// be pushed off the port the user picked for it -- the port the exit would use
+/// for the same backend is the port the hop uses. It cannot always have it: the
+/// session's exit listener already holds that number when the route repeats a
+/// core, and anything else on the machine may hold it too, so a port that is not
+/// free falls back to the internal one the hop used before.
+fn hop_listener_port(want: u16, exit_port: u16) -> u16 {
+    if want == 0 || want == exit_port {
+        return 0;
+    }
+    match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, want)) {
+        // Released at once: the core binds it a moment later. Holding it would
+        // be the only way to close the window, and it would keep the port from
+        // the core that has to listen on it.
+        Ok(_) => want,
+        Err(error) => {
+            log::info!("[session] hop port {want} is not free ({error}); using an internal port");
+            0
+        }
+    }
+}
+
+/// Cut a chain hop down to what it needs: no nested chain, a private listener,
+/// and the port its own core was configured on when that port is available.
+///
+/// `exit` is the session the hop belongs to. Its listener ports are the exit's
+/// own and are never taken from it.
+fn configure_internal_listeners(config: &mut SessionConfig, exit: &SessionConfig) -> Result<()> {
     config.mode = FcaeMode::Proxy;
     config.lan_sharing = false;
     let has_tor = config.backend == FcaeBackend::Aether && config.tor.is_enabled();
@@ -1268,6 +1298,13 @@ fn configure_internal_listeners(config: &mut SessionConfig) -> Result<()> {
         Some(p) if config.backend == FcaeBackend::SingBox => (p.singbox_socks, p.singbox_http),
         _ => (true, false),
     };
+    // Tor's own listener is placed by the Tor block below, not by this pair.
+    let configured = config
+        .listener_policy
+        .as_ref()
+        .filter(|_| !is_tor)
+        .map(|policy| policy.ports(config.backend))
+        .unwrap_or((0, 0));
     if config.backend == FcaeBackend::Psiphon {
         let disabled = config.psiphon.config_json.as_deref()
             .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
@@ -1295,12 +1332,15 @@ fn configure_internal_listeners(config: &mut SessionConfig) -> Result<()> {
             config.psiphon.http_port = 0;
         }
     } else {
-        config.socks_port = if config.backend == FcaeBackend::Aether && config.tor.mode != FcaeTorMode::Only {
-            allocate_internal_port(&mut held)?
-        } else { 0 };
-        config.http_port = if config.backend == FcaeBackend::Aether && !is_tor && http {
-            allocate_internal_port(&mut held)?
-        } else { 0 };
+        // A hop takes its core's configured port when it can have it, which is
+        // what makes a chained core answer where the user pointed it instead of
+        // on a random number nothing can be configured against. Whatever it
+        // could not take stays internal, exactly as before.
+        config.socks_port = if socks { hop_listener_port(configured.0, exit.socks_port) } else { 0 };
+        config.http_port = if http { hop_listener_port(configured.1, exit.http_port) } else { 0 };
+        // Only the listeners that are still unplaced are internal ones.
+        config.internal_socks = socks && config.socks_port == 0;
+        config.internal_http = http && config.http_port == 0;
     }
     if has_tor {
         let port = allocate_internal_port(&mut held)?;
@@ -1677,9 +1717,10 @@ mod tests {
             tor_socks: true, tor_http: false,
             ..Default::default()
         });
-        assert!(configure_internal_listeners(&mut cfg).unwrap_err().to_string().contains("Firefox SOCKS5"));
+        let exit = cfg.clone();
+        assert!(configure_internal_listeners(&mut cfg, &exit).unwrap_err().to_string().contains("Firefox SOCKS5"));
         cfg.listener_policy.as_mut().unwrap().firefox_socks = true;
-        configure_internal_listeners(&mut cfg).unwrap();
+        configure_internal_listeners(&mut cfg, &exit).unwrap();
         assert!(cfg.internal_socks);
         assert!(cfg.internal_http);
         assert!(!cfg.lan_sharing);
@@ -1694,7 +1735,8 @@ mod tests {
             tor_socks: true, tor_http: false,
             ..Default::default()
         });
-        assert!(configure_internal_listeners(&mut cfg).unwrap_err().to_string().contains("Aether SOCKS5"));
+        let exit = cfg.clone();
+        assert!(configure_internal_listeners(&mut cfg, &exit).unwrap_err().to_string().contains("Aether SOCKS5"));
     }
 
     #[test]
@@ -1706,7 +1748,8 @@ mod tests {
                 xray_http: true, singbox_http: true,
                 ..Default::default()
             });
-            configure_internal_listeners(&mut cfg).unwrap();
+            let exit = cfg.clone();
+            configure_internal_listeners(&mut cfg, &exit).unwrap();
             // The hop above it dials SOCKS5, and the HTTP listener the user
             // switched on is opened next to it instead of being dropped.
             assert!(cfg.internal_socks, "{backend:?}");
@@ -1724,10 +1767,76 @@ mod tests {
                 xray_http: true, singbox_http: true,
                 ..Default::default()
             });
-            let error = configure_internal_listeners(&mut cfg).unwrap_err().to_string();
+            let error = configure_internal_listeners(&mut cfg, &exit).unwrap_err().to_string();
             assert!(error.contains("SOCKS5"), "{error}");
             assert!(error.contains(crate::config::backend_label(backend)), "{error}");
         }
+    }
+
+    /// A port nothing is listening on right now: the hop has to be able to take
+    /// it, and the test must not depend on a number being free on the machine.
+    fn free_loopback_port() -> u16 {
+        let probe = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        port
+    }
+
+    #[test]
+    fn hop_uses_the_port_its_core_was_configured_on() {
+        let port = free_loopback_port();
+        let policy = crate::config::ListenerPolicy {
+            singbox_socks_port: port,
+            ..Default::default()
+        };
+        let mut cfg = SessionConfig::default();
+        cfg.backend = FcaeBackend::SingBox;
+        cfg.listener_policy = Some(policy);
+        let exit = SessionConfig::default();
+        configure_internal_listeners(&mut cfg, &exit).unwrap();
+        // One instance of one core on the port the user gave it, which is what
+        // makes it addressable instead of ephemeral.
+        assert_eq!(cfg.socks_port, port);
+        assert!(!cfg.internal_socks);
+        let (socks, _) = crate::sing_xray::plan_listeners(&cfg).unwrap();
+        assert_eq!(socks.unwrap().port(), port);
+
+        // The same port held by something else: the hop stays internal rather
+        // than refusing to start, so a port that is not free is not fatal.
+        let held = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+        let mut blocked = SessionConfig::default();
+        blocked.backend = FcaeBackend::SingBox;
+        blocked.listener_policy = Some(crate::config::ListenerPolicy {
+            singbox_socks_port: port,
+            ..Default::default()
+        });
+        configure_internal_listeners(&mut blocked, &exit).unwrap();
+        assert_eq!(blocked.socks_port, 0);
+        assert!(blocked.internal_socks);
+        drop(held);
+    }
+
+    #[test]
+    fn hop_never_takes_the_exits_listener_port() {
+        let port = free_loopback_port();
+        let mut cfg = SessionConfig::default();
+        cfg.backend = FcaeBackend::Xray;
+        cfg.listener_policy = Some(crate::config::ListenerPolicy {
+            xray_http: true,
+            xray_socks_port: port,
+            xray_http_port: port,
+            ..Default::default()
+        });
+        // The route repeats the core: the exit already answers on that port, so
+        // the hop in front of it falls back instead of stealing it.
+        let mut exit = SessionConfig::default();
+        exit.socks_port = port;
+        exit.http_port = port;
+        configure_internal_listeners(&mut cfg, &exit).unwrap();
+        assert_eq!(cfg.socks_port, 0);
+        assert_eq!(cfg.http_port, 0);
+        assert!(cfg.internal_socks);
+        assert!(cfg.internal_http);
     }
 
     #[test]
