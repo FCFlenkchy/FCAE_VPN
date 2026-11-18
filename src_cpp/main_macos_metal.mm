@@ -44,11 +44,21 @@
 
 #include "ui_render.h"
 
-// The designed window size, in AppKit points: 1024x700 of layout, which both a
-// Retina and a 1x display render at the same physical size without any scaling
-// here. Already scaled by the system, so nothing else may scale it again.
-static constexpr int kWindowWidth = 1024;
-static constexpr int kWindowHeight = 700;
+// The designed window size, in AppKit points: larger than the original
+// 1024x700, which was cramped once the settings pages and the log tail were both
+// on screen. Points, not pixels, so Retina and 1x displays give the same
+// physical size without any scaling here -- and nothing else may scale it
+// again. The frame is reduced to the visible screen area below if it would not
+// fit.
+static constexpr int kWindowWidth = 1280;
+static constexpr int kWindowHeight = 860;
+
+// The base UI font size, in points: twice the 13 px ImGui's embedded default
+// face used to give this UI, and the size the ui_render.cpp layout is designed
+// against. Without a font at this size the atlas holds only that 13 px bitmap
+// face, which cannot be enlarged without turning into mush. The user's
+// ui_scale_percent multiplies on top through style.FontScaleMain.
+static constexpr float kUiBaseFontSize = 26.0f;
 // The render gate's frame cadence, matching the GLFW host's 33 ms.
 static constexpr double kMinFrameInterval = 33.0 / 1000.0;
 // Upper bound on a single run-loop wait: how late a redraw requested by a
@@ -207,6 +217,16 @@ static id g_eventMonitor = nil;
     (void)notification;
 
     NSRect frame = NSMakeRect(0, 0, kWindowWidth, kWindowHeight);
+    // Keep the window inside the usable screen area: on a 1440x900 MacBook the
+    // designed height would otherwise not fit once the menu bar and Dock are
+    // accounted for.
+    {
+        NSRect usable = NSScreen.mainScreen.visibleFrame;
+        if (usable.size.width  > 480.0 && frame.size.width  > usable.size.width  - 40.0)
+            frame.size.width  = usable.size.width  - 40.0;
+        if (usable.size.height > 360.0 && frame.size.height > usable.size.height - 60.0)
+            frame.size.height = usable.size.height - 60.0;
+    }
     // `styleMask`, not `style`: the ImGui style block further down this same
     // function declares `style` too, and a window mask and an ImGuiStyle&
     // cannot share a scope.
@@ -231,6 +251,17 @@ static id g_eventMonitor = nil;
 #if defined(FCAE_HAVE_FREETYPE)
     ImGui::GetIO().Fonts->SetFontLoader(ImGuiFreeType::GetFontLoader());
 #endif
+    // A base font at a readable size. Without this the atlas holds only ImGui's
+    // embedded 13 px ProggyClean bitmap face, which is what made the UI read as
+    // tiny, and a bitmap face cannot be enlarged without turning into mush.
+    // AddFontDefaultVector() is named explicitly: AddFontDefault() chooses
+    // between the bitmap and vector faces from the expected context size, which
+    // is still unset here. Points, so a Retina display draws it at 2x pixels.
+    {
+        ImFontConfig font_cfg;
+        font_cfg.SizePixels = kUiBaseFontSize;
+        ImGui::GetIO().Fonts->AddFontDefaultVector(&font_cfg);
+    }
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -243,6 +274,9 @@ static id g_eventMonitor = nil;
     // font as well drew every row twice as large on Retina. The user's own text
     // scale arrives from ui_frame() as FontScaleMain.
     style.FontScaleDpi      = 1.0f;
+    // The size the ui_render.cpp layout is designed against; see the same
+    // setting in the Win32 host.
+    style.FontSizeBase      = kUiBaseFontSize;
     style.WindowRounding    = 10.0f;
     style.FrameRounding     = 6.0f;
     style.GrabRounding      = 4.0f;

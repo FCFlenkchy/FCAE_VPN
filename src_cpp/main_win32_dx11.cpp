@@ -115,16 +115,41 @@ static UINT window_dpi(HWND hwnd) {
 
 static float window_dpi_scale(HWND hwnd) { return (float)window_dpi(hwnd) / 96.0f; }
 
-// The designed window size. Fixed, deliberately.
+// The designed window size, in pixels.
 //
-// An earlier revision scaled both this window *and* the ImGui font metrics by
-// the monitor DPI, which applies the factor twice: the window grew by 1.5x and
-// the text inside it by 1.5x again, so a layout that fits at 1024x700 overflowed
-// at 150%. One factor has to own the scaling. The window keeps the designed
-// size and the UI is laid out in its own pixels; a user who wants larger text
-// has ui_scale_percent, which grows the text without moving the frame.
-static constexpr int kWindowWidth  = 1024;
-static constexpr int kWindowHeight = 700;
+// Larger than the original 1024x700, which was cramped once the settings pages
+// and the log tail were both on screen. The constants below are what the layout
+// is designed against; if the monitor cannot hold that, the window is shrunk to
+// fit instead of opening larger than the screen.
+//
+// Deliberately not scaled by DPI: an earlier revision scaled both the window and
+// the ImGui font metrics by the monitor factor, which applied it twice -- the
+// window grew 1.5x and the text inside it 1.5x again, so the layout overflowed.
+// One factor owns the scaling, and it is the user's ui_scale_percent, which
+// grows the text without moving the frame.
+static constexpr int kWindowWidth  = 1280;
+static constexpr int kWindowHeight = 860;
+
+// The base UI font size, in pixels: exactly twice the 13 px that ImGui's
+// embedded default face used to give this UI, which is what the whole window is
+// sized against now. The user's ui_scale_percent still multiplies on top of it
+// through style.FontScaleMain, so this is the floor, not the ceiling.
+//
+// On top of this, the layout's own constants -- action row heights, button
+// widths, the log pane -- are computed from measured text rather than from
+// fixed pixel values, so doubling the type does not push labels past their
+// backgrounds. Anything still fixed (the modals' 680x620 and so on) is clamped
+// to the viewport and scrolls its contents.
+static constexpr float kUiBaseFontSize = 26.0f;
+
+// Clamp a designed size to what the monitor actually offers, leaving room for
+// the taskbar and window decorations.
+static void clamp_to_screen(int& width, int& height) {
+    const int max_w = GetSystemMetrics(SM_CXSCREEN) - 80;
+    const int max_h = GetSystemMetrics(SM_CYSCREEN) - 120;
+    if (max_w > 480 && width  > max_w) width  = max_w;
+    if (max_h > 360 && height > max_h) height = max_h;
+}
 
 static void CleanupDeviceD3D();
 
@@ -332,9 +357,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Size in DIPs scaled to the primary monitor's DPI. Before the window
     // exists there is no per-window DPI to ask for, so this reads the system's;
     // WM_DPICHANGED below fixes the window up if it opens on another monitor.
+    int window_w = kWindowWidth;
+    int window_h = kWindowHeight;
+    clamp_to_screen(window_w, window_h);
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, kWindowWidth, kWindowHeight,
+        CW_USEDEFAULT, CW_USEDEFAULT, window_w, window_h,
         nullptr, nullptr, inst, nullptr);
     if (!hWnd) {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
@@ -366,6 +394,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 #if defined(FCAE_HAVE_FREETYPE)
     ImGui::GetIO().Fonts->SetFontLoader(ImGuiFreeType::GetFontLoader());
 #endif
+    // A base font at a readable size, replacing ImGui's embedded 13 px
+    // ProggyClean bitmap font -- which is what made the whole UI read as tiny.
+    // The old 13 px bitmap face cannot be enlarged without turning into mush,
+    // which is why simply raising the scale factor never fixed it. This is the size the
+    // layout in ui_render.cpp is designed against, and the user's
+    // ui_scale_percent multiplies on top of it through style.FontScaleMain.
+    {
+        ImFontConfig font_cfg;
+        font_cfg.SizePixels = kUiBaseFontSize;
+        // Named explicitly rather than through AddFontDefault(): that one picks
+        // between the bitmap and vector faces from the expected context size,
+        // which is still unset at this point, so it could hand back the 13 px
+        // bitmap face and ignore SizePixels.
+        ImGui::GetIO().Fonts->AddFontDefaultVector(&font_cfg);
+    }
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -377,6 +420,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // monitor DPI here as well is what made text overflow its rows at 150%.
     // The user's own text scale arrives from ui_frame() as FontScaleMain.
     style.FontScaleDpi     = 1.0f;
+    // The size the layout is designed against, so a card's heights and the
+    // action row's 32 px floor are computed from the same number the glyphs are
+    // drawn at. Without this it defaults to the font's legacy size on the first
+    // frame and the two can disagree.
+    style.FontSizeBase     = kUiBaseFontSize;
     style.WindowRounding   = 10.0f;
     style.FrameRounding    = 6.0f;
     style.GrabRounding     = 4.0f;

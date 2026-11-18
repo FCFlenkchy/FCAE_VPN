@@ -238,6 +238,41 @@ if(FCAE_FREETYPE_ENABLED)
     list(APPEND IMGUI_SOURCES ${IMGUI_DIR}/misc/freetype/imgui_freetype.cpp)
 endif()
 
+# Resolve one of FreeType's own dependencies as a static archive and link it
+# into `target_name`. Missing dependencies are skipped, not fatal: the point is
+# to supply what the FreeType build actually calls out to.
+#
+# Two details in here are load-bearing, and both cost a debugging round:
+#
+#  * find_library() prefers the shared object. A directory holding both libz.so
+#    and libz.a resolves to libz.so every time, so the result is accepted only
+#    if it really ends in .a, and a static sibling is looked for by hand
+#    otherwise. (find_library(... SUFFIXES ".a") does not do this job: on CMake
+#    3.31 it still returned libz.so.)
+#  * find_library() caches under its result variable. Without clearing it, the
+#    second call silently reuses the first one's path -- every dependency
+#    resolved to libz.so, which is exactly what happened before the unset().
+#
+# Defined at file scope on purpose -- defining a function inside an if()/else()
+# block is a CMake flow-control error, not a nested definition.
+function(_fcae_link_static_dep target_name dep_names)
+    unset(_fcae_dep_lib CACHE)
+    find_library(_fcae_dep_lib NAMES ${dep_names})
+    if(_fcae_dep_lib AND _fcae_dep_lib MATCHES "\\.a$")
+        target_link_libraries(${target_name} PRIVATE ${_fcae_dep_lib})
+    else()
+        get_filename_component(_fcae_dep_dir "${_fcae_dep_lib}" DIRECTORY)
+        if(_fcae_dep_lib)
+            foreach(_fcae_stem IN LISTS dep_names)
+                if(EXISTS "${_fcae_dep_dir}/lib${_fcae_stem}.a")
+                    target_link_libraries(${target_name} PRIVATE "${_fcae_dep_dir}/lib${_fcae_stem}.a")
+                    break()
+                endif()
+            endforeach()
+        endif()
+    endif()
+endfunction()
+
 # One helper, so the three platform targets cannot drift apart on this: adds
 # the include paths, the define ui_render.cpp tests, and the library.
 function(fcae_apply_freetype target_name)
@@ -249,11 +284,58 @@ function(fcae_apply_freetype target_name)
         ${IMGUI_DIR}/misc/freetype
     )
     target_compile_definitions(${target_name} PRIVATE FCAE_HAVE_FREETYPE=1)
-    # FCAE_FREETYPE_SOURCE, not FREETYPE_LIBRARIES: it is the archive when one
-    # was found, so the binary carries no load-time dependency on a package
-    # manager path.
     if(FCAE_FREETYPE_SOURCE)
+        # A static FreeType is not self-contained, and FindFreetype does not
+        # say so: its FREETYPE_LIBRARIES is just the one library path, with the
+        # dependencies already baked into the shared object it normally points
+        # at. Linking the bare archive therefore fails at the very end of the
+        # build with "symbol(s) not found" for inflate, BZ2_*, png_* and
+        # HVF_* -- after everything has compiled, the most expensive place to
+        # find out.
+        #
+        # So the dependencies are resolved here by name. Everything is optional
+        # except zlib and bzip2, which a normal FreeType build always has;
+        # each is linked on whichever platform names it, and simply skipped
+        # where it does not exist.
         target_link_libraries(${target_name} PRIVATE ${FCAE_FREETYPE_SOURCE})
+
+        if(WIN32)
+            # MinGW/MSYS2 name the same libraries this way; they resolve to the
+            # import libraries of whatever the toolchain ships.
+            target_link_libraries(${target_name} PRIVATE z bz2)
+        else()
+            # Each dependency is resolved archive-first. Linking FreeType
+            # statically and then dragging in libpng/libbrotli as shared
+            # libraries would leave the shipped app depending on Homebrew paths
+            # anyway -- it would just move the problem one library over.
+            #
+            # Two names are tried per dependency because packagers differ:
+            # a normal install has libpng16/libbrotlidec, Homebrew additionally
+            # suffixes its static ones "-static".
+            # Order matters for static archives: the linker makes a single
+            # left-to-right pass, so a library has to come after everything
+            # that references it. libpng needs zlib's deflate, brotlidec needs
+            # brotlicommon, harfbuzz needs zlib and ICU -- so the leaf
+            # libraries go last. Getting this backwards shows up as
+            # "undefined reference to deflate" with every file already
+            # compiled.
+            #
+            # Newer FreeType releases compile HarfBuzz' hvf shaper in and call
+            # out to it: that is the HVF_* symbols in the macOS link error.
+            _fcae_link_static_dep(${target_name} "harfbuzz;harfbuzz-static")
+            _fcae_link_static_dep(${target_name} "png16;png")
+            _fcae_link_static_dep(${target_name} "brotlidec;brotlidec-static")
+            _fcae_link_static_dep(${target_name} "bz2")
+            _fcae_link_static_dep(${target_name} "brotlicommon;brotlicommon-static")
+            _fcae_link_static_dep(${target_name} "z;zlib")
+        endif()
+        if(FREETYPE_LIBRARIES)
+            foreach(_ft_dep IN LISTS FREETYPE_LIBRARIES)
+                if(NOT _ft_dep STREQUAL FCAE_FREETYPE_SOURCE)
+                    target_link_libraries(${target_name} PRIVATE ${_ft_dep})
+                endif()
+            endforeach()
+        endif()
     elseif(FREETYPE_LIBRARIES)
         target_link_libraries(${target_name} PRIVATE ${FREETYPE_LIBRARIES})
     endif()

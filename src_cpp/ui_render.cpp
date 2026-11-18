@@ -1860,7 +1860,13 @@ static void same_line_right_aligned(float right_edge_x, float item_w, float min_
 
 enum class UiIcon : uint8_t { Info, Refresh, SoundOn, SoundOff };
 
-static constexpr float kIconButtonSize = 20.0f;
+// The round icon buttons follow the text: the whole row they sit on scales
+// with the font, and a 20 px circle next to 26 px type looked like a speck.
+// Every glyph below is expressed in units of this, through `k`, so the icon
+// keeps its proportions at any size instead of growing a hollow circle.
+static float icon_button_size() {
+    return ImGui::GetTextLineHeight() * 1.15f;
+}
 
 // Shared by the About and sponsor buttons so they match Android's round icon
 // buttons. Geometry is snapped to whole pixels: strokes centred on pixel edges
@@ -1868,6 +1874,9 @@ static constexpr float kIconButtonSize = 20.0f;
 // The button is vertically centred on the text line it follows. Info adds a
 // white ring on top of the shared fill.
 static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const char* tooltip) {
+    const float kIconButtonSize = icon_button_size();
+    // Glyph geometry was authored against a 20 px circle; k rescales it.
+    const float k = kIconButtonSize / 20.0f;
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const bool clicked = ImGui::InvisibleButton(id, ImVec2(kIconButtonSize, kIconButtonSize));
     const bool hovered = ImGui::IsItemHovered();
@@ -1884,50 +1893,50 @@ static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const c
     const float tint = held ? -0.04f : hovered ? 0.06f : 0.0f;
     draw->AddCircleFilled(ImVec2(cx, cy), kIconButtonSize * 0.5f,
         ImGui::GetColorU32(ImVec4(base.x + tint, base.y + tint, base.z + tint, 1.0f)), 32);
+    const float kRingWidth = 1.5f * k;
     if (icon == UiIcon::Info) {
-        constexpr float kRingWidth = 1.5f;
         draw->AddCircle(ImVec2(cx, cy), kIconButtonSize * 0.5f - kRingWidth * 0.5f, fg, 32, kRingWidth);
     }
 
     switch (icon) {
     case UiIcon::Info:
-        draw->AddRectFilled(ImVec2(cx - 1.0f, cy - 5.0f), ImVec2(cx + 1.0f, cy - 3.0f), fg);
-        draw->AddRectFilled(ImVec2(cx - 1.0f, cy - 1.0f), ImVec2(cx + 1.0f, cy + 5.0f), fg);
+        draw->AddRectFilled(ImVec2(cx - 1.0f * k, cy - 5.0f * k), ImVec2(cx + 1.0f * k, cy - 3.0f * k), fg);
+        draw->AddRectFilled(ImVec2(cx - 1.0f * k, cy - 1.0f * k), ImVec2(cx + 1.0f * k, cy + 5.0f * k), fg);
         break;
     case UiIcon::Refresh: {
         constexpr float kPi = 3.14159265f;
-        constexpr float kRadius = 5.5f;
+        const float kRadius = 5.5f * k;
         constexpr float kGapCentre = -kPi * 0.25f;
         constexpr float kGapHalf = 0.5f;
         const float a0 = kGapCentre + kGapHalf;
         const float a1 = kGapCentre - kGapHalf + kPi * 2.0f;
         draw->PathArcTo(ImVec2(cx, cy), kRadius, a0, a1, 24);
-        draw->PathStroke(fg, ImDrawFlags_None, 1.5f);
+        draw->PathStroke(fg, ImDrawFlags_None, 1.5f * k);
         const ImVec2 n(cosf(a1), sinf(a1));
         const ImVec2 t(-n.y, n.x);
         const ImVec2 e(cx + n.x * kRadius, cy + n.y * kRadius);
-        draw->AddTriangleFilled(ImVec2(e.x + n.x * 3.0f, e.y + n.y * 3.0f),
-                                ImVec2(e.x + t.x * 3.5f, e.y + t.y * 3.5f),
-                                ImVec2(e.x - n.x * 3.0f, e.y - n.y * 3.0f), fg);
+        draw->AddTriangleFilled(ImVec2(e.x + n.x * 3.0f * k, e.y + n.y * 3.0f * k),
+                                ImVec2(e.x + t.x * 3.5f * k, e.y + t.y * 3.5f * k),
+                                ImVec2(e.x - n.x * 3.0f * k, e.y - n.y * 3.0f * k), fg);
         break;
     }
     case UiIcon::SoundOn:
     case UiIcon::SoundOff: {
-        const float ox = icon == UiIcon::SoundOn ? cx - 2.0f : cx;
-        draw->AddRectFilled(ImVec2(ox - 5.0f, cy - 2.0f), ImVec2(ox - 2.0f, cy + 2.0f), fg);
+        const float ox = icon == UiIcon::SoundOn ? cx - 2.0f * k : cx;
+        draw->AddRectFilled(ImVec2(ox - 5.0f * k, cy - 2.0f * k), ImVec2(ox - 2.0f * k, cy + 2.0f * k), fg);
         const ImVec2 cone[4] = {
-            ImVec2(ox - 2.0f, cy - 2.0f), ImVec2(ox + 2.0f, cy - 5.0f),
-            ImVec2(ox + 2.0f, cy + 5.0f), ImVec2(ox - 2.0f, cy + 2.0f),
+            ImVec2(ox - 2.0f * k, cy - 2.0f * k), ImVec2(ox + 2.0f * k, cy - 5.0f * k),
+            ImVec2(ox + 2.0f * k, cy + 5.0f * k), ImVec2(ox - 2.0f * k, cy + 2.0f * k),
         };
         draw->AddConvexPolyFilled(cone, 4, fg);
         if (icon == UiIcon::SoundOn) {
-            draw->PathArcTo(ImVec2(ox + 2.0f, cy), 3.5f, -0.9f, 0.9f, 8);
-            draw->PathStroke(fg, ImDrawFlags_None, 1.5f);
-            draw->PathArcTo(ImVec2(ox + 2.0f, cy), 6.5f, -0.8f, 0.8f, 10);
-            draw->PathStroke(fg, ImDrawFlags_None, 1.5f);
+            draw->PathArcTo(ImVec2(ox + 2.0f * k, cy), 3.5f * k, -0.9f, 0.9f, 8);
+            draw->PathStroke(fg, ImDrawFlags_None, 1.5f * k);
+            draw->PathArcTo(ImVec2(ox + 2.0f * k, cy), 6.5f * k, -0.8f, 0.8f, 10);
+            draw->PathStroke(fg, ImDrawFlags_None, 1.5f * k);
         } else {
-            draw->AddLine(ImVec2(cx - 5.0f, cy - 5.0f), ImVec2(cx + 5.0f, cy + 5.0f),
-                          IM_COL32(239, 68, 68, 255), 1.5f);
+            draw->AddLine(ImVec2(cx - 5.0f * k, cy - 5.0f * k), ImVec2(cx + 5.0f * k, cy + 5.0f * k),
+                          IM_COL32(239, 68, 68, 255), 1.5f * k);
         }
         break;
     }
@@ -1979,6 +1988,20 @@ static const char* state_label(FcaeState s) {
     return "UNKNOWN";
 }
 
+/// Vertically centre whatever comes next on the current row's centre line.
+///
+/// A row is a sequence of different-height widgets: a 32 px button, a text line
+/// of about 17, a 14 px ring. ImGui stacks them by their top edge, so a text
+/// label placed after a button sits at the button's top rather than its middle
+/// -- which is what "DISCONNECTED is not centred on the CONNECT row" looked
+/// like. Call this after SameLine(), before the short item, with the height of
+/// the tallest thing on the row.
+static void row_center_next(float row_height) {
+    const float item_h = ImGui::GetTextLineHeight();
+    if (row_height > item_h)
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (row_height - item_h) * 0.5f);
+}
+
 /// One proxy listener, the way sing-box configures one: a single switch and the
 /// port it answers on, on the same line.
 ///
@@ -1995,12 +2018,25 @@ static bool listener_row(const char* label, bool* enabled, ImU16* port,
                          ImU16 min_port, ImU16 max_port) {
     ImGui::PushID(label);
     // The switch carries the port, so the row is: [x] SOCKS5   port [ 1819 ]
-    const bool toggled = ImGui::Checkbox("##enabled", enabled);
+    const bool row_toggled = ImGui::Checkbox("##enabled", enabled);
+    // The checkbox, the label and the port field are three different heights on
+    // one line. ImGui aligns them by their top edge, so at anything above the
+    // default type size the label sat high against the box and the field -- the
+    // "status is not centred on the row" complaint. Centre each on the square
+    // one, which is the tallest of the three.
+    const float row_h = ImGui::GetFrameHeight();
+    const float label_dy = std::floor((row_h - ImGui::GetTextLineHeight()) * 0.5f);
+    const float field_dy = std::floor((row_h - ImGui::GetFrameHeight()) * 0.5f);
     ImGui::SameLine(0, 8);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + label_dy);
     ImGui::TextUnformatted(label);
     ImGui::SameLine(0, 10);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + field_dy);
     ImGui::BeginDisabled(!*enabled);
-    ImGui::PushItemWidth(90);
+    // Wide enough for the widest text this field can hold, so "65535" never
+    // touches the frame edge; 90 px was sized for the old font.
+    const float port_w = ImGui::CalcTextSize("65535").x + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+    ImGui::PushItemWidth(port_w);
     ImGui::InputScalar("##port", ImGuiDataType_U16, port, nullptr, nullptr, "%u");
     ImGui::PopItemWidth();
     ImGui::EndDisabled();
@@ -2011,7 +2047,7 @@ static bool listener_row(const char* label, bool* enabled, ImU16* port,
         if (*port > max_port) *port = max_port;
     }
     ImGui::PopID();
-    return toggled;
+    return row_toggled;
 }
 
 /// A ring of dots that spins: the "something is happening" indicator beside the
@@ -2023,27 +2059,34 @@ static bool listener_row(const char* label, bool* enabled, ImU16* port,
 /// reserving a box of (radius * 2 + 4) on both axes: the ring sat 2 px high
 /// inside its own box, and since it was drawn from the top of a 32 px action
 /// row the whole thing rode above the button it was meant to sit beside.
-static void draw_spinner(float radius, int segments, float speed) {
+static void draw_spinner(float radius, float speed) {
     const float t = (float)ImGui::GetTime() * speed;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p = ImGui::GetCursorScreenPos();
 
-    // Square, so the ring never has to be nudged off-centre to fit.
+    // The box this widget reserves is line-height tall, so the ring has to be
+    // centred inside that box -- not on the text baseline, which is what put it
+    // above the middle of its row before. (The previous version centred on
+    // p.y + line_h / 2 while reserving an `extent`-tall box, so the ring rode
+    // high by (extent - line_h) / 2 whenever the two differed.)
     const float line_h = ImGui::GetTextLineHeight();
     const float extent = (radius * 2.0f + 4.0f) > line_h ? (radius * 2.0f + 4.0f) : line_h;
-    // Centre on the text line, which is what the neighbours on this row use as
-    // their baseline, rather than on the box's own origin.
-    const ImVec2 c(p.x + extent * 0.5f, p.y + line_h * 0.5f);
+    const ImVec2 c(p.x + extent * 0.5f, p.y + extent * 0.5f);
 
-    for (int i = 0; i < segments; i++) {
-        const float phase = (float)i / segments;
-        const float a = phase * 6.2832f + t;
-        // Dots grow and brighten along the tail, so rotation is readable even
-        // when the ring is small.
-        const float r = radius * 0.5f + radius * 0.5f * phase;
-        const ImVec4 col(0.3f + phase * 0.4f, 0.6f + phase * 0.2f, 1.0f, 0.3f + phase * 0.7f);
-        dl->AddCircleFilled(ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r),
-                            1.5f + phase, ImGui::ColorConvertFloat4ToU32(col));
+    // One arc on a fixed radius, fading from transparent to bright along its
+    // length, so it reads as a ring turning in place. The old version varied
+    // the radius with the same parameter as the angle, which drew a spiral
+    // and made the "ring" look lopsided and off-centre rather than orbiting.
+    const float thickness = 2.0f;
+    const int   arc_segments = 12;
+    for (int i = 0; i < arc_segments; i++) {
+        const float phase = (float)i / (float)arc_segments;
+        const float a = phase * 4.7124f + t;      // three quarters of a turn
+        // Alpha ramps up along the arc: the head is solid, the tail fades out.
+        const float alpha = 0.15f + 0.85f * phase;
+        const ImVec4 col(0.35f + 0.15f * phase, 0.65f + 0.15f * phase, 1.0f, alpha);
+        dl->AddCircleFilled(ImVec2(c.x + cosf(a) * radius, c.y + sinf(a) * radius),
+                            thickness, ImGui::ColorConvertFloat4ToU32(col), 8);
     }
     ImGui::Dummy(ImVec2(extent, extent));
 }
@@ -4155,9 +4198,12 @@ void render_ui() {
                            "%s  |  %s", fcae_display_version(),
                            build_is_prerelease() ? "pre-release" : "release");
 
-        same_line_right_aligned(title_right_x, kIconButtonSize, 8.0f);
+        const float icon_size = icon_button_size();
+        same_line_right_aligned(title_right_x, icon_size, 8.0f);
+        // Centred on the text line either way: the offset goes negative when
+        // the icon is the taller of the two, which is the case at this type size.
         ImGui::SetCursorPosY(ImGui::GetCursorPosY()
-            + std::floor((ImGui::GetTextLineHeight() - kIconButtonSize) * 0.5f));
+            + std::floor((ImGui::GetTextLineHeight() - icon_size) * 0.5f));
         if (round_icon_button("##about_btn", UiIcon::Info, false, "About FCAE VPN"))
             s_about_popup_open = true;
 
@@ -4297,7 +4343,23 @@ void render_ui() {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btn_h);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(btn.x - 0.05f, btn.y - 0.05f, btn.z - 0.05f, 1.0f));
 
-        float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 130.0f;
+        // Wide enough for whichever label this row shows. This MUST be a hard
+        // minimum, not a value 130 is then compared against: DISCONNECT is 141 px
+        // of text at the 26 px base font, 161 with padding, and clamping it to
+        // 130 ran the label straight out of the button's edges -- which is the
+        // "text is not centred in its background" report.
+        const float action_btn_pad = ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float action_btn_min = std::max(ImGui::CalcTextSize("CONNECT").x,
+                                              ImGui::CalcTextSize("DISCONNECT").x) + action_btn_pad;
+        // On a narrow window the CONNECT button shares its line with START/STOP,
+        // so it gives up exactly the room that pair needs: measured here rather
+        // than the old flat 72, which was sized for a 70 px button and is now a
+        // couple of pixels too small.
+        const float pair_reserve = std::max(ImGui::CalcTextSize("START").x,
+                                            ImGui::CalcTextSize("STOP").x)
+                                 + ImGui::GetStyle().FramePadding.x * 2.0f + 6.0f;
+        float btn_w = narrow ? (std::max)(action_btn_min, ImGui::GetContentRegionAvail().x - pair_reserve)
+                             : action_btn_min;
         bool show_disconnect = connected || busy || tun_paused;
         if (startup) ImGui::BeginDisabled();
         if (ImGui::Button(show_disconnect ? "DISCONNECT" : "CONNECT", ImVec2(btn_w, kActionRowHeight))) {
@@ -4616,13 +4678,21 @@ void render_ui() {
 
         if (g_app.mode == 1 && (connected || tun_paused)) {
             ImGui::SameLine(0, 6);
+            // Same height as the CONNECT button, so nothing to offset -- kept
+            // explicit so the pair cannot drift if the row height changes.
+            row_center_next(kActionRowHeight);
+            // Same reasoning as the update button: START is wider than STOP,
+            // so width from the wider one rather than from a constant.
+            const float stop_btn_w = std::max(ImGui::CalcTextSize("START").x,
+                                              ImGui::CalcTextSize("STOP").x)
+                                   + action_btn_pad;
             if (tun_paused) {
                 ImVec4 start_col(0.18f, 0.35f, 0.85f, 1.0f);
                 ImVec4 start_h(0.26f, 0.45f, 0.95f, 1.0f);
                 ImGui::PushStyleColor(ImGuiCol_Button, start_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
-                if (ImGui::Button("START", ImVec2(70, kActionRowHeight))) {
+                if (ImGui::Button("START", ImVec2(stop_btn_w, kActionRowHeight))) {
                     std::thread([] {
                         if (fcae_resume_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -4637,7 +4707,7 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, stop_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
-                if (ImGui::Button("STOP", ImVec2(70, kActionRowHeight))) {
+                if (ImGui::Button("STOP", ImVec2(stop_btn_w, kActionRowHeight))) {
                     std::thread([] {
                         if (fcae_pause_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -4650,10 +4720,9 @@ void render_ui() {
         }
 
         ImGui::SameLine(0, 10);
-        // One line of text in a 32 px action row: shift it down by the half of
-        // the difference so it sits on the buttons' centre line instead of
-        // hugging their top edge.
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (kActionRowHeight - ImGui::GetTextLineHeight()) * 0.5f);
+        // One line of text in a taller action row: share the buttons' centre
+        // line instead of hugging their top edge.
+        row_center_next(kActionRowHeight);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         if (startup) {
             ImGui::TextUnformatted("INITIALIZING...");
@@ -4664,10 +4733,24 @@ void render_ui() {
         }
         ImGui::PopStyleColor();
 
-        if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
+        if (busy) {
+            ImGui::SameLine(0, 8);
+            // The ring's box is max(2*radius+4, line height) tall, which is a
+            // little taller than a text line at the default font size, so it
+            // gets its own offset rather than row_center_next()'s text-line one.
+            // Without it the ring is drawn from the row's top edge and reads as
+            // hovering above the button.
+            constexpr float kRingRadius = 7.0f;
+            const float ring_box = (kRingRadius * 2.0f + 4.0f) > ImGui::GetTextLineHeight()
+                                 ? (kRingRadius * 2.0f + 4.0f) : ImGui::GetTextLineHeight();
+            if (kActionRowHeight > ring_box)
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (kActionRowHeight - ring_box) * 0.5f);
+            draw_spinner(kRingRadius, 7.0f);
+        }
 
         if (g_app.save_status[0]) {
             ImGui::SameLine(0, 8);
+            row_center_next(kActionRowHeight);
             ImGui::TextColored(s_save_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
                                                    : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
                                "%s", g_app.save_status);
@@ -4680,7 +4763,25 @@ void render_ui() {
         if (startup) ImGui::BeginDisabled();
         if (!narrow) ImGui::SameLine(0, 10);
         {
-            float btn_width = 136.0f;
+            // Sized from the longest label this button ever shows, not from a
+            // constant. At the old 13 px font the widest was "Check for Updates"
+            // at 119 px, which fitted a hard-coded 136 -- but at the doubled
+            // base size that same label is 239 px, so it ran past the button's
+            // edges and read as "not centred in its background". Measuring keeps
+            // the label centred whatever the font size is.
+            const float btn_pad   = ImGui::GetStyle().FramePadding.x * 2.0f;
+            // The widest label is used for all states, so the button keeps one
+            // width instead of twitching whenever the label changes: a button
+            // that resizes while it is pinned to the right edge also drags its
+            // own text around, which reads as the label jumping off-centre.
+            float btn_width = std::max(ImGui::CalcTextSize("Check for Updates").x,
+                              std::max(ImGui::CalcTextSize("Check Timed Out").x,
+                                       ImGui::CalcTextSize("Checking... 999s").x)) + btn_pad;
+            // Only if the window is too narrow to hold it does it give ground.
+            {
+                const float room = ImGui::GetWindowContentRegionMax().x - 260.0f;
+                if (room > 60.0f && btn_width > room) btn_width = room;
+            }
             // The button height follows the text: at 32 px exactly, a raised
             // text scale would push the label past the button's edge. The
             // designed 32 px stays the floor.
@@ -4715,7 +4816,9 @@ void render_ui() {
                     ImGui::PopStyleColor(2);
                 } else {
                     char checking_label[32];
-                    snprintf(checking_label, sizeof(checking_label), "Checking... %llds", (long long)elapsed);
+                    // Padded to two digits so the button does not change width
+                    // when the counter rolls from 9 to 10.
+                    snprintf(checking_label, sizeof(checking_label), "Checking... %2llds", (long long)elapsed);
                     ImGui::BeginDisabled();
                     ImGui::Button(checking_label, ImVec2(btn_width, update_btn_h));
                     ImGui::EndDisabled();
@@ -4904,9 +5007,11 @@ void render_ui() {
 
             // Mirrors Android's 38dp rounded_rectangle row: #171A26 fill,
             // 1px #292D3D border, 10/4 horizontal padding, 8px gap to the card.
-            constexpr float kHeaderPadV = 4.0f;
-            constexpr float kHeaderHeight = kIconButtonSize + kHeaderPadV * 2.0f;
-            constexpr float kHeaderRounding = kHeaderHeight * 12.0f / 38.0f;
+            const float kHeaderPadV = 4.0f;
+            // Follows the icon size, which follows the font: a fixed height here
+            // would clip the buttons once the type grew.
+            const float kHeaderHeight = icon_button_size() + kHeaderPadV * 2.0f;
+            const float kHeaderRounding = kHeaderHeight * 12.0f / 38.0f;
             const ImVec2 cursor = ImGui::GetCursorScreenPos();
             const ImVec2 header_min(std::floor(cursor.x), std::floor(cursor.y));
             const ImVec2 header_max(header_min.x + card_w, header_min.y + kHeaderHeight);
@@ -4917,8 +5022,9 @@ void render_ui() {
             // SameLine, so flow layout would snap them to that line's y.
             const float header_text_y = header_min.y + std::floor((kHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f);
             const float header_button_y = header_min.y + kHeaderPadV;
-            const float audio_x = header_max.x - 4.0f - kIconButtonSize;
-            const float refresh_x = audio_x - 6.0f - kIconButtonSize;
+            const float header_icon = icon_button_size();
+            const float audio_x = header_max.x - 4.0f - header_icon;
+            const float refresh_x = audio_x - 6.0f - header_icon;
             ImGui::SetCursorScreenPos(ImVec2(header_min.x + 10.0f, header_text_y));
             ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
 
@@ -4967,11 +5073,16 @@ void render_ui() {
             constexpr float kSponsorMessageFontRatio = 14.0f / 16.0f;
             const float message_scale = kSponsorMessageFontRatio
                 * std::clamp((float)(s_sponsor.message_scale ? s_sponsor.message_scale : 100) / 100.0f, 0.5f, 2.0f);
-            constexpr float sponsor_card_height = 80.0f;
+            constexpr float kSponsorTextInset = 8.0f;
+            // Was a flat 80 px, sized for the old type. The icon band and the
+            // two text lines inside are drawn relative to the message scale, so
+            // the card is sized from the text it has to hold.
+            const float sponsor_card_height = std::max(80.0f,
+                ImGui::GetTextLineHeightWithSpacing() * 2.0f * message_scale
+                + kSponsorTextInset * 3.0f + 8.0f);
             // Android's card: the icon band is 70 of 140dp, and media, icon and
             // text all span the whole card rather than a padded inner area.
-            constexpr float sponsor_media_height = sponsor_card_height * 70.0f / 140.0f;
-            constexpr float kSponsorTextInset = 8.0f;
+            const float sponsor_media_height = sponsor_card_height * 70.0f / 140.0f;
             const ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f),
                 s_sponsor.background_color_opacity);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
@@ -5183,7 +5294,12 @@ void render_ui() {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
-        ImGui::BeginChild("##connection_info_body", ImVec2(0, 190), ImGuiChildFlags_Borders);
+        // Tall enough for the rows this pane lists. A flat 190 was about seven
+        // text lines at the old 13 px font; at double that it would show three
+        // and clip the rest, so the height follows the line height instead.
+        const float info_body_h = ImGui::GetTextLineHeightWithSpacing() * 10.0f
+                                + ImGui::GetStyle().WindowPadding.y * 2.0f;
+        ImGui::BeginChild("##connection_info_body", ImVec2(0, info_body_h), ImGuiChildFlags_Borders);
 
         if (connected) {
             const char* lip = telem.lan_ip;

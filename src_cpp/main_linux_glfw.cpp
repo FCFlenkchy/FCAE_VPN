@@ -98,15 +98,32 @@ int main(int argc, char** argv) {
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "fcaevpn");
 #endif
 
-    // The designed size, in pixels. Fixed on purpose: scaling both the window
-    // and the ImGui font by the desktop's content scale applied the factor
-    // twice, so the window grew and the text inside it grew again, and a layout
-    // that fits here overflowed. The window keeps its designed size; text size
-    // is the user's ui_scale_percent.
-    constexpr int kWindowWidth  = 1024;
-    constexpr int kWindowHeight = 700;
+    // The designed size, in pixels: larger than the original 1024x700, which
+    // was cramped once the settings pages and the log tail were both on screen.
+    //
+    // Not scaled by the desktop's content scale: scaling both the window and the
+    // ImGui font applied the factor twice, so the window grew and the text
+    // inside it grew again and the layout overflowed. Text size is the user's
+    // ui_scale_percent instead, which leaves the frame alone.
+    constexpr int kWindowWidth  = 1280;
+    constexpr int kWindowHeight = 860;
+    // The base font size, in pixels: twice the 13 px ImGui's embedded default
+    // face used to give this UI, and the size the ui_render.cpp layout is
+    // designed against. See the same constant in the Win32 host.
+    constexpr float kUiBaseFontSize = 26.0f;
 
-    GLFWwindow* window = glfwCreateWindow(kWindowWidth, kWindowHeight, "FCAE VPN", nullptr, nullptr);
+    // Never open larger than the monitor can show; a window that starts
+    // off-screen cannot be grabbed by the title bar.
+    int window_w = kWindowWidth;
+    int window_h = kWindowHeight;
+    if (GLFWmonitor* primary = glfwGetPrimaryMonitor()) {
+        int area_x = 0, area_y = 0, area_w = 0, area_h = 0;
+        glfwGetMonitorWorkarea(primary, &area_x, &area_y, &area_w, &area_h);
+        if (area_w > 480 && window_w > area_w - 40) window_w = area_w - 40;
+        if (area_h > 360 && window_h > area_h - 80) window_h = area_h - 80;
+    }
+
+    GLFWwindow* window = glfwCreateWindow(window_w, window_h, "FCAE VPN", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 1;
@@ -158,6 +175,17 @@ int main(int argc, char** argv) {
 #if defined(FCAE_HAVE_FREETYPE)
     ImGui::GetIO().Fonts->SetFontLoader(ImGuiFreeType::GetFontLoader());
 #endif
+    // A base font at a readable size. Without this the atlas holds only ImGui's
+    // embedded 13 px ProggyClean bitmap face, which is what made the UI read as
+    // tiny, and a bitmap face cannot be enlarged without turning into mush.
+    // AddFontDefaultVector() is named explicitly: AddFontDefault() chooses
+    // between the bitmap and vector faces from the expected context size, which
+    // is still unset here.
+    {
+        ImFontConfig font_cfg;
+        font_cfg.SizePixels = kUiBaseFontSize;
+        ImGui::GetIO().Fonts->AddFontDefaultVector(&font_cfg);
+    }
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -167,6 +195,9 @@ int main(int argc, char** argv) {
     // 1.0 on purpose; see the window-size comment. The user's own text scale
     // arrives from ui_frame() as FontScaleMain and is the only factor applied.
     style.FontScaleDpi     = 1.0f;
+    // The size the ui_render.cpp layout is designed against; see the same
+    // setting in the Win32 host.
+    style.FontSizeBase     = kUiBaseFontSize;
     style.WindowRounding   = 10.0f;
     style.FrameRounding    = 6.0f;
     style.GrabRounding     = 4.0f;
