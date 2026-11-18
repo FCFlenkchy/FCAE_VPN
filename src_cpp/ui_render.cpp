@@ -5232,8 +5232,10 @@ void render_ui() {
                         uv1.y = 1.0f - crop;
                     }
                 }
-                size.x *= icon_scale;
-                size.y *= icon_scale;
+                const float media_scale = s_sponsor.image_fit == 0
+                    ? std::min(icon_scale, 1.0f) : icon_scale;
+                size.x *= media_scale;
+                size.y *= media_scale;
                 const auto sponsor_icon_center = [](float extent, float drawn, float percent) {
                     if (drawn >= extent) return extent * 0.5f;
                     return std::clamp(extent * percent, drawn * 0.5f, extent - drawn * 0.5f);

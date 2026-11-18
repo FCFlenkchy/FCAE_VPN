@@ -1012,11 +1012,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun sponsorImageScale(iconScale: Int, imageFit: Int): Float {
+        val scale = iconScale.coerceIn(50, 160) / 100f
+        return if (imageFit == 1) scale else scale.coerceAtMost(1f)
+    }
+
     private fun positionSponsorIcon(iconX: Int, iconY: Int, iconScale: Int, imageFit: Int, sourceWidth: Int, sourceHeight: Int) {
         if (!::sponsorCard.isInitialized || !::sponsorImage.isInitialized) return
         val safeX = iconX.coerceIn(0, 100)
         val safeY = iconY.coerceIn(0, 100)
-        val scale = iconScale.coerceIn(50, 160) / 100f
+        val scale = sponsorImageScale(iconScale, imageFit)
         val requestKey = "${sponsorCard.width}x${sponsorCard.height}:$safeX:$safeY:$scale:$imageFit:${sourceWidth}x$sourceHeight"
         if (requestKey == sponsorIconRequestKey) return
         sponsorIconRequestKey = requestKey
@@ -1053,9 +1058,9 @@ class MainActivity : AppCompatActivity() {
         return desired.coerceIn(half, extent - half)
     }
 
-    private fun applySponsorIcon(iconScale: Int) {
+    private fun applySponsorIcon(iconScale: Int, imageFit: Int = 0) {
         if (!::sponsorImage.isInitialized) return
-        val scale = iconScale.coerceIn(50, 160) / 100f
+        val scale = sponsorImageScale(iconScale, imageFit)
         sponsorImage.scaleX = scale
         sponsorImage.scaleY = scale
     }
@@ -1186,7 +1191,7 @@ class MainActivity : AppCompatActivity() {
                                         (card.backgroundOpacity * 255 / 100).coerceIn(0, 255)
                                     val iconScale = card.iconScale.coerceIn(50, 160)
                                     val backgroundScale = card.backgroundScale.coerceIn(50, 160)
-                                    applySponsorIcon(iconScale)
+                                    applySponsorIcon(iconScale, card.imageFit)
                                     val backgroundScaleFactor = backgroundScale / 100f
                                     sponsorBackgroundImage.scaleX = backgroundScaleFactor
                                     sponsorBackgroundImage.scaleY = backgroundScaleFactor
