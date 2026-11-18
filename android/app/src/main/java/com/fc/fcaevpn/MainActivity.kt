@@ -6603,13 +6603,24 @@ class MainActivity : AppCompatActivity() {
         applyPsiphonRegionCodes(combined)
     }
 
+    private val psiphonCountryCodes by lazy {
+        java.util.Locale.getISOCountries().toHashSet()
+    }
+
+    private fun psiphonRegionLabel(code: String): String {
+        if (code.isEmpty()) return "Auto"
+        if (code !in psiphonCountryCodes) return code
+        val name = java.util.Locale("", code).getDisplayCountry(java.util.Locale.ENGLISH)
+        return if (name.isBlank() || name == code) code else "$name ($code)"
+    }
+
     private fun applyPsiphonRegionCodes(newCodes: List<String>) {
         if (!::spinnerPsiphonRegion.isInitialized) return
-        val want = savedPsiphonRegion.trim().uppercase()
+        val want = savedPsiphonRegion.trim().uppercase(java.util.Locale.ROOT)
         // Only reported or previously learned codes are available choices.
         // A stale saved value must not manufacture a region entry or make the
         // spinner look connected to a server list Psiphon never reported.
-        val allCodes = newCodes.map { it.trim().uppercase() }
+        val allCodes = newCodes.map { it.trim().uppercase(java.util.Locale.ROOT) }
             .filter { it.isNotEmpty() }.distinct().sorted()
         val normalized = listOf("") + allCodes
         if (spinnerPsiphonRegion.adapter != null && normalized == psiphonRegionCodes) return
@@ -6620,7 +6631,7 @@ class MainActivity : AppCompatActivity() {
         pendingRegionCodes = null
         applyingRegionList = true
         psiphonRegionCodes = normalized
-        val displayItems = normalized.map { if (it.isEmpty()) "Auto" else it }
+        val displayItems = normalized.map(::psiphonRegionLabel)
         spinnerPsiphonRegion.adapter = ArrayAdapter(this,
             R.layout.spinner_dark_item,
             displayItems)
