@@ -20,12 +20,6 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
-#elif defined(__linux__) && !defined(ANDROID)
-// The Linux host blocks in glfwWaitEventsTimeout(). A change reported from a
-// worker thread has to be able to end that wait early, or it appears only
-// after the idle timeout has elapsed -- a late repaint the user sees as a
-// flicker. GLFW's empty-event post is the thread-safe way to do that.
-#include <GLFW/glfw3.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <pwd.h>
@@ -39,6 +33,16 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+
+// The Linux host blocks in glfwWaitEventsTimeout(), so a change reported from a
+// worker thread can only end that wait early if it can post a GLFW event --
+// otherwise it appears after the idle timeout, as a late repaint the user sees
+// as a flicker. This is a separate branch on purpose: adding it as another
+// `#elif` above would have ended the platform chain and silently dropped every
+// POSIX header on Linux.
+#if defined(__linux__) && !defined(ANDROID)
+#include <GLFW/glfw3.h>
 #endif
 
 // UI-lifetime audio gate is an embedding hook rather than a public ABI field.
@@ -759,11 +763,12 @@ void ui_request_redraw() {
 #ifdef _WIN32
     if (auto window = reinterpret_cast<HWND>(s_ui_window.load())) PostMessageW(window, WM_NULL, 0, 0);
 #elif defined(__linux__) && !defined(ANDROID)
-    // Returns the host's wait immediately so the next frame is the one that
-    // shows the change. Safe from any thread, and a no-op before the host has
-    // registered its window. macOS renders through Metal: AppKit may only be
-    // poked from the main thread, so that host bounds its wait instead.
-    if (auto window = reinterpret_cast<GLFWwindow*>(s_ui_window.load())) glfwPostEmptyEvent();
+    // glfwPostEmptyEvent() is safe from any thread and wakes whichever window
+    // the host wait is parked on; the stored handle only decides whether a host
+    // has registered at all, so the value itself is deliberately unused.
+    // macOS renders through Metal: AppKit may only be poked from the main
+    // thread, so that host bounds its wait instead.
+    if (s_ui_window.load() != 0) glfwPostEmptyEvent();
 #endif
 }
 

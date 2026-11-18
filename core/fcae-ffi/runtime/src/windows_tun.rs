@@ -200,7 +200,7 @@ fn exclusion_gateway(physical: &MIB_IPFORWARD_ROW2, family: u16) -> Option<IpAdd
     if !on_link.is_unspecified() {
         return Some(on_link);
     }
-    let luid = unsafe { physical.InterfaceLuid };
+    let luid = physical.InterfaceLuid;
     let mut table: *mut MIB_IPFORWARD_TABLE2 = ptr::null_mut();
     if unsafe { GetIpForwardTable2(family, &mut table) } != 0 || table.is_null() {
         return None;
@@ -524,15 +524,20 @@ impl TunGuard {
             // fails where it runs.
             log::debug!("[tun] TUN adapter {index} did not come up before the resolver check; pins stay in place");
         } else {
+            // Reading a union field is the unsafe part of a LUID comparison,
+            // so it happens exactly twice: once each side, into plain u64s.
+            // Everything after this point is ordinary integer work.
+            let tunnel_luid = unsafe { luid.Value };
             for server in &servers {
                 let Ok(ip) = server.parse::<IpAddr>() else { continue };
                 if ip.is_ipv6() && !ipv6_available { continue; }
                 let chosen = best_route(ip)?;
-                if unsafe { chosen.InterfaceLuid.Value } != luid.Value {
-                    log::warn!("[tun] TUN DNS server {ip} resolves through interface {} instead of the tunnel", unsafe { chosen.InterfaceIndex });
+                let chosen_luid = unsafe { chosen.InterfaceLuid.Value };
+                if chosen_luid != tunnel_luid {
+                    let winning = chosen.InterfaceIndex;
+                    log::warn!("[tun] TUN DNS server {ip} resolves through interface {winning} instead of the tunnel");
                     return Err(CoreError::Internal(format!(
-                        "TUN DNS server {ip} routes outside the tunnel (interface {} wins it); remove the conflicting route or choose another resolver",
-                        unsafe { chosen.InterfaceIndex }
+                        "TUN DNS server {ip} routes outside the tunnel (interface {winning} wins it); remove the conflicting route or choose another resolver"
                     )));
                 }
             }
