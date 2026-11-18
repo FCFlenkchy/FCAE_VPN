@@ -913,6 +913,10 @@ unsigned ui_sleep_ms();
 
 /// Request one extra repaint (call from window event handlers).
 void ui_request_redraw();
+/// Register the platform window a redraw request must wake (nullptr clears it).
+void ui_set_window_handle(void* window);
+/// Act on a pending elevation hand-off; called by the frame loop.
+void ui_handoff_tick();
 
 /// Bookkeeping after a frame was actually painted. Called by ui_frame().
 void ui_note_frame_drawn();

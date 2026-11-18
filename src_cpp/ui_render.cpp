@@ -73,6 +73,7 @@ static void set_save_status_v(bool error, const char* format, va_list args) {
     vsnprintf(g_app.save_status, sizeof(g_app.save_status), format, args);
     s_save_status_error = error;
     ++s_save_status_revision;
+    ui_request_redraw();
 }
 static void set_save_status(const char* format, ...) {
     va_list args;
@@ -146,6 +147,14 @@ static std::chrono::steady_clock::time_point s_sponsor_manifest_check = {};
 // Sponsor polling honors this visibility gate so hidden windows keep audio disabled.
 static std::atomic<bool> s_ui_window_visible{true};
 static std::atomic<bool> s_ui_window_focused{true};
+// Native window of the active platform front end, set once at startup; a
+// redraw request posts to it so a worker thread wakes the parked window loop.
+static std::atomic<uintptr_t> s_ui_window{0};
+#ifdef _WIN32
+// Tick count at which an elevated relaunch succeeded; the window thread ends
+// this process once the hand-off window has passed. Zero while none is pending.
+static std::atomic<DWORD> s_elevation_handoff_at{0};
+#endif
 static int s_sponsor_ui_active_sent = -1;
 static int s_sponsor_connected_sent = -1;
 static std::string s_sponsor_last_error;
@@ -732,8 +741,38 @@ static void ui_poll_telemetry(double now) {
     g_app.last_telem_t = now;
 }
 
+/// Wake the window thread so it paints the state a caller just published.
+///
+/// Engine log lines, status notices and state changes all arrive on worker
+/// threads. Without this the window thread parked in `MsgWaitForMultipleObjects`
+/// keeps its full idle timeout, so a change shows up as a late repaint -- a
+/// visible flicker -- instead of on the next frame. Registration and posting
+/// use the same pointer-sized handle type, so no window type is needed here.
 void ui_request_redraw() {
     g_app.redraw_requested.store(true);
+#ifdef _WIN32
+    if (void* window = reinterpret_cast<void*>(s_ui_window.load())) PostMessageW(window, WM_NULL, 0, 0);
+#endif
+}
+
+/// Finish an elevation hand-off from the window thread.
+///
+/// `PostQuitMessage` only posts to the calling thread's queue, so the exit the
+/// elevated relaunch depends on has to happen here, not on the worker that
+/// started it.
+void ui_handoff_tick() {
+#ifdef _WIN32
+    const DWORD at = s_elevation_handoff_at.load(std::memory_order_relaxed);
+    if (at != 0 && GetTickCount() - at >= 1000) {
+        s_elevation_handoff_at.store(0, std::memory_order_relaxed);
+        g_app.running.store(false);
+        PostQuitMessage(0);
+    }
+#endif
+}
+
+void ui_set_window_handle(void* window) {
+    s_ui_window.store(reinterpret_cast<uintptr_t>(window));
 }
 
 // A hidden window keeps the one still per plane it is showing; the engine
@@ -4197,82 +4236,77 @@ void render_ui() {
 #ifdef _WIN32
                     // Save config then relaunch self as administrator.
                     // The elevated instance will start fresh — user clicks CONNECT manually.
+                    //
+                    // ShellExecuteExW with "runas" does not answer until the user
+                    // has dealt with the UAC prompt, so it runs on a worker: the
+                    // window thread stays in its frame loop and neither the
+                    // handoff window nor the consent dialog freezes the app.
                     save_config();
-                    wchar_t exe_path[MAX_PATH];
+                    wchar_t exe_path[MAX_PATH] = {};
                     GetModuleFileNameW(NULL, exe_path, MAX_PATH);
-
-                    SHELLEXECUTEINFOW sei = {};
-                    sei.cbSize = sizeof(sei);
-                    sei.lpVerb = L"runas";
-                    sei.lpFile = exe_path;
-                    wchar_t handoff_args[64];
-                    std::swprintf(handoff_args, 64, L"--fcae-wait-parent %lu", static_cast<unsigned long>(GetCurrentProcessId()));
-                    sei.lpParameters = handoff_args;
-                    sei.nShow = SW_NORMAL;
-                    sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
+                    set_save_status("Waiting for administrator consent…");
                     fcae_ui_diagnostic(2, 0);
-                    if (ShellExecuteExW(&sei)) {
-                        // Successfully launched elevated copy — give it a moment
-                        // to take over the launcher slot and surface any UAC
-                        // prompt before we exit. Without this sleep, the
-                        // elevated process can race the parent teardown and
-                        // produce an orphaned elevated instance plus the
-                        // confusing "the app just quit" support report.
-                        // Log the relaunch too: the Logs tab then names the
-                        // elevated PID the session was handed to, and a later
-                        // bind failure has a breadcrumb.
-                        DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
-                        fcae_ui_diagnostic(3, child_pid);
-                        char msg[160];
-                        snprintf(msg, sizeof(msg),
-                            "[ui] TUN mode needs elevation -- relaunching elevated (PID %lu). "
-                            "The non-elevated copy will exit in ~700ms.",
-                            static_cast<unsigned long>(child_pid));
-                        if (sei.hProcess) CloseHandle(sei.hProcess);
-                        g_app.add_log(FCAE_LOG_INFO, msg);
-                        set_save_status(
-                            "Restarting elevated -- current copy will close");
-                        std::thread([] {
-                            // Hand-off window: enough for UAC to dismiss and
-                            // for the elevated copy to enter its message loop
-                            // before this instance's WM_DESTROY arrives.
-                            Sleep(700);
-                            g_app.running.store(false);
-                            PostQuitMessage(0);
-                        }).detach();
-                        ImGui::PopStyleColor(3);  // button colors
-                        ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
-                        ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
-                        ImGui::End();
-                        return;
-                    } else {
-                        // Say what happened rather than leaving TUN silently
-                        // "not working": the usual cause is a declined UAC
-                        // prompt, where GetLastError() is ERROR_CANCELLED.
-                        DWORD err = GetLastError();
-                        fcae_ui_diagnostic(4, err);
-                        const char* why =
-                            err == ERROR_CANCELLED ? "UAC consent was cancelled"
-                            : err == ERROR_ACCESS_DENIED ? "access was denied"
-                            : err == ERROR_FILE_NOT_FOUND ? "the executable path is missing"
-                            : "ShellExecuteExW failed";
-                        char msg[160];
-                        snprintf(msg, sizeof(msg),
-                            "[ui] TUN mode requires Administrator privileges (%s, Win32 error %lu). "
-                            "Click CONNECT again, accept the UAC prompt, or restart FCAE VPN "
-                            "elevated once and the elevated copy will handle every future start.",
-                            why, static_cast<unsigned long>(err));
-                        g_app.add_log(FCAE_LOG_ERROR, msg);
-                        // The transient status is backed by the log entry above.
-                        set_save_status_error(
-                            "TUN needs Admin (error %lu) -- click CONNECT to retry UAC",
-                            static_cast<unsigned long>(err));
-                        ImGui::PopStyleColor(3);  // button colors
-                        ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
-                        ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
-                        ImGui::End();
-                        return;
-                    }
+                    // The decision to exit is published here and acted on by
+                    // the window thread: PostQuitMessage only affects the thread
+                    // that calls it, so a worker cannot end this process.
+                    std::thread([exe_path = std::wstring(exe_path)] {
+                        SHELLEXECUTEINFOW sei = {};
+                        sei.cbSize = sizeof(sei);
+                        sei.lpVerb = L"runas";
+                        sei.lpFile = exe_path.c_str();
+                        wchar_t handoff_args[64];
+                        std::swprintf(handoff_args, 64, L"--fcae-wait-parent %lu",
+                                      static_cast<unsigned long>(GetCurrentProcessId()));
+                        sei.lpParameters = handoff_args;
+                        sei.nShow = SW_NORMAL;
+                        // SEE_MASK_NOASYNC keeps the shell from failing a caller
+                        // that is not pumping messages, which this thread is not.
+                        sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
+                        if (ShellExecuteExW(&sei)) {
+                            DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
+                            fcae_ui_diagnostic(3, child_pid);
+                            if (sei.hProcess) CloseHandle(sei.hProcess);
+                            char msg[160];
+                            snprintf(msg, sizeof(msg),
+                                "[ui] TUN mode needs elevation -- relaunched elevated (PID %lu). "
+                                "This copy will exit in ~1s.",
+                                static_cast<unsigned long>(child_pid));
+                            g_app.add_log(FCAE_LOG_INFO, msg);
+                            set_save_status("Restarting elevated -- this copy will close");
+                            // Hand-off window: the elevated copy waits for this
+                            // process to exit (--fcae-wait-parent), so the delay
+                            // only needs to let UAC dismiss and the new instance
+                            // take the single-instance slot.
+                            s_elevation_handoff_at.store(GetTickCount(), std::memory_order_relaxed);
+                        } else {
+                            // Say what happened rather than leaving TUN silently
+                            // "not working": the usual cause is a declined UAC
+                            // prompt, where GetLastError() is ERROR_CANCELLED.
+                            DWORD err = GetLastError();
+                            fcae_ui_diagnostic(4, err);
+                            const char* why =
+                                err == ERROR_CANCELLED ? "UAC consent was cancelled"
+                                : err == ERROR_ACCESS_DENIED ? "access was denied"
+                                : err == ERROR_FILE_NOT_FOUND ? "the executable path is missing"
+                                : "ShellExecuteExW failed";
+                            char msg[192];
+                            snprintf(msg, sizeof(msg),
+                                "[ui] TUN mode requires Administrator privileges (%s, Win32 error %lu). "
+                                "Click CONNECT again, accept the UAC prompt, or restart FCAE VPN "
+                                "elevated once and the elevated copy will handle every future start.",
+                                why, static_cast<unsigned long>(err));
+                            g_app.add_log(FCAE_LOG_ERROR, msg);
+                            set_save_status_error(
+                                "TUN needs Admin (error %lu) -- click CONNECT to retry UAC",
+                                static_cast<unsigned long>(err));
+                        }
+                    }).detach();
+                    ImGui::PopStyleColor(3);  // button colors
+                    ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
+                    ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
+                    ImGui::End();
+                    ui_handoff_tick();
+                    return;
 #else
                     g_app.add_log(FCAE_LOG_ERROR,
                         "[ui] TUN mode requires root privileges on this platform. "
