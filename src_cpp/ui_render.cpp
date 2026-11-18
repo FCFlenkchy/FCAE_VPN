@@ -746,12 +746,12 @@ static void ui_poll_telemetry(double now) {
 /// Engine log lines, status notices and state changes all arrive on worker
 /// threads. Without this the window thread parked in `MsgWaitForMultipleObjects`
 /// keeps its full idle timeout, so a change shows up as a late repaint -- a
-/// visible flicker -- instead of on the next frame. Registration and posting
-/// use the same pointer-sized handle type, so no window type is needed here.
+/// visible flicker -- instead of on the next frame. `windows.h` is included at
+/// the top of this file on Windows, so the stored handle is cast back to HWND.
 void ui_request_redraw() {
     g_app.redraw_requested.store(true);
 #ifdef _WIN32
-    if (void* window = reinterpret_cast<void*>(s_ui_window.load())) PostMessageW(window, WM_NULL, 0, 0);
+    if (auto window = reinterpret_cast<HWND>(s_ui_window.load())) PostMessageW(window, WM_NULL, 0, 0);
 #endif
 }
 
