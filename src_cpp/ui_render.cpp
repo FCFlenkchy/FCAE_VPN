@@ -783,6 +783,13 @@ void ui_handoff_tick() {
     if (at != 0 && GetTickCount() - at >= 1000) {
         s_elevation_handoff_at.store(0, std::memory_order_relaxed);
         g_app.running.store(false);
+        // Destroy the window *here*, on the thread that created it, instead of
+        // leaving it to the shutdown path after the loop. The elevated copy
+        // starts before this one finishes tearing down, so any delay is a
+        // period where two full-size windows exist; destroying first makes the
+        // visible result a hand-over rather than a window left behind.
+        const HWND hwnd = reinterpret_cast<HWND>(s_ui_window.load());
+        if (hwnd) ShowWindow(hwnd, SW_HIDE);
         PostQuitMessage(0);
     }
 #endif
@@ -1404,6 +1411,14 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
     else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
     else if (key == "check_prereleases") g_app.check_prereleases = atoi(val.c_str()) != 0;
+    else if (key == "ui_scale_percent") {
+        // Clamped on load: a hand-edited file must not be able to ask for a
+        // font size that pushes the layout off the window.
+        int scale = atoi(val.c_str());
+        if (scale < 75) scale = 75;
+        if (scale > 250) scale = 250;
+        g_app.ui_scale_percent = scale;
+    }
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
     else if (key == "engine_log") g_app.engine_log = atoi(val.c_str());
     else if (key == "core_log") g_app.core_log = atoi(val.c_str());
@@ -1561,6 +1576,7 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fprintf(f, "auto_update_check=%d\n", g_app.auto_update_check ? 1 : 0);
     fprintf(f, "check_prereleases=%d\n", g_app.check_prereleases ? 1 : 0);
+    fprintf(f, "ui_scale_percent=%d\n", g_app.ui_scale_percent);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
     fprintf(f, "engine_log=%d\n", g_app.engine_log);
     fprintf(f, "core_log=%d\n", g_app.core_log);
@@ -1946,20 +1962,38 @@ static const char* state_label(FcaeState s) {
     return "UNKNOWN";
 }
 
+/// A ring of dots that spins: the "something is happening" indicator beside the
+/// CONNECT button and the scan/save status line.
+///
+/// It reserves a square as tall as the current text line and centres the ring
+/// in it, so it shares a baseline with the label next to it whatever the font
+/// size is. The previous version centred on (x + radius + 2, y + radius) while
+/// reserving a box of (radius * 2 + 4) on both axes: the ring sat 2 px high
+/// inside its own box, and since it was drawn from the top of a 32 px action
+/// row the whole thing rode above the button it was meant to sit beside.
 static void draw_spinner(float radius, int segments, float speed) {
-    float t = (float)ImGui::GetTime() * speed;
+    const float t = (float)ImGui::GetTime() * speed;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    ImVec2 c(p.x + radius + 2, p.y + radius);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+
+    // Square, so the ring never has to be nudged off-centre to fit.
+    const float line_h = ImGui::GetTextLineHeight();
+    const float extent = (radius * 2.0f + 4.0f) > line_h ? (radius * 2.0f + 4.0f) : line_h;
+    // Centre on the text line, which is what the neighbours on this row use as
+    // their baseline, rather than on the box's own origin.
+    const ImVec2 c(p.x + extent * 0.5f, p.y + line_h * 0.5f);
+
     for (int i = 0; i < segments; i++) {
-        float a = ((float)i / segments) * 6.2832f + t;
-        float r = radius * 0.5f + radius * 0.5f * ((float)i / segments);
-        float fade = (float)i / segments;
-        ImVec4 col(0.3f + fade * 0.4f, 0.6f + fade * 0.2f, 1.0f, 0.3f + fade * 0.7f);
+        const float phase = (float)i / segments;
+        const float a = phase * 6.2832f + t;
+        // Dots grow and brighten along the tail, so rotation is readable even
+        // when the ring is small.
+        const float r = radius * 0.5f + radius * 0.5f * phase;
+        const ImVec4 col(0.3f + phase * 0.4f, 0.6f + phase * 0.2f, 1.0f, 0.3f + phase * 0.7f);
         dl->AddCircleFilled(ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r),
-                            1.5f + fade, ImGui::ColorConvertFloat4ToU32(col));
+                            1.5f + phase, ImGui::ColorConvertFloat4ToU32(col));
     }
-    ImGui::Dummy(ImVec2(radius * 2 + 4, radius * 2 + 4));
+    ImGui::Dummy(ImVec2(extent, extent));
 }
 
 void ui_init() {
@@ -2001,25 +2035,37 @@ void ui_init() {
         g_app.add_log(4, ("[ui] identity file: " + resolve_data_path(g_app.config_path)).c_str());
         s_config_loaded.store(true, std::memory_order_release);
         ui_request_redraw();   // the first real frame becomes paintable
+        // Nothing here needs the parent to be gone: process teardown is
+        // independent, and there is no lock either process takes. The wait used
+        // to run right here, in front of fcae_init(), so every byte of engine
+        // setup was serialised behind a parent that can take its full eight
+        // seconds to exit -- most of why an elevated start felt slow. It now
+        // runs on its own thread purely to record how long the parent took,
+        // and initialisation begins immediately.
         #ifdef _WIN32
         DWORD handoff_pid = 0;
-        DWORD handoff_result = WAIT_FAILED;
         int argc = 0;
         LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         if (argv) {
             if (argc == 3 && std::wcscmp(argv[1], L"--fcae-wait-parent") == 0) {
                 wchar_t* end = nullptr;
                 unsigned long pid = std::wcstoul(argv[2], &end, 10);
-                if (end != argv[2] && *end == L'\0' && pid != 0 && pid != GetCurrentProcessId()) {
+                if (end != argv[2] && *end == L'\0' && pid != 0 && pid != GetCurrentProcessId())
                     handoff_pid = static_cast<DWORD>(pid);
-                    HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, handoff_pid);
-                    if (parent) {
-                        handoff_result = WaitForSingleObject(parent, 8000);
-                        CloseHandle(parent);
-                    }
-                }
             }
             LocalFree(argv);
+        }
+        if (handoff_pid) {
+            fcae_ui_diagnostic(6, handoff_pid);
+            std::thread([handoff_pid] {
+                DWORD handoff_result = WAIT_FAILED;
+                HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, handoff_pid);
+                if (parent) {
+                    handoff_result = WaitForSingleObject(parent, 8000);
+                    CloseHandle(parent);
+                }
+                fcae_ui_diagnostic(7, handoff_result);
+            }).detach();
         }
         #endif
         bool runtime_ok = true;
@@ -2034,12 +2080,6 @@ void ui_init() {
             g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
             runtime_ok = false;
         }
-#ifdef _WIN32
-        if (handoff_pid) {
-            fcae_ui_diagnostic(6, handoff_pid);
-            fcae_ui_diagnostic(7, handoff_result);
-        }
-#endif
         if (runtime_ok && g_app.mode == 1)
             fcae_ui_diagnostic(0, uint32_t(g_app.tun_engine));
 
@@ -2070,12 +2110,35 @@ static void render_startup_shell(bool failed) {
                               : ImVec4(0.55f, 0.58f, 0.65f, 1.0f),
                        failed ? "INITIALIZATION FAILED" : "INITIALIZING...");
     ImGui::BeginDisabled();
-    ImGui::Button(" CONNECT ", ImVec2(140, 34));
+    ImGui::Button("CONNECT", ImVec2(140, 34));
     ImGui::EndDisabled();
     ImGui::End();
 }
 
 void ui_frame() {
+    // An elevation hand-off is armed on a worker and has to be finished on this
+    // thread. This is the only place that keeps running: the old single call
+    // site was inside the CONNECT click handler, one instant after arming the
+    // flag, so at the moment it ran the flag was still clear and the check
+    // never fired again -- the relaunched elevated instance appeared while this
+    // one went on living, which is the second window behind it.
+    ui_handoff_tick();
+
+    // The user's text scale, applied every frame. Font size is not baked at
+    // init in this ImGui: the base size is multiplied by the scale factors
+    // each frame and glyphs are rasterised per size on demand, so this is a
+    // live setting, not a restart-to-apply one. FontSizeBase itself is left
+    // alone -- ImGui resolves it from the loaded font on the first frame --
+    // and per-monitor DPI stays the host's business (style.FontScaleDpi), so
+    // the two factors never compound.
+    {
+        ImGuiStyle& style = ImGui::GetStyle();
+        float user_scale = (float)g_app.ui_scale_percent / 100.0f;
+        if (user_scale < 0.75f) user_scale = 0.75f;
+        if (user_scale > 2.50f) user_scale = 2.50f;
+        if (style.FontScaleMain != user_scale) style.FontScaleMain = user_scale;
+    }
+
     // Consume the request before drawing so a request arriving during this
     // frame (including initialization completing) remains pending.
     g_app.redraw_requested.exchange(false);
@@ -4182,7 +4245,11 @@ void render_ui() {
         const bool tun_paused = s_tun_paused;
         // Height of the control row that holds CONNECT/DISCONNECT, the TUN
         // pause pair and the state label, so all three share one centre line.
-        constexpr float kActionRowHeight = 32.0f;
+        // The row is as tall as the text needs, never less than the 32 px it
+        // is designed at: a raised text scale has to grow the button rather
+        // than let the label run past its edge.
+        const float kActionRowHeight = (ImGui::GetFrameHeight() > 32.0f)
+                                     ? ImGui::GetFrameHeight() : 32.0f;
 
         ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
         ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
@@ -4193,7 +4260,7 @@ void render_ui() {
         float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 130.0f;
         bool show_disconnect = connected || busy || tun_paused;
         if (startup) ImGui::BeginDisabled();
-        if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, kActionRowHeight))) {
+        if (ImGui::Button(show_disconnect ? "DISCONNECT" : "CONNECT", ImVec2(btn_w, kActionRowHeight))) {
             if (connected || busy || errored || tun_paused) {
                 g_app.start_busy.store(false);
                 // Cut the data plane on this click before thread scheduling can
@@ -4515,7 +4582,7 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, start_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
-                if (ImGui::Button(" START ", ImVec2(70, kActionRowHeight))) {
+                if (ImGui::Button("START", ImVec2(70, kActionRowHeight))) {
                     std::thread([] {
                         if (fcae_resume_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -4530,7 +4597,7 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, stop_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
-                if (ImGui::Button(" STOP ", ImVec2(70, kActionRowHeight))) {
+                if (ImGui::Button("STOP", ImVec2(70, kActionRowHeight))) {
                     std::thread([] {
                         if (fcae_pause_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -4574,6 +4641,11 @@ void render_ui() {
         if (!narrow) ImGui::SameLine(0, 10);
         {
             float btn_width = 136.0f;
+            // The button height follows the text: at 32 px exactly, a raised
+            // text scale would push the label past the button's edge. The
+            // designed 32 px stays the floor.
+            const float update_btn_h = (ImGui::GetFrameHeight() > 32.0f)
+                                     ? ImGui::GetFrameHeight() : 32.0f;
             {
                 const float right_x = ImGui::GetWindowContentRegionMax().x - btn_width;
                 if (ImGui::GetCursorPosX() < right_x)
@@ -4598,14 +4670,14 @@ void render_ui() {
                     snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.76f, 0.19f, 0.19f, 1.0f));
-                    if (ImGui::Button("Check Timed Out", ImVec2(btn_width, 32)))
+                    if (ImGui::Button("Check Timed Out", ImVec2(btn_width, update_btn_h)))
                         s_update_error_popup_open = true;
                     ImGui::PopStyleColor(2);
                 } else {
                     char checking_label[32];
                     snprintf(checking_label, sizeof(checking_label), "Checking... %llds", (long long)elapsed);
                     ImGui::BeginDisabled();
-                    ImGui::Button(checking_label, ImVec2(btn_width, 32));
+                    ImGui::Button(checking_label, ImVec2(btn_width, update_btn_h));
                     ImGui::EndDisabled();
                 }
             } else if (done && info.update_available) {
@@ -4621,7 +4693,7 @@ void render_ui() {
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
-                if (ImGui::Button("Update Available!", ImVec2(btn_width, 32))) {
+                if (ImGui::Button("Update Available!", ImVec2(btn_width, update_btn_h))) {
                     s_update_popup_open = true;
                 }
                 ImGui::PopStyleColor(2);
@@ -4636,7 +4708,7 @@ void render_ui() {
                     if (new_result) s_update_decode_popup_open = true;
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.78f, 0.16f, 0.16f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.22f, 0.22f, 1.0f));
-                    if (ImGui::Button("ATTENTION!", ImVec2(btn_width, 32)))
+                    if (ImGui::Button("ATTENTION!", ImVec2(btn_width, update_btn_h)))
                         s_update_decode_popup_open = true;
                     ImGui::PopStyleColor(2);
                 } else {
@@ -4648,7 +4720,7 @@ void render_ui() {
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                         failed ? ImVec4(0.76f, 0.19f, 0.19f, 1.0f)
                                : ImVec4(0.16f, 0.60f, 0.26f, 1.0f));
-                    if (ImGui::Button(failed ? "Check Failed" : "Up to Date", ImVec2(btn_width, 32))) {
+                    if (ImGui::Button(failed ? "Check Failed" : "Up to Date", ImVec2(btn_width, update_btn_h))) {
                         if (failed) {
                             s_update_error_popup_open = true;
                         } else {
@@ -4661,7 +4733,7 @@ void render_ui() {
                     ImGui::PopStyleColor(2);
                 }
             } else {
-                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 32))) {
+                if (ImGui::Button("Check for Updates", ImVec2(btn_width, update_btn_h))) {
                     fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
                     s_update_checked = false;
                     s_update_available = false;

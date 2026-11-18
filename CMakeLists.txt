@@ -155,6 +155,81 @@ set(UI_SOURCES
     ${CMAKE_SOURCE_DIR}/src_cpp/ui_render.cpp
 )
 
+# ---------------------------------------------------------------------------
+# FreeType (optional text rasteriser)
+#
+# ImGui's default rasteriser is stb_truetype; misc/freetype/imgui_freetype.cpp
+# swaps in FreeType, which hints glyph stems so small UI text stays crisp and
+# renders each size on demand instead of baking a fixed atlas.
+#
+# Deliberately a soft dependency:
+#   * nothing defines IMGUI_ENABLE_FREETYPE globally. That define makes
+#     imgui.cpp require the FreeType symbol, so a machine without the library
+#     would fail to link instead of falling back. The UI selects the loader at
+#     runtime with io.Fonts->SetFontLoader(), which is in imgui.h's public API.
+#   * the Windows build here is cross-compiled on Linux. A host libfreetype
+#     found by find_package() would be x86-64 ELF, and linking it into a PE
+#     binary fails at the link step -- the late, all-platform-broken kind of
+#     failure this project keeps paying for. So a cross build never looks for
+#     it: -DFCAE_FREETYPE=system is the explicit opt-in, -DFCAE_FREETYPE=OFF
+#     the explicit opt-out, and AUTO skips the Windows cross build.
+#
+# FCAE_FREETYPE_ENABLED is what the UI sees, via a generated define, so the
+# runtime call and the compiled-in loader can never disagree.
+# ---------------------------------------------------------------------------
+set(FCAE_FREETYPE "AUTO" CACHE STRING
+    "FreeType text rasteriser: AUTO, ON, system, or OFF")
+
+set(FCAE_FREETYPE_ENABLED FALSE)
+set(FCAE_FREETYPE_SOURCE "")
+
+if(NOT FCAE_FREETYPE STREQUAL "OFF")
+    set(_ft_may_look TRUE)
+    # A cross build cannot use libraries from the build machine's sysroot.
+    if(CMAKE_CROSSCOMPILING AND NOT FCAE_FREETYPE STREQUAL "system"
+            AND NOT FCAE_FREETYPE STREQUAL "ON")
+        message(STATUS "FreeType: skipped (cross-compiling; pass -DFCAE_FREETYPE=system to force)")
+        set(_ft_may_look FALSE)
+    endif()
+
+    if(_ft_may_look)
+        find_package(Freetype QUIET)
+        if(FREETYPE_FOUND AND FREETYPE_INCLUDE_DIRS)
+            set(FCAE_FREETYPE_ENABLED TRUE)
+            set(FCAE_FREETYPE_SOURCE "${FREETYPE_LIBRARY}")
+            message(STATUS "FreeType: ${FREETYPE_VERSION_STRING} (${FREETYPE_LIBRARY})")
+        elseif(FCAE_FREETYPE STREQUAL "ON" OR FCAE_FREETYPE STREQUAL "system")
+            message(FATAL_ERROR
+                "FCAE_FREETYPE=${FCAE_FREETYPE} but no FreeType was found. "
+                "Install libfreetype6-dev / freetype2, or set -DFCAE_FREETYPE=OFF.")
+        else()
+            message(STATUS "FreeType: not found, using ImGui's built-in rasteriser")
+        endif()
+    endif()
+endif()
+
+if(FCAE_FREETYPE_ENABLED)
+    list(APPEND IMGUI_SOURCES ${IMGUI_DIR}/misc/freetype/imgui_freetype.cpp)
+endif()
+
+# One helper, so the three platform targets cannot drift apart on this: adds
+# the include paths, the define ui_render.cpp tests, and the library.
+function(fcae_apply_freetype target_name)
+    if(NOT FCAE_FREETYPE_ENABLED)
+        return()
+    endif()
+    target_include_directories(${target_name} PRIVATE
+        ${FREETYPE_INCLUDE_DIRS}
+        ${IMGUI_DIR}/misc/freetype
+    )
+    target_compile_definitions(${target_name} PRIVATE FCAE_HAVE_FREETYPE=1)
+    if(FREETYPE_LIBRARIES)
+        target_link_libraries(${target_name} PRIVATE ${FREETYPE_LIBRARIES})
+    elseif(FREETYPE_LIBRARY)
+        target_link_libraries(${target_name} PRIVATE ${FREETYPE_LIBRARY})
+    endif()
+endfunction()
+
 # Public C header for the FFI layer, so sources just #include "fcae.h".
 set(FCAE_FFI_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/core/fcae-ffi/include)
 
@@ -671,6 +746,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         ${UI_SOURCES}
         ${CMAKE_SOURCE_DIR}/src_cpp/icon.rc
     )
+    fcae_apply_freetype(fcaevpn)
 
     target_include_directories(fcaevpn PRIVATE
         ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}
@@ -775,6 +851,7 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         ${CMAKE_SOURCE_DIR}/src_cpp/main_macos_metal.mm
         ${UI_SOURCES}
     )
+    fcae_apply_freetype(fcaevpn)
 
     target_include_directories(fcaevpn PRIVATE
         ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}
@@ -929,6 +1006,7 @@ elseif(UNIX)
         ${CMAKE_SOURCE_DIR}/src_cpp/main_linux_glfw.cpp
         ${UI_SOURCES}
     )
+    fcae_apply_freetype(fcaevpn)
 
     target_include_directories(fcaevpn PRIVATE
         ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}

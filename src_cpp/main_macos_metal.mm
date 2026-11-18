@@ -36,14 +36,20 @@
 #include <thread>
 
 #include "imgui.h"
+#if defined(FCAE_HAVE_FREETYPE)
+#include "imgui_freetype.h"
+#endif
 #include "imgui_impl_metal.h"
 #include "imgui_impl_osx.h"
 
 #include "ui_render.h"
 
-// The GLFW build asked for a 1024x700 window; keep the same one.
-static constexpr int kWindowWidth = 1024;
-static constexpr int kWindowHeight = 700;
+// The designed window size in points. AppKit works in points, so a Retina
+// display and a 1x display both get the same physical size from these numbers
+// without any scaling here; the ImGui side still needs the backing scale, which
+// is applied as style.FontScaleDpi below.
+static constexpr int kWindowWidth = 1180;
+static constexpr int kWindowHeight = 780;
 // The render gate's frame cadence, matching the GLFW host's 33 ms.
 static constexpr double kMinFrameInterval = 33.0 / 1000.0;
 // Upper bound on a single run-loop wait: how late a redraw requested by a
@@ -202,10 +208,13 @@ static id g_eventMonitor = nil;
     (void)notification;
 
     NSRect frame = NSMakeRect(0, 0, kWindowWidth, kWindowHeight);
-    NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-                            | NSWindowStyleMaskMiniaturizable;
+    // `styleMask`, not `style`: the ImGui style block further down this same
+    // function declares `style` too, and a window mask and an ImGuiStyle&
+    // cannot share a scope.
+    NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                                | NSWindowStyleMaskMiniaturizable;
     self.window = [[NSWindow alloc] initWithContentRect:frame
-                                             styleMask:style
+                                             styleMask:styleMask
                                                backing:NSBackingStoreBuffered
                                                  defer:NO];
     self.window.title = @"FCAE VPN";
@@ -215,6 +224,14 @@ static id g_eventMonitor = nil;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    // FreeType replaces the default glyph rasteriser when the build found it.
+    // Set before the font atlas is first built (the first frame does that), so
+    // the loader is in place for the initial bake. Through public API only:
+    // nothing defines IMGUI_ENABLE_FREETYPE, which would make the symbol a hard
+    // link requirement on machines that do not have the library.
+#if defined(FCAE_HAVE_FREETYPE)
+    ImGui::GetIO().Fonts->SetFontLoader(ImGuiFreeType::GetFontLoader());
+#endif
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -222,6 +239,10 @@ static id g_eventMonitor = nil;
     // One style block, shared by every desktop front end.
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
+    // Points per pixel for this display: 2 on Retina, 1 otherwise. The user's
+    // text scale multiplies in from ui_frame() as FontScaleMain.
+    style.FontScaleDpi      = self.window.backingScaleFactor > 0.0
+                            ? (float)self.window.backingScaleFactor : 1.0f;
     style.WindowRounding    = 10.0f;
     style.FrameRounding     = 6.0f;
     style.GrabRounding      = 4.0f;

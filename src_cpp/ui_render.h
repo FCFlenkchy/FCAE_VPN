@@ -309,6 +309,12 @@ struct AppState {
     uint64_t logs_revision = 0; // guarded by logs_mutex, including ring eviction
     size_t logs_bytes = 0;
     std::atomic<bool> logging_enabled{true};
+    /// UI text scale in percent, applied every frame as style.FontScaleMain on
+    /// top of the host's per-monitor DPI factor. Rows size themselves from the
+    /// resulting font height, so buttons and spacing grow with the text instead
+    /// of clipping it. 100 = as designed; 75..250 is the accepted range, and
+    /// the fallback for a display whose scaling the window does not inherit.
+    int  ui_scale_percent = 100;
     bool auto_update_check  = true;
     // Update channel: off = stable slot only; on = pre-releases also compete
     // (engine picks the higher of the two). Default off. Toggling the Logs-tab

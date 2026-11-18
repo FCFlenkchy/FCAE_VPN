@@ -16,6 +16,9 @@
 #endif
 
 #include "imgui.h"
+#if defined(FCAE_HAVE_FREETYPE)
+#include "imgui_freetype.h"
+#endif
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
@@ -95,13 +98,37 @@ int main(int argc, char** argv) {
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "fcaevpn");
 #endif
 
-    GLFWwindow* window = glfwCreateWindow(1024, 700, "FCAE VPN", nullptr, nullptr);
+    // The designed size in 96-DPI units, scaled by the desktop's text scale.
+    // Creating at a fixed 1024x700 and letting the compositor scale it is what
+    // made the window read as small under a fractional or 200% desktop scale.
+    // GLFW can only answer this once a monitor is known, and on Wayland only
+    // after the window exists, so the size is corrected below as well.
+    constexpr int kWindowWidthDip  = 1180;
+    constexpr int kWindowHeightDip = 780;
+    float content_scale = 1.0f;
+    {
+        GLFWmonitor* primary = glfwGetPrimaryMonitor();
+        if (primary != nullptr) glfwGetMonitorContentScale(primary, &content_scale, nullptr);
+    }
+    if (!(content_scale > 0.0f)) content_scale = 1.0f;
+
+    GLFWwindow* window = glfwCreateWindow((int)(kWindowWidthDip * content_scale + 0.5f),
+                                          (int)(kWindowHeightDip * content_scale + 0.5f),
+                                          "FCAE VPN", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 1;
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    // Authoritative scale for this window (a different monitor may have a
+    // different one than the primary used above).
+    {
+        float sx = 1.0f, sy = 1.0f;
+        glfwGetWindowContentScale(window, &sx, &sy);
+        if (sx > 0.0f) content_scale = sx;
+    }
 
     {
         GLFWimage icons[sizeof(FCAE_ICONS) / sizeof(FCAE_ICONS[0])];
@@ -139,12 +166,23 @@ int main(int argc, char** argv) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    // FreeType replaces the default glyph rasteriser when the build found it.
+    // Set before the font atlas is first built (the first frame does that), so
+    // the loader is in place for the initial bake. Through public API only:
+    // nothing defines IMGUI_ENABLE_FREETYPE, which would make the symbol a hard
+    // link requirement on machines that do not have the library.
+#if defined(FCAE_HAVE_FREETYPE)
+    ImGui::GetIO().Fonts->SetFontLoader(ImGuiFreeType::GetFontLoader());
+#endif
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
+    // Per-monitor factor, on top of which ui_frame() applies the user's own
+    // text scale through FontScaleMain.
+    style.FontScaleDpi     = content_scale;
     style.WindowRounding   = 10.0f;
     style.FrameRounding    = 6.0f;
     style.GrabRounding     = 4.0f;
