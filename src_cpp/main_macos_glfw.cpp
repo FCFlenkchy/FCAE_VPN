@@ -109,6 +109,10 @@ int main(int argc, char** argv) {
     style.ScrollbarRounding = 6.0f;
     style.FramePadding      = ImVec2(10, 6);
     style.WindowPadding     = ImVec2(16, 12);
+    // Button labels sit in the middle of their box on every platform: the
+    // default left alignment read as off-centre wherever a label was narrower
+    // than the fixed width these rows use.
+    style.ButtonTextAlign  = ImVec2(0.5f, 0.5f);
 
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_WindowBg]        = ImVec4(0.08f, 0.08f, 0.12f, 1.0f);

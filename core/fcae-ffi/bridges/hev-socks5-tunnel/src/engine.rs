@@ -316,6 +316,10 @@ impl HevSocks5TunnelBridge {
 
     /// The engine's quit request. Non-Windows calls in place; Windows queues
     /// the call to the run's own call thread so it never runs on the UI thread.
+    ///
+    /// A run that already returned on its own is a failure, not a teardown: the
+    /// engine reports the exit itself, and logging "down" here would describe a
+    /// session that never came up.
     fn signal_stop(&self) -> bool {
         if !self.running.swap(false, Ordering::SeqCst) { return false; }
         #[cfg(not(windows))]
@@ -571,6 +575,11 @@ impl HevSocks5TunnelBridge {
             configured
         };
         if outcome.is_err() {
+            // The run is unwound through the engine's own quit; this says why it
+            // is being unwound, which is the only line a failure leaves behind.
+            if !self.closing.load(Ordering::SeqCst) && !self.running.load(Ordering::SeqCst) {
+                log::warn!("[tun:hev] the engine stopped on its own during startup");
+            }
             self.shutdown(RESTART_GRACE);
         }
         #[cfg(windows)]

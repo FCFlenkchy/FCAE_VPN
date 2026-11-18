@@ -4163,6 +4163,9 @@ void render_ui() {
 
 
         const bool tun_paused = s_tun_paused;
+        // Height of the control row that holds CONNECT/DISCONNECT, the TUN
+        // pause pair and the state label, so all three share one centre line.
+        constexpr float kActionRowHeight = 32.0f;
 
         ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
         ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
@@ -4173,7 +4176,7 @@ void render_ui() {
         float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 130.0f;
         bool show_disconnect = connected || busy || tun_paused;
         if (startup) ImGui::BeginDisabled();
-        if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 32))) {
+        if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, kActionRowHeight))) {
             if (connected || busy || errored || tun_paused) {
                 g_app.start_busy.store(false);
                 // Cut the data plane on this click before thread scheduling can
@@ -4495,7 +4498,7 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, start_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
-                if (ImGui::Button(" START ", ImVec2(70, 32))) {
+                if (ImGui::Button(" START ", ImVec2(70, kActionRowHeight))) {
                     std::thread([] {
                         if (fcae_resume_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -4510,7 +4513,7 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, stop_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
-                if (ImGui::Button(" STOP ", ImVec2(70, 32))) {
+                if (ImGui::Button(" STOP ", ImVec2(70, kActionRowHeight))) {
                     std::thread([] {
                         if (fcae_pause_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -4523,6 +4526,10 @@ void render_ui() {
         }
 
         ImGui::SameLine(0, 10);
+        // One line of text in a 32 px action row: shift it down by the half of
+        // the difference so it sits on the buttons' centre line instead of
+        // hugging their top edge.
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (kActionRowHeight - ImGui::GetTextLineHeight()) * 0.5f);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         if (startup) {
             ImGui::TextUnformatted("INITIALIZING...");
@@ -4555,7 +4562,6 @@ void render_ui() {
                 if (ImGui::GetCursorPosX() < right_x)
                     ImGui::SetCursorPosX(right_x);
             }
-            ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
             FcaeUpdateInfo info = {};
             info.struct_size = sizeof(info);
             info.abi_version = FCAE_ABI_VERSION;
@@ -4645,7 +4651,6 @@ void render_ui() {
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
             }
-            ImGui::PopStyleVar(); // Pop ButtonTextAlign
         }
         if (startup) ImGui::EndDisabled();
 
