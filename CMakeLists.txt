@@ -752,38 +752,27 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
 elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "MACOS_X64")
 
-    # Find GLFW: CI-built static prefixes first, then system GLFW.
-    set(GLFW_PREFIX_HINT "")
-    if(AETHER_TARGET STREQUAL "MACOS_X64" OR (APPLE AND NOT AETHER_TARGET STREQUAL "MACOS_ARM64" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64"))
-        set(GLFW_PREFIX_HINT /usr/local/glfw_x64)
-    elseif(AETHER_TARGET STREQUAL "MACOS_ARM64" OR (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64"))
-        set(GLFW_PREFIX_HINT /usr/local/glfw_arm64)
+    # No windowing library and no OpenGL: macOS renders through AppKit and
+    # Metal, both of which are in the OS. Metal is the only graphics API Apple
+    # still develops, and the one the iOS front end would use too.
+    # Objective-C++ for the two ImGui Apple backends and this host. ARC stays
+    # off, which is both clang's default and what the backends assume: they hand
+    # raw pointers to ImGui and pair their own retains with releases.
+    #
+    # Only enabled when the host is Apple: CMake probes the language with a real
+    # trial compile, so enabling it on a host without an Objective-C++ front end
+    # would fail during configure. A cross build that reaches this branch with
+    # AETHER_TARGET set to a macOS target has to bring its own toolchain file and
+    # enable OBJCXX there, because compiling a macOS app at all needs the SDK.
+    if(APPLE)
+        enable_language(OBJCXX)
     endif()
-
-    if(GLFW_PREFIX_HINT AND EXISTS "${GLFW_PREFIX_HINT}")
-        # Add the prefix to CMAKE_PREFIX_PATH so find_package finds our static build
-        list(APPEND CMAKE_PREFIX_PATH "${GLFW_PREFIX_HINT}")
-        message(STATUS "GLFW hint prefix: ${GLFW_PREFIX_HINT}")
-    endif()
-
-    find_package(glfw3 3.3 QUIET)
-    if(NOT glfw3_FOUND)
-        # Try pkg-config for GLFW
-        find_package(PkgConfig QUIET)
-        if(PKG_CONFIG_FOUND)
-            pkg_check_modules(GLFW glfw3)
-        endif()
-    endif()
-    if(NOT glfw3_FOUND AND NOT GLFW_FOUND)
-        message(FATAL_ERROR "GLFW 3.3+ not found. Install glfw or set CMAKE_PREFIX_PATH")
-    endif()
-    find_package(OpenGL REQUIRED)
 
     add_executable(fcaevpn
         ${IMGUI_SOURCES}
-        ${IMGUI_BACKEND_DIR}/imgui_impl_glfw.cpp
-        ${IMGUI_BACKEND_DIR}/imgui_impl_opengl3.cpp
-        ${CMAKE_SOURCE_DIR}/src_cpp/main_macos_glfw.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_metal.mm
+        ${IMGUI_BACKEND_DIR}/imgui_impl_osx.mm
+        ${CMAKE_SOURCE_DIR}/src_cpp/main_macos_metal.mm
         ${UI_SOURCES}
     )
 
@@ -795,7 +784,6 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     )
 
     target_compile_definitions(fcaevpn PRIVATE
-        IMGUI_IMPL_OPENGL_LOADER_GL3W
         AETHER_TARGET_MACOS
         FCAE_VERSION="${FCAE_VERSION}"
     )
@@ -832,16 +820,15 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         fcae_cronet_stage_darwin(fcaevpn "${FCAE_CRONET_A}" "${FCAE_CRONET_ARCH}")
     endif()
 
-    # Link GLFW: use target if available (static), otherwise fall back to lib name
-    if(TARGET glfw)
-        target_link_libraries(fcaevpn PRIVATE glfw)
-    else()
-        target_link_libraries(fcaevpn PRIVATE ${GLFW_LIBRARIES})
-    endif()
-
     target_link_libraries(fcaevpn PRIVATE
-        OpenGL::GL
+        # AppKit draws the window, Metal draws the UI, QuartzCore supplies the
+        # CAMetalLayer the view presents through. The ImGui OSX backend also
+        # needs GameController for its gamepad path.
         "-framework Cocoa"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+        "-framework GameController"
         "-framework IOKit"
         "-framework CoreFoundation"
         "-framework CoreVideo"
@@ -949,6 +936,14 @@ elseif(UNIX)
         ${CMAKE_SOURCE_DIR}/src_cpp
         ${CMAKE_BINARY_DIR}
     )
+
+    # ui_render.cpp calls glfwPostEmptyEvent() so a change reported from a
+    # worker thread ends the host's wait immediately. The glfw CMake target
+    # carries its include directory, but the pkg-config fallback below exports
+    # only library paths, so add the headers explicitly.
+    if(GLFW_INCLUDE_DIRS)
+        target_include_directories(fcaevpn PRIVATE ${GLFW_INCLUDE_DIRS})
+    endif()
 
     target_compile_definitions(fcaevpn PRIVATE
         IMGUI_IMPL_OPENGL_LOADER_GL3W

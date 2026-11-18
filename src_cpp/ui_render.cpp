@@ -20,6 +20,12 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#elif defined(__linux__) && !defined(ANDROID)
+// The Linux host blocks in glfwWaitEventsTimeout(). A change reported from a
+// worker thread has to be able to end that wait early, or it appears only
+// after the idle timeout has elapsed -- a late repaint the user sees as a
+// flicker. GLFW's empty-event post is the thread-safe way to do that.
+#include <GLFW/glfw3.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <pwd.h>
@@ -752,6 +758,12 @@ void ui_request_redraw() {
     g_app.redraw_requested.store(true);
 #ifdef _WIN32
     if (auto window = reinterpret_cast<HWND>(s_ui_window.load())) PostMessageW(window, WM_NULL, 0, 0);
+#elif defined(__linux__) && !defined(ANDROID)
+    // Returns the host's wait immediately so the next frame is the one that
+    // shows the change. Safe from any thread, and a no-op before the host has
+    // registered its window. macOS renders through Metal: AppKit may only be
+    // poked from the main thread, so that host bounds its wait instead.
+    if (auto window = reinterpret_cast<GLFWwindow*>(s_ui_window.load())) glfwPostEmptyEvent();
 #endif
 }
 

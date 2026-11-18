@@ -83,10 +83,16 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // Window events that change what should be on screen: ask for exactly
         // one repaint instead of leaving the loop free-running. (Resize/DPI also
         // rebuild the swapchain, in the WM_SIZE case below.)
-        // A posted wake-up from ui_request_redraw(). Handled so the message is
-        // never treated as unhandled; the redraw flag itself is already set.
         case WM_NULL:
-            ui_request_redraw();
+            // A posted wake-up from ui_request_redraw(): the redraw flag it set
+            // is the whole message, so this only has to consume it.
+            //
+            // It must NOT call ui_request_redraw() here. That stores the flag
+            // and posts WM_NULL again, from inside this very handler, so every
+            // wake-up posted the next one: the queue never emptied, the pump
+            // below never reached a frame, and the client area stayed at the
+            // class background -- a white, frozen window that still accepted
+            // clicks. The flag is already set by whoever posted this.
             return 0;
         case WM_PAINT:
         case WM_DPICHANGED:
@@ -229,7 +235,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Redraw requests arrive from worker threads as a posted message, which
     // must not be filtered for this class, and the window must repaint when it
     // is resized or uncovered.
-    wc.style         = CS_CLASSDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW;
+    // CS_OWNDC: the device context the swap chain presents through belongs to
+    // the window class for the life of the window.
+    wc.style         = CS_OWNDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = inst;
     wc.hIcon         = LoadIconW(inst, MAKEINTRESOURCEW(IDI_ICON1));
@@ -238,6 +246,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     wc.hIconSm       = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON,
                                          GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
                                          LR_DEFAULTCOLOR);
+    // An explicit background brush rather than the default white: uncovered
+    // edges, and the moments before the first frame reaches the flip chain,
+    // must show the UI's own background, not a white sheet.
+    wc.hbrBackground = CreateSolidBrush(RGB(13, 13, 20));   // 0.05, 0.05, 0.08
     if (!wc.hIcon) {
         wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     }
@@ -413,7 +425,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         ImGui::Render();
 
-        // WM_SIZE can invalidate the render target between NewFrame and Render.
+        // ImGui has a frame open from NewFrame() until Render(), and its
+        // assertion against a second NewFrame() is compiled out in Release.
+        // Any `continue` between the two therefore corrupted the next frame --
+        // which is exactly what a WM_SIZE arriving mid-frame can cause, because
+        // it can take the render target away here. Abandoning the frame costs
+        // one unlock, and the next NewFrame() opens a clean one.
+        ImGui::EndFrame();
         if (!g_mainRenderTargetView) continue;
 
         const float clear_color[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
@@ -436,5 +454,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     CleanupDeviceD3D();
     DestroyWindow(hWnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    if (wc.hbrBackground) DeleteObject(wc.hbrBackground);
     return 0;
 }

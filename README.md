@@ -53,7 +53,7 @@ Aether supports custom routing rules directly in the UI (Routes tab) without nee
 |----------|---------|----|
 | Windows | DirectX 11 | ImGui |
 | Linux | GLFW + OpenGL | ImGui |
-| macOS | GLFW + OpenGL | ImGui |
+| macOS | AppKit + Metal | ImGui |
 | Android | Kotlin Material VpnService + JNI bridge | Kotlin Material UI |
 
 ### Screenshots

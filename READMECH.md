@@ -53,7 +53,7 @@ FCAE VPN 是一款适用于 Windows、Linux、macOS 和 Android 的审查绕过�
 |----------|---------|----|
 | Windows | DirectX 11 | ImGui |
 | Linux | GLFW + OpenGL | ImGui |
-| macOS | GLFW + OpenGL | ImGui |
+| macOS | AppKit + Metal | ImGui |
 | Android | Kotlin Material VpnService + JNI 桥接 | Kotlin Material UI |
 
 ### 界面截图

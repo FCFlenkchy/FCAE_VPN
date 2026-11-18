@@ -174,6 +174,11 @@ int main(int argc, char** argv) {
     colors[ImGuiCol_SliderGrab]      = ImVec4(0.30f, 0.60f, 0.80f, 1.0f);
     colors[ImGuiCol_SliderGrabActive]= ImVec4(0.35f, 0.70f, 0.90f, 1.0f);
 
+    // Registered before the loop parks, so a redraw requested from a worker
+    // thread can end the wait in glfwWaitEventsTimeout() immediately instead of
+    // arriving as a late repaint after the idle timeout.
+    ui_set_window_handle(window);
+
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
@@ -245,6 +250,7 @@ int main(int argc, char** argv) {
         glfwSwapBuffers(window);
     }
 
+    ui_set_window_handle(nullptr);
     ui_shutdown();
 
     ImGui_ImplOpenGL3_Shutdown();

@@ -181,15 +181,8 @@ jobs:
         timeout-minutes: 15
         run: bash -e scripts/ci/build_steps/install-deps-windows-cross.sh
 
-      - name: cache macos glfw build
-        if: startsWith(matrix.name, 'macos-')
-        id: cache-glfw
-        uses: actions/cache@v6
-        with:
-          # Workspace-relative: caching an absolute /usr/local path made the
-          # macOS runner's gtar fail the restore step outright.
-          path: ${{ github.workspace }}/.glfw/${{ matrix.name }}
-          key: glfw-3.4-${{ matrix.name }}
+      # The macOS front end renders through Metal and links nothing that has to
+      # be built first, so the GLFW cache this job used to restore is gone.
 
       - name: install deps (macOS)
         if: startsWith(matrix.name, 'macos-')

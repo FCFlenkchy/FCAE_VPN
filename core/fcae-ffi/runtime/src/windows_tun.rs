@@ -8,7 +8,7 @@ use windows_sys::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_MO
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
-use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows_sys::Win32::NetworkManagement::Ndis::{IfOperStatusUp, MediaConnectStateConnected, NET_LUID_LH};
 use windows_sys::Win32::Networking::WinSock::*;
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
@@ -30,6 +30,11 @@ pub fn is_privileged() -> bool {
 }
 
 const ADAPTER_GUID: GUID = GUID::from_u128(crate::config::WINTUN_ADAPTER_GUID_U128);
+/// How long the resolver pin check waits for the tunnel adapter to come up.
+/// The engine opens the adapter's session on a thread of its own, so the media
+/// connect can land just after the guard starts looking; a slower engine costs
+/// this bounded wait instead of a failed connect.
+const ADAPTER_UP_BUDGET: Duration = Duration::from_secs(3);
 
 fn checked(code: u32, operation: &str) -> Result<()> {
     if code == 0 { return Ok(()); }
@@ -145,6 +150,40 @@ fn best_route(peer: IpAddr) -> Result<MIB_IPFORWARD_ROW2> {
     let mut source = SOCKADDR_INET::default();
     checked(unsafe { GetBestRoute2(ptr::null(), 0, ptr::null(), &sockaddr(peer), 0, &mut row, &mut source) }, "resolve outer endpoint route")?;
     Ok(row)
+}
+
+/// Whether Windows considers a network interface able to carry traffic.
+///
+/// Not every adapter is up the moment it exists. Wintun's driver tells NDIS the
+/// media is connected only when a session opens its rings, so a freshly created
+/// adapter reads as `IfOperStatusDown` / `MediaConnectStateDisconnected` while
+/// its interface, its addresses and its routes already exist. Adding a row
+/// succeeds in that state and the row really is inserted, but an interface
+/// that is down loses every comparison route selection makes, so a lookup taken
+/// then answers for the physical interface -- and a router that caches that
+/// answer keeps using it after the adapter is up.
+fn interface_up(luid: NET_LUID_LH) -> Result<bool> {
+    let mut row = MIB_IF_ROW2::default();
+    row.InterfaceLuid = luid;
+    checked(unsafe { GetIfEntry2(&mut row) }, "inspect TUN adapter state")?;
+    Ok(row.OperStatus == IfOperStatusUp && row.MediaConnectState == MediaConnectStateConnected)
+}
+
+/// Wait up to `budget` for the adapter to be up, so a route lookup answers for
+/// the interface the tunnel actually is. A transient read failure is treated as
+/// "not up yet": the interface can be missing from the table for a moment while
+/// the driver (re)creates it, and that is the state this wait exists for.
+fn wait_interface_up(luid: NET_LUID_LH, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        match interface_up(luid) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => log::debug!("[tun] TUN adapter state not readable yet: {error}"),
+        }
+        if Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The next hop an exclusion row derived from `physical` must use.
@@ -453,6 +492,14 @@ impl TunGuard {
         }
         // Explicit resolver routes beat LAN prefixes and are never allowed to
         // replace a carrier bypass. WFP still blocks a conflicting route.
+        //
+        // The pins are added first and the lookup comes after them, once the
+        // adapter is actually up. A lookup taken while the device is still
+        // down answers for the physical interface -- so waiting here is what
+        // makes the answer below describe the routing the session will have,
+        // and a router that caches that early answer keeps sending the
+        // resolver's queries out of the physical interface long after the
+        // device is up.
         for server in &servers {
             let ip: IpAddr = server.parse().map_err(|_| CoreError::InvalidConfig(format!("invalid TUN DNS address: {server}")))?;
             if ip.is_ipv6() && !ipv6_available { continue; }
@@ -469,8 +516,25 @@ impl TunGuard {
             row.Metric = 0;
             row.Protocol = MIB_IPPROTO_NETMGMT;
             guard.add_route(row, true)?;
-            if unsafe { best_route(ip)?.InterfaceLuid.Value != luid.Value } {
-                return Err(CoreError::Internal(format!("TUN DNS server {ip} routes outside the tunnel; remove the conflicting route or choose another resolver")));
+        }
+        if !wait_interface_up(luid, ADAPTER_UP_BUDGET) {
+            // The engine never opened a session on the adapter, so nothing can
+            // be verified and nothing should be refused: the pins above still
+            // hold the resolvers to this device, and a session that cannot run
+            // fails where it runs.
+            log::debug!("[tun] TUN adapter {index} did not come up before the resolver check; pins stay in place");
+        } else {
+            for server in &servers {
+                let Ok(ip) = server.parse::<IpAddr>() else { continue };
+                if ip.is_ipv6() && !ipv6_available { continue; }
+                let chosen = best_route(ip)?;
+                if unsafe { chosen.InterfaceLuid.Value } != luid.Value {
+                    log::warn!("[tun] TUN DNS server {ip} resolves through interface {} instead of the tunnel", unsafe { chosen.InterfaceIndex });
+                    return Err(CoreError::Internal(format!(
+                        "TUN DNS server {ip} routes outside the tunnel (interface {} wins it); remove the conflicting route or choose another resolver",
+                        unsafe { chosen.InterfaceIndex }
+                    )));
+                }
             }
         }
         for bypass in &guard.peers {
