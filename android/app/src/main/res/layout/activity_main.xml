@@ -1872,10 +1872,14 @@
                         android:maxLines="1"
                         android:paddingStart="4dp"
                         android:paddingEnd="4dp"
-                        android:singleLine="true"
                         android:text="@string/sponsor_policy_link"
                         android:textColor="#FF60A5FA"
-                        android:textSize="9sp" />
+                        android:textSize="16sp"
+                        android:autoSizeTextType="uniform"
+                        android:autoSizeMinTextSize="11sp"
+                        android:autoSizeMaxTextSize="16sp"
+                        android:autoSizeStepGranularity="1sp"
+                        android:scrollHorizontally="false" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/sponsorRefresh"
