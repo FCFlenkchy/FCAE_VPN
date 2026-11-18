@@ -53,12 +53,13 @@
 static constexpr int kWindowWidth = 1280;
 static constexpr int kWindowHeight = 860;
 
-// The base UI font size, in points: twice the 13 px ImGui's embedded default
-// face used to give this UI, and the size the ui_render.cpp layout is designed
-// against. Without a font at this size the atlas holds only that 13 px bitmap
-// face, which cannot be enlarged without turning into mush. The user's
-// ui_scale_percent multiplies on top through style.FontScaleMain.
-static constexpr float kUiBaseFontSize = 26.0f;
+// The base UI font size, in points, and the size the ui_render.cpp layout is
+// designed against: about 1.7x the 13 px ImGui's embedded default face used to
+// give this UI. Without a font at this size the atlas holds only that 13 px
+// bitmap face, which cannot be enlarged without turning into mush. See the Win32
+// host for why it is not the full 2x. The user's ui_scale_percent multiplies on
+// top through style.FontScaleMain.
+static constexpr float kUiBaseFontSize = 22.0f;
 // The render gate's frame cadence, matching the GLFW host's 33 ms.
 static constexpr double kMinFrameInterval = 33.0 / 1000.0;
 // Upper bound on a single run-loop wait: how late a redraw requested by a

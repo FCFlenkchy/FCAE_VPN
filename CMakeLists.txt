@@ -329,9 +329,35 @@ function(fcae_apply_freetype target_name)
             _fcae_link_static_dep(${target_name} "brotlicommon;brotlicommon-static")
             _fcae_link_static_dep(${target_name} "z;zlib")
         endif()
+        # Newer FreeType (2.15+) builds in an HVF driver for Apple's variable
+        # font support. It is not optional at build time -- configure has no
+        # --without-hvf switch, it just compiles the driver in whenever the SDK
+        # provides <hvf/Scaler.h> -- and the driver calls out to Apple's
+        # /usr/lib/libhvf.dylib. Linking the bare archive therefore leaves eight
+        # _HVF_* symbols unresolved (libhvf.a[26](hvf.o)).
+        #
+        # libhvf is part of the OS, not of FreeType, so it has to be named here
+        # like the other dependencies. It is absent before macOS 15.4, where the
+        # symbols are simply not needed either: if it cannot be found, nothing is
+        # added and the link is attempted as before.
+        if(APPLE)
+            find_library(FCAE_HVF_LIB NAMES hvf)
+            if(FCAE_HVF_LIB)
+                target_link_libraries(${target_name} PRIVATE ${FCAE_HVF_LIB})
+            endif()
+        endif()
+
         if(FREETYPE_LIBRARIES)
+            # Any remaining entry is a dependency FindFreetype knows about. Its
+            # own freetype entry is skipped by *name*, not by comparing against
+            # FCAE_FREETYPE_SOURCE: that variable holds the archive while this
+            # list holds the shared library, so a string compare never matched
+            # and the .dylib was linked right after the .a -- which is the
+            # "ignoring duplicate libraries" warning in the build log, and a
+            # load-time dependency on Homebrew reintroduced by the back door.
             foreach(_ft_dep IN LISTS FREETYPE_LIBRARIES)
-                if(NOT _ft_dep STREQUAL FCAE_FREETYPE_SOURCE)
+                get_filename_component(_ft_base "${_ft_dep}" NAME)
+                if(NOT _ft_base MATCHES "^libfreetype")
                     target_link_libraries(${target_name} PRIVATE ${_ft_dep})
                 endif()
             endforeach()

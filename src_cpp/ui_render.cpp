@@ -3335,6 +3335,38 @@ static void render_firefox_captcha_content() {
     ImGui::Spacing();
 }
 
+/// Width for a dialog, from the widest line it must show *unbroken*.
+///
+/// Pass the structural lines -- endpoint readouts, labels, group headers -- not
+/// sentences. Prose is meant to wrap and TextWrapped() does it; sizing a dialog
+/// to its longest sentence makes a 900 px window for one paragraph. The result
+/// is capped so a dialog never takes over the screen.
+///
+/// These dialogs used to be given fixed widths (480, 520, 500, 560, 440) when
+/// the font was 13 px. At the current base size the connection dialog's longest
+/// listener line is ~617 px, so a 480 px window wrapped it at a point nobody
+/// chose -- which is the "spacing is not automatic" report.
+static ImVec2 dialog_width_for(const char* const* widest_lines, int count, float min_w) {
+    float content_w = min_w;
+    for (int i = 0; i < count; ++i) {
+        if (!widest_lines[i]) continue;
+        const float w = ImGui::CalcTextSize(widest_lines[i]).x;
+        if (w > content_w) content_w = w;
+    }
+    // Both horizontal paddings, plus a scrollbar's worth so a long line does not
+    // sit flush against the bar when one appears.
+    content_w += ImGui::GetStyle().WindowPadding.x * 2.0f
+               + ImGui::GetStyle().ScrollbarSize
+               + 8.0f;
+    // Never wider than 70% of the screen, and never wider than the work area
+    // less a margin: beyond that a dialog stops reading as a dialog.
+    const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+    const float cap = (std::min)(work.x * 0.70f, work.x - 48.0f);
+    if (content_w > cap) content_w = cap;
+    if (content_w < min_w) content_w = min_w;
+    return ImVec2(content_w, 0.0f);
+}
+
 static void constrain_modal();
 
 static void render_firefox_captcha_popup() {
@@ -3345,6 +3377,9 @@ static void render_firefox_captcha_popup() {
         ImGui::OpenPopup(name);
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    // This dialog is prose: its body is TextWrapped(), so it is meant to wrap.
+    // The width only has to be a readable measure, not the length of the
+    // longest sentence -- sizing to prose here produced a 885 px window.
     ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
     constrain_modal();
     if (!ImGui::BeginPopupModal(name, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
@@ -3782,13 +3817,19 @@ static void render_core_editor() {
     // Save only commits a config that validated, so the library never holds one
     // the engine would refuse -- that rejection takes the whole session with it.
     ImGui::BeginDisabled(s_core_status_error);
-    if (ImGui::Button("Save", ImVec2(120, 0))) {
+    // Widths from the labels: 120 was comfortably wide for "Save" and
+    // "Cancel" at 13 px, and measuring keeps that true at any size instead of
+    // by luck.
+    const float dlg_btn_w = (std::max)(ImGui::CalcTextSize("Save").x,
+                                       ImGui::CalcTextSize("Cancel").x)
+                          + ImGui::GetStyle().FramePadding.x * 2.0f + 24.0f;
+    if (ImGui::Button("Save", ImVec2(dlg_btn_w, 0))) {
         apply_core_editor();
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+    if (ImGui::Button("Cancel", ImVec2(dlg_btn_w, 0))) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
 
@@ -3810,7 +3851,16 @@ static void render_core_configs() {
     // whole row, which is why Remove never fired.
     ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Saved configs");
     // The list takes whatever the listeners, the log level and Close leave.
-    const float list_height = std::max(146.0f, ImGui::GetContentRegionAvail().y - 340.0f);
+    // The 340 px reserve was counted in the old font's rows; the footer it
+    // leaves room for is now built from frames and text lines, so the reserve
+    // is expressed the same way. Too small a reserve and the log-level row
+    // below the list is pushed off the bottom of a NoResize window, where it
+    // cannot be scrolled to.
+    const float list_reserve = ImGui::GetFrameHeightWithSpacing() * 6.0f
+                             + ImGui::GetTextLineHeightWithSpacing() * 2.0f
+                             + ImGui::GetStyle().ItemSpacing.y * 4.0f
+                             + 40.0f;
+    const float list_height = (std::max)(146.0f, ImGui::GetContentRegionAvail().y - list_reserve);
     ImGui::BeginChild("##core_list", ImVec2(0, list_height), ImGuiChildFlags_Borders);
     int edit_row = -1;
     int remove_row = -1;
@@ -3871,10 +3921,22 @@ static void render_core_configs() {
     core_listener_block(1);
     ImGui::Spacing();
     ImGui::Separator();
-    ImGui::PushItemWidth(200);
-    const char* core_logs[] = { "Silent", "Error", "Warn", "Info", "Debug", "Trace" };
-    ImGui::Combo("Xray & sing-box log level", &g_app.core_log, core_logs, 6);
-    ImGui::PopItemWidth();
+    // The dropdown has to be wide enough for its own longest option, or the
+    // arrow crowds the text at a larger font. 200 was sized for 13 px type;
+    // this measures the options instead, with 200 kept as the floor.
+    {
+        static const char* const kCoreLogs[] = { "Silent", "Error", "Warn", "Info", "Debug", "Trace" };
+        float log_combo_w = 200.0f;
+        for (const char* level : kCoreLogs) {
+            const float w = ImGui::CalcTextSize(level).x;
+            if (w > log_combo_w) log_combo_w = w;
+        }
+        log_combo_w += ImGui::GetStyle().FramePadding.x * 2.0f
+                     + ImGui::GetFrameHeight() * 0.9f;   // room for the arrow
+        ImGui::PushItemWidth(log_combo_w);
+        ImGui::Combo("Xray & sing-box log level", &g_app.core_log, kCoreLogs, 6);
+        ImGui::PopItemWidth();
+    }
     ImGui::Spacing();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
@@ -4016,6 +4078,8 @@ static void render_firefox_add_account() {
         s_firefox_add_popup_open = false;
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    // Prose dialog: wraps, so the width is a readable measure rather than the
+    // length of its longest sentence.
     ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
     constrain_modal();
     if (!ImGui::BeginPopupModal("Add Firefox account", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
@@ -4061,6 +4125,7 @@ static void render_firefox_code_prompt() {
         s_firefox_code_popup_open = false;
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    // Prose dialog: see above.
     ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Appearing);
     constrain_modal();
     if (!ImGui::BeginPopupModal("Firefox account security code", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
@@ -4270,6 +4335,9 @@ void render_ui() {
                 s_update_decode_popup_open = false;
             }
             ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            // Prose dialog: the release notes wrap, so a fixed readable width
+            // is right here. 560 was sized for the old font and is still a good
+            // measure at this one.
             ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
             constrain_modal();
             if (ImGui::BeginPopupModal("##update_decode_popup", nullptr,
@@ -4303,6 +4371,7 @@ void render_ui() {
                 s_update_error_popup_open = false;
             }
             ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            // Prose dialog: see above.
             ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_Appearing);
             constrain_modal();
             if (ImGui::BeginPopupModal("##update_error_popup", nullptr,
@@ -4337,6 +4406,9 @@ void render_ui() {
         const float kActionRowHeight = (ImGui::GetFrameHeight() > 32.0f)
                                      ? ImGui::GetFrameHeight() : 32.0f;
 
+        // Where the row begins, so the status column can be placed at an
+        // absolute offset from it instead of after whatever widget ran last.
+        const float row_start_x = ImGui::GetCursorPosX();
         ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
         ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
         ImGui::PushStyleColor(ImGuiCol_Button, btn);
@@ -4351,13 +4423,12 @@ void render_ui() {
         const float action_btn_pad = ImGui::GetStyle().FramePadding.x * 2.0f;
         const float action_btn_min = std::max(ImGui::CalcTextSize("CONNECT").x,
                                               ImGui::CalcTextSize("DISCONNECT").x) + action_btn_pad;
-        // On a narrow window the CONNECT button shares its line with START/STOP,
-        // so it gives up exactly the room that pair needs: measured here rather
-        // than the old flat 72, which was sized for a 70 px button and is now a
-        // couple of pixels too small.
-        const float pair_reserve = std::max(ImGui::CalcTextSize("START").x,
-                                            ImGui::CalcTextSize("STOP").x)
-                                 + ImGui::GetStyle().FramePadding.x * 2.0f + 6.0f;
+        // The START/STOP pair's width, needed in two places: to reserve room for
+        // it on a narrow window, and to anchor the status label past it whether
+        // or not the pair is actually on screen.
+        const float stop_btn_w = std::max(ImGui::CalcTextSize("START").x,
+                                          ImGui::CalcTextSize("STOP").x) + action_btn_pad;
+        const float pair_reserve = stop_btn_w + 6.0f;
         float btn_w = narrow ? (std::max)(action_btn_min, ImGui::GetContentRegionAvail().x - pair_reserve)
                              : action_btn_min;
         bool show_disconnect = connected || busy || tun_paused;
@@ -4681,11 +4752,6 @@ void render_ui() {
             // Same height as the CONNECT button, so nothing to offset -- kept
             // explicit so the pair cannot drift if the row height changes.
             row_center_next(kActionRowHeight);
-            // Same reasoning as the update button: START is wider than STOP,
-            // so width from the wider one rather than from a constant.
-            const float stop_btn_w = std::max(ImGui::CalcTextSize("START").x,
-                                              ImGui::CalcTextSize("STOP").x)
-                                   + action_btn_pad;
             if (tun_paused) {
                 ImVec4 start_col(0.18f, 0.35f, 0.85f, 1.0f);
                 ImVec4 start_h(0.26f, 0.45f, 0.95f, 1.0f);
@@ -4719,7 +4785,17 @@ void render_ui() {
             }
         }
 
-        ImGui::SameLine(0, 10);
+        // The status label lives in a fixed column, not "wherever the last
+        // widget ended". START/STOP only appears in TUN mode while connected,
+        // so a SameLine here put CONNECTED/CONNECTING at a different x than
+        // DISCONNECTED on the same screen -- the label appeared to jump as the
+        // state changed. Anchoring the column to the widest of the two possible
+        // predecessors makes the text start at one x regardless of the state.
+        // CONNECT, the gap, the START/STOP pair, the gap, then the label -- in
+        // every state. pair_reserve is already the pair's width plus its gap.
+        const float status_x = btn_w + pair_reserve + 12.0f;
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(row_start_x + status_x);
         // One line of text in a taller action row: share the buttons' centre
         // line instead of hugging their top edge.
         row_center_next(kActionRowHeight);
@@ -4909,7 +4985,10 @@ void render_ui() {
                         open_link(link.url);
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("%s", link.url);
-                    ImGui::SameLine(96.0f);
+                    // A second column: the label, then the address it points
+                    // at. Measured rather than a flat 96 px, which the doubled
+                    // font size left too narrow for the link text.
+                    ImGui::SameLine(ImGui::CalcTextSize("Telegram").x + 24.0f);
                     ImGui::TextDisabled("%s", link.shown);
                     ImGui::PopID();
                 }
@@ -4949,11 +5028,43 @@ void render_ui() {
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     {
         const float avail_w = ImGui::GetContentRegionAvail().x;
-        const bool use_columns = (avail_w >= 540.0f);
-        const float left_w = use_columns ? 230.0f : avail_w;
-        // Sponsor card width: fixed clean compact width on desktop, aligned to right edge
-        const float card_w = use_columns ? std::min(380.0f, std::max(280.0f, avail_w - left_w - 24.0f)) : avail_w;
+        // The footer is two columns once there is room for both: the transfer
+        // statistics on the left, the sponsor card on the right.
+        //
+        // The left column's width is measured from the widest line it actually
+        // draws, rather than from the old flat 230. At the doubled font size a
+        // download figure with its rate beside it is wider than 230, so the old
+        // constant let the telemetry run underneath the sponsor card.
+        float left_column_w = ImGui::CalcTextSize("Upload:  ").x;
+        {
+            // A byte total and its rate on one line, at the widest they get:
+            // "1023.99 MB" and a rate beside it, joined by a small gap.
+            const float stats_w = ImGui::CalcTextSize("1023.99 GB").x
+                                + 6.0f
+                                + ImGui::CalcTextSize("(1023.99 GB/s)").x;
+            left_column_w = (std::max)(left_column_w, stats_w);
+            // The RTT readout and the INFO button that follows it.
+            left_column_w = (std::max)(left_column_w,
+                                       ImGui::CalcTextSize("9999ms").x + 10.0f
+                                       + ImGui::CalcTextSize("INFO").x
+                                       + ImGui::GetStyle().FramePadding.x * 2.0f);
+        }
+        left_column_w += 8.0f;
+        // A floor so a narrow window still has a usable column rather than one
+        // that collapses to the width of a word.
+        const float min_left_w = 260.0f;
+        if (left_column_w < min_left_w) left_column_w = min_left_w;
+        // Space the card needs to be worth having.
+        const float min_card_w = 320.0f;
+        const float column_gap  = 24.0f;
+        const bool use_columns  = (avail_w - (left_column_w + column_gap)) >= min_card_w;
+        // Without columns the left content takes the whole width, so the GRAM
+        // address has the room it needs and the card goes below.
+        const float card_w = use_columns ? (avail_w - (left_column_w + column_gap)) : avail_w;
         const float sponsor_offset_x = use_columns ? (avail_w - card_w) : 0.0f;
+        // The right edge every part of the sponsor block aligns to: the header
+        // strip's right edge, the card's right edge, and the icons above them.
+        const float title_right_edge = ImGui::GetCursorScreenPos().x + avail_w;
 
         ImGui::BeginGroup(); // Left column: Stats
         {
@@ -4982,6 +5093,9 @@ void render_ui() {
                 snprintf(rtt_buf, sizeof(rtt_buf), "--");
             ImGui::TextColored(ImVec4(0.70f, 0.90f, 0.70f, 1.0f), "%s", rtt_buf);
             ImGui::SameLine(0, 10);
+            // No vertical nudge needed: SmallButton() zeroes its own vertical
+            // frame padding and passes ImGuiButtonFlags_AlignTextBaseLine, so it
+            // already sits on the text baseline rather than the text's top edge.
             if (ImGui::SmallButton("INFO")) {
                 s_connection_info_popup_open = true;
                 ui_request_redraw();
@@ -5021,27 +5135,49 @@ void render_ui() {
             // Items are placed explicitly: this group opens on the left column's
             // SameLine, so flow layout would snap them to that line's y.
             const float header_text_y = header_min.y + std::floor((kHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f);
-            const float header_button_y = header_min.y + kHeaderPadV;
             const float header_icon = icon_button_size();
-            const float audio_x = header_max.x - 4.0f - header_icon;
-            const float refresh_x = audio_x - 6.0f - header_icon;
+
+            // The two icon buttons live in the title row, to the right of the
+            // SPONSORS title, rather than inside the header strip. In the strip
+            // they had to share its width with a link that is nearly 500 px of
+            // text at this font size: the row came out 685 px wide inside a card
+            // that is at most 380, so the link ran off the top of the card it
+            // was meant to cap. Moving them here gives the header one job.
+            // Both ends of the header row are anchored to the header's own
+            // edges, so the title starts at its left edge and the link ends at
+            // its right one -- "exactly end x and start x at top of the card".
             ImGui::SetCursorScreenPos(ImVec2(header_min.x + 10.0f, header_text_y));
             ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
 
-            ImGui::SetCursorScreenPos(ImVec2(ImGui::GetItemRectMax().x + 8.0f, header_text_y));
-            if (ImGui::TextLink("Want to become a sponsor? Click me")) {
-                open_link(sponsor_policy);
+            // Right-aligned: place the link by measuring it, so its right edge
+            // lands on the header's right padding whatever the label is.
+            const char* const kSponsorCta = "Want to become a sponsor? Click me";
+            const float cta_w = ImGui::CalcTextSize(kSponsorCta).x;
+            const float cta_x = header_max.x - 10.0f - cta_w;
+            // Only draw it if it fits between the title and the right edge;
+            // otherwise the card is too narrow for both and the link would
+            // overlap the title. The card is always clickable for the same
+            // destination, so nothing is lost.
+            const float title_end_x = header_min.x + 10.0f + ImGui::CalcTextSize("SPONSORS").x;
+            if (cta_x > title_end_x + 8.0f) {
+                ImGui::SetCursorScreenPos(ImVec2(cta_x, header_text_y));
+                if (ImGui::TextLink(kSponsorCta)) {
+                    open_link(sponsor_policy);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", sponsor_policy);
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", sponsor_policy);
 
-            ImGui::SetCursorScreenPos(ImVec2(refresh_x, header_button_y));
+            // Icons at the right end of the title row, above the card.
+            const float audio_x   = title_right_edge - header_icon;
+            const float refresh_x = audio_x - 6.0f - header_icon;
+            ImGui::SetCursorScreenPos(ImVec2(refresh_x, header_text_y));
             if (round_icon_button("##sponsor_refresh", UiIcon::Refresh, false, "Refresh sponsor manifest")) {
                 fcae_sponsor_refresh_manifest_now_async();
                 ui_request_redraw();
             }
             const bool audio_enabled = fcae_sponsor_audio_enabled();
-            ImGui::SetCursorScreenPos(ImVec2(audio_x, header_button_y));
+            ImGui::SetCursorScreenPos(ImVec2(audio_x, header_text_y));
             if (round_icon_button("##sponsor_audio", audio_enabled ? UiIcon::SoundOn : UiIcon::SoundOff,
                                   audio_enabled,
                                   audio_enabled ? "Turn sponsor sound off" : "Turn sponsor sound on")) {
@@ -5214,7 +5350,23 @@ void render_ui() {
         s_connection_info_popup_open = false;
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
+    // Sized to the widest line this dialog can show rather than to a fixed 480.
+    // Both shapes are represented: the live-core line ("SOCKS5 127.0.0.1:1819 |
+    // LAN: 192.168.100.100:1819", the longest case) and the settings fallback.
+    {
+        static const char* const kWidest[] = {
+            // The live listener lines, which are the structural content of this
+            // dialog and must not wrap.
+            "    HTTPS 127.0.0.1:65535 | LAN: 255.255.255.255:65535",
+            "    SOCKS5 127.0.0.1:65535 | LAN: 255.255.255.255:65535",
+            "1_ ROUTE HOP - sing-box",
+            // The settings fallback, one endpoint per line.
+            "sing-box local: SOCKS5 127.0.0.1:65535",
+        };
+        ImGui::SetNextWindowSize(
+            dialog_width_for(kWidest, (int)(sizeof(kWidest) / sizeof(kWidest[0])), 480.0f),
+            ImGuiCond_Appearing);
+    }
     constrain_modal();
     if (ImGui::BeginPopupModal("##connection_info_popup", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) {
@@ -5294,12 +5446,17 @@ void render_ui() {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
-        // Tall enough for the rows this pane lists. A flat 190 was about seven
-        // text lines at the old 13 px font; at double that it would show three
-        // and clip the rest, so the height follows the line height instead.
-        const float info_body_h = ImGui::GetTextLineHeightWithSpacing() * 10.0f
-                                + ImGui::GetStyle().WindowPadding.y * 2.0f;
-        ImGui::BeginChild("##connection_info_body", ImVec2(0, info_body_h), ImGuiChildFlags_Borders);
+        // The pane is exactly as tall as the rows it printed.
+        //
+        // This was a flat 190 px, then "ten text lines" when the font doubled --
+        // but the content is variable: one endpoint per listener the session
+        // actually opened, plus a header and a line per inbound for every live
+        // core instance. A count can only be right for one shape of session, and
+        // a wrong one either clips the last rows or leaves a gap under them.
+        // AutoResizeY makes the pane measure its own content instead: the height
+        // follows what was drawn, and the width still fills the dialog.
+        ImGui::BeginChild("##connection_info_body", ImVec2(0, 0),
+                          ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
 
         if (connected) {
             const char* lip = telem.lan_ip;

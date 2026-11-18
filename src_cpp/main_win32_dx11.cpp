@@ -117,10 +117,11 @@ static float window_dpi_scale(HWND hwnd) { return (float)window_dpi(hwnd) / 96.0
 
 // The designed window size, in pixels.
 //
-// Larger than the original 1024x700, which was cramped once the settings pages
-// and the log tail were both on screen. The constants below are what the layout
-// is designed against; if the monitor cannot hold that, the window is shrunk to
-// fit instead of opening larger than the screen.
+// The window's client area, in pixels. Wider than it is tall on purpose: the
+// settings pages and the log tail sit side by side, so width buys layout room
+// while height mostly buys empty space. 800 rather than the previous 860 leaves
+// the title bar and taskbar some breathing room on a 1080p display instead of
+// the frame hugging the bottom of the screen.
 //
 // Deliberately not scaled by DPI: an earlier revision scaled both the window and
 // the ImGui font metrics by the monitor factor, which applied it twice -- the
@@ -128,27 +129,69 @@ static float window_dpi_scale(HWND hwnd) { return (float)window_dpi(hwnd) / 96.0
 // One factor owns the scaling, and it is the user's ui_scale_percent, which
 // grows the text without moving the frame.
 static constexpr int kWindowWidth  = 1280;
-static constexpr int kWindowHeight = 860;
+static constexpr int kWindowHeight = 800;
 
-// The base UI font size, in pixels: exactly twice the 13 px that ImGui's
-// embedded default face used to give this UI, which is what the whole window is
-// sized against now. The user's ui_scale_percent still multiplies on top of it
-// through style.FontScaleMain, so this is the floor, not the ceiling.
+// The base UI font size, in pixels, and what the whole window is sized against.
 //
-// On top of this, the layout's own constants -- action row heights, button
-// widths, the log pane -- are computed from measured text rather than from
-// fixed pixel values, so doubling the type does not push labels past their
-// backgrounds. Anything still fixed (the modals' 680x620 and so on) is clamped
-// to the viewport and scrolls its contents.
-static constexpr float kUiBaseFontSize = 26.0f;
+// 22 px is about 1.7x the 13 px that ImGui's embedded default face used to give
+// this UI -- which is what the UI was stuck with when it read as far too small.
+// It was 26 px (exactly 2x) for a while and read as zoomed in: every row grew,
+// so fewer of them fitted on screen for no gain in legibility. 22 keeps the
+// readable size and gives the rows back.
+//
+// The user's ui_scale_percent still multiplies on top of it through
+// style.FontScaleMain, so this is the floor, not the ceiling, and the layout's
+// own constants are computed from measured text rather than from fixed pixels.
+// Anything still fixed (the modals' 680x620 and so on) is clamped to the
+// viewport and scrolls its contents.
+static constexpr float kUiBaseFontSize = 22.0f;
 
-// Clamp a designed size to what the monitor actually offers, leaving room for
-// the taskbar and window decorations.
-static void clamp_to_screen(int& width, int& height) {
-    const int max_w = GetSystemMetrics(SM_CXSCREEN) - 80;
-    const int max_h = GetSystemMetrics(SM_CYSCREEN) - 120;
-    if (max_w > 480 && width  > max_w) width  = max_w;
-    if (max_h > 360 && height > max_h) height = max_h;
+// Work out where the window goes.
+//
+// "A little higher" is a request about the window's top edge, so the position
+// has to be chosen rather than left to CW_USEDEFAULT (which cascades and lands
+// wherever the last window of the class did). The window is centred on the
+// monitor's work area -- the part the taskbar does not occupy -- in both axes,
+// then moved up by a tenth of its height. Centre alone reads as slightly low
+// because the eye weighs the visible content, not the frame.
+//
+// The requested size is clamped first so a small display never produces a
+// window taller than the space it has.
+static void place_window(int& x, int& y, int& width, int& height) {
+    MONITORINFO info = {};
+    info.cbSize = sizeof(info);
+    const HMONITOR monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        x = CW_USEDEFAULT;
+        y = CW_USEDEFAULT;
+        return;
+    }
+    const RECT& work = info.rcWork;
+    const int work_w = work.right - work.left;
+    const int work_h = work.bottom - work.top;
+
+    // Room for the frame: measured rather than guessed, because the caption and
+    // border thicknesses change with the Windows version and the user's theme.
+    RECT frame = {0, 0, width, height};
+    AdjustWindowRectEx(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+    const int frame_w = frame.right - frame.left;
+    const int frame_h = frame.bottom - frame.top;
+
+    if (width  + (frame_w - width)  > work_w - 40) width  = work_w - (frame_w - width) - 40;
+    if (height + (frame_h - height) > work_h - 40) height = work_h - (frame_h - height) - 40;
+    if (width  < 480) width  = 480;
+    if (height < 360) height = 360;
+
+    frame = RECT{0, 0, width, height};
+    AdjustWindowRectEx(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+    const int size_w = frame.right - frame.left;
+    const int size_h = frame.bottom - frame.top;
+
+    x = work.left + (work_w - size_w) / 2;
+    y = work.top  + (work_h - size_h) / 2;
+    // A tenth of the height upward, but never above the top of the work area.
+    y -= (int)(size_h * 0.1);
+    if (y < work.top) y = work.top;
 }
 
 static void CleanupDeviceD3D();
@@ -359,10 +402,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // WM_DPICHANGED below fixes the window up if it opens on another monitor.
     int window_w = kWindowWidth;
     int window_h = kWindowHeight;
-    clamp_to_screen(window_w, window_h);
+    int window_x = CW_USEDEFAULT;
+    int window_y = CW_USEDEFAULT;
+    place_window(window_x, window_y, window_w, window_h);
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, window_w, window_h,
+        window_x, window_y, window_w, window_h,
         nullptr, nullptr, inst, nullptr);
     if (!hWnd) {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);

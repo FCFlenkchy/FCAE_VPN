@@ -107,10 +107,11 @@ int main(int argc, char** argv) {
     // ui_scale_percent instead, which leaves the frame alone.
     constexpr int kWindowWidth  = 1280;
     constexpr int kWindowHeight = 860;
-    // The base font size, in pixels: twice the 13 px ImGui's embedded default
-    // face used to give this UI, and the size the ui_render.cpp layout is
-    // designed against. See the same constant in the Win32 host.
-    constexpr float kUiBaseFontSize = 26.0f;
+    // The base font size, in pixels, and the size the ui_render.cpp layout is
+    // designed against: about 1.7x the 13 px ImGui's embedded default face used
+    // to give this UI. See the same constant in the Win32 host for why it is not
+    // the full 2x.
+    constexpr float kUiBaseFontSize = 22.0f;
 
     // Never open larger than the monitor can show; a window that starts
     // off-screen cannot be grabbed by the title bar.
