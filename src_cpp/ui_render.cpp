@@ -1988,20 +1988,6 @@ static const char* state_label(FcaeState s) {
     return "UNKNOWN";
 }
 
-/// Vertically centre whatever comes next on the current row's centre line.
-///
-/// A row is a sequence of different-height widgets: a 32 px button, a text line
-/// of about 17, a 14 px ring. ImGui stacks them by their top edge, so a text
-/// label placed after a button sits at the button's top rather than its middle
-/// -- which is what "DISCONNECTED is not centred on the CONNECT row" looked
-/// like. Call this after SameLine(), before the short item, with the height of
-/// the tallest thing on the row.
-static void row_center_next(float row_height) {
-    const float item_h = ImGui::GetTextLineHeight();
-    if (row_height > item_h)
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (row_height - item_h) * 0.5f);
-}
-
 /// One proxy listener, the way sing-box configures one: a single switch and the
 /// port it answers on, on the same line.
 ///
@@ -4409,6 +4395,7 @@ void render_ui() {
         // Where the row begins, so the status column can be placed at an
         // absolute offset from it instead of after whatever widget ran last.
         const float row_start_x = ImGui::GetCursorPosX();
+        const float row_start_y = ImGui::GetCursorPosY();
         ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
         ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
         ImGui::PushStyleColor(ImGuiCol_Button, btn);
@@ -4423,12 +4410,10 @@ void render_ui() {
         const float action_btn_pad = ImGui::GetStyle().FramePadding.x * 2.0f;
         const float action_btn_min = std::max(ImGui::CalcTextSize("CONNECT").x,
                                               ImGui::CalcTextSize("DISCONNECT").x) + action_btn_pad;
-        // The START/STOP pair's width, needed in two places: to reserve room for
-        // it on a narrow window, and to anchor the status label past it whether
-        // or not the pair is actually on screen.
         const float stop_btn_w = std::max(ImGui::CalcTextSize("START").x,
                                           ImGui::CalcTextSize("STOP").x) + action_btn_pad;
-        const float pair_reserve = stop_btn_w + 6.0f;
+        const bool show_tun_control = g_app.mode == 1 && (connected || tun_paused);
+        const float pair_reserve = show_tun_control ? stop_btn_w + 6.0f : 0.0f;
         float btn_w = narrow ? (std::max)(action_btn_min, ImGui::GetContentRegionAvail().x - pair_reserve)
                              : action_btn_min;
         bool show_disconnect = connected || busy || tun_paused;
@@ -4747,11 +4732,9 @@ void render_ui() {
         }
         ImGui::PopStyleColor(3);
 
-        if (g_app.mode == 1 && (connected || tun_paused)) {
+        if (show_tun_control) {
             ImGui::SameLine(0, 6);
-            // Same height as the CONNECT button, so nothing to offset -- kept
-            // explicit so the pair cannot drift if the row height changes.
-            row_center_next(kActionRowHeight);
+            ImGui::SetCursorPosY(row_start_y);
             if (tun_paused) {
                 ImVec4 start_col(0.18f, 0.35f, 0.85f, 1.0f);
                 ImVec4 start_h(0.26f, 0.45f, 0.95f, 1.0f);
@@ -4785,20 +4768,12 @@ void render_ui() {
             }
         }
 
-        // The status label lives in a fixed column, not "wherever the last
-        // widget ended". START/STOP only appears in TUN mode while connected,
-        // so a SameLine here put CONNECTED/CONNECTING at a different x than
-        // DISCONNECTED on the same screen -- the label appeared to jump as the
-        // state changed. Anchoring the column to the widest of the two possible
-        // predecessors makes the text start at one x regardless of the state.
-        // CONNECT, the gap, the START/STOP pair, the gap, then the label -- in
-        // every state. pair_reserve is already the pair's width plus its gap.
         const float status_x = btn_w + pair_reserve + 12.0f;
-        ImGui::SameLine();
-        ImGui::SetCursorPosX(row_start_x + status_x);
-        // One line of text in a taller action row: share the buttons' centre
-        // line instead of hugging their top edge.
-        row_center_next(kActionRowHeight);
+        if (!narrow) ImGui::SameLine();
+        const float status_y = narrow ? ImGui::GetCursorPosY() : row_start_y;
+        if (!narrow) ImGui::SetCursorPosX(row_start_x + status_x);
+        ImGui::SetCursorPosY(status_y + (kActionRowHeight - ImGui::GetTextLineHeight()) * 0.5f);
+        ImGui::BeginGroup();
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         if (startup) {
             ImGui::TextUnformatted("INITIALIZING...");
@@ -4808,28 +4783,25 @@ void render_ui() {
             ImGui::Text("%s", state_label(cur));
         }
         ImGui::PopStyleColor();
+        ImGui::EndGroup();
 
         if (busy) {
             ImGui::SameLine(0, 8);
-            // The ring's box is max(2*radius+4, line height) tall, which is a
-            // little taller than a text line at the default font size, so it
-            // gets its own offset rather than row_center_next()'s text-line one.
-            // Without it the ring is drawn from the row's top edge and reads as
-            // hovering above the button.
             constexpr float kRingRadius = 7.0f;
             const float ring_box = (kRingRadius * 2.0f + 4.0f) > ImGui::GetTextLineHeight()
                                  ? (kRingRadius * 2.0f + 4.0f) : ImGui::GetTextLineHeight();
-            if (kActionRowHeight > ring_box)
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (kActionRowHeight - ring_box) * 0.5f);
+            ImGui::SetCursorPosY(status_y + (kActionRowHeight - ring_box) * 0.5f);
             draw_spinner(kRingRadius, 7.0f);
         }
 
         if (g_app.save_status[0]) {
             ImGui::SameLine(0, 8);
-            row_center_next(kActionRowHeight);
+            ImGui::SetCursorPosY(status_y + (kActionRowHeight - ImGui::GetTextLineHeight()) * 0.5f);
+            ImGui::BeginGroup();
             ImGui::TextColored(s_save_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
                                                    : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
                                "%s", g_app.save_status);
+            ImGui::EndGroup();
             s_save_status_painted_revision = s_save_status_revision;
         }
 
@@ -4837,7 +4809,10 @@ void render_ui() {
         // as the window allows; on narrow windows it drops to its own line,
         // still flush right. Gated until the runtime is live.
         if (startup) ImGui::BeginDisabled();
-        if (!narrow) ImGui::SameLine(0, 10);
+        if (!narrow) {
+            ImGui::SameLine(0, 10);
+            ImGui::SetCursorPosY(row_start_y);
+        }
         {
             // Sized from the longest label this button ever shows, not from a
             // constant. At the old 13 px font the widest was "Check for Updates"
@@ -5039,9 +5014,10 @@ void render_ui() {
         {
             // A byte total and its rate on one line, at the widest they get:
             // "1023.99 MB" and a rate beside it, joined by a small gap.
-            const float stats_w = ImGui::CalcTextSize("1023.99 GB").x
-                                + 6.0f
-                                + ImGui::CalcTextSize("(1023.99 GB/s)").x;
+            const float stats_w = std::max(ImGui::CalcTextSize("Download:").x,
+                                           ImGui::CalcTextSize("Upload:").x)
+                                + 6.0f + ImGui::CalcTextSize("1023.99 GB").x
+                                + 6.0f + ImGui::CalcTextSize("(1023.99 GB/s)").x;
             left_column_w = (std::max)(left_column_w, stats_w);
             // The RTT readout and the INFO button that follows it.
             left_column_w = (std::max)(left_column_w,
@@ -5058,13 +5034,10 @@ void render_ui() {
         const float min_card_w = 320.0f;
         const float column_gap  = 24.0f;
         const bool use_columns  = (avail_w - (left_column_w + column_gap)) >= min_card_w;
-        // Without columns the left content takes the whole width, so the GRAM
-        // address has the room it needs and the card goes below.
-        const float card_w = use_columns ? (avail_w - (left_column_w + column_gap)) : avail_w;
-        const float sponsor_offset_x = use_columns ? (avail_w - card_w) : 0.0f;
-        // The right edge every part of the sponsor block aligns to: the header
-        // strip's right edge, the card's right edge, and the icons above them.
-        const float title_right_edge = ImGui::GetCursorScreenPos().x + avail_w;
+        const float card_w = use_columns
+            ? std::clamp(avail_w * 0.4f, min_card_w, avail_w - left_column_w - column_gap)
+            : avail_w;
+        const float sponsor_offset_x = ImGui::GetCursorPosX() + (use_columns ? avail_w - card_w : 0.0f);
 
         ImGui::BeginGroup(); // Left column: Stats
         {
@@ -5137,47 +5110,24 @@ void render_ui() {
             const float header_text_y = header_min.y + std::floor((kHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f);
             const float header_icon = icon_button_size();
 
-            // The two icon buttons live in the title row, to the right of the
-            // SPONSORS title, rather than inside the header strip. In the strip
-            // they had to share its width with a link that is nearly 500 px of
-            // text at this font size: the row came out 685 px wide inside a card
-            // that is at most 380, so the link ran off the top of the card it
-            // was meant to cap. Moving them here gives the header one job.
-            // Both ends of the header row are anchored to the header's own
-            // edges, so the title starts at its left edge and the link ends at
-            // its right one -- "exactly end x and start x at top of the card".
-            ImGui::SetCursorScreenPos(ImVec2(header_min.x + 10.0f, header_text_y));
-            ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
-
-            // Right-aligned: place the link by measuring it, so its right edge
-            // lands on the header's right padding whatever the label is.
-            const char* const kSponsorCta = "Want to become a sponsor? Click me";
-            const float cta_w = ImGui::CalcTextSize(kSponsorCta).x;
-            const float cta_x = header_max.x - 10.0f - cta_w;
-            // Only draw it if it fits between the title and the right edge;
-            // otherwise the card is too narrow for both and the link would
-            // overlap the title. The card is always clickable for the same
-            // destination, so nothing is lost.
-            const float title_end_x = header_min.x + 10.0f + ImGui::CalcTextSize("SPONSORS").x;
-            if (cta_x > title_end_x + 8.0f) {
-                ImGui::SetCursorScreenPos(ImVec2(cta_x, header_text_y));
-                if (ImGui::TextLink(kSponsorCta)) {
-                    open_link(sponsor_policy);
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", sponsor_policy);
-            }
-
-            // Icons at the right end of the title row, above the card.
-            const float audio_x   = title_right_edge - header_icon;
+            const float audio_x = header_max.x - 10.0f - header_icon;
             const float refresh_x = audio_x - 6.0f - header_icon;
-            ImGui::SetCursorScreenPos(ImVec2(refresh_x, header_text_y));
+            const float title_x = header_min.x + 10.0f;
+            const float title_w = ImGui::CalcTextSize("SPONSORS").x;
+            if (title_x + title_w + 8.0f <= refresh_x) {
+                ImGui::SetCursorScreenPos(ImVec2(title_x, header_text_y));
+                if (ImGui::TextLink("SPONSORS")) open_link(sponsor_policy);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Become a sponsor: %s", sponsor_policy);
+            }
+            const float header_icon_y = header_min.y + kHeaderPadV;
+            ImGui::SetCursorScreenPos(ImVec2(refresh_x, header_icon_y));
             if (round_icon_button("##sponsor_refresh", UiIcon::Refresh, false, "Refresh sponsor manifest")) {
                 fcae_sponsor_refresh_manifest_now_async();
                 ui_request_redraw();
             }
             const bool audio_enabled = fcae_sponsor_audio_enabled();
-            ImGui::SetCursorScreenPos(ImVec2(audio_x, header_text_y));
+            ImGui::SetCursorScreenPos(ImVec2(audio_x, header_icon_y));
             if (round_icon_button("##sponsor_audio", audio_enabled ? UiIcon::SoundOn : UiIcon::SoundOff,
                                   audio_enabled,
                                   audio_enabled ? "Turn sponsor sound off" : "Turn sponsor sound on")) {
@@ -5226,7 +5176,7 @@ void render_ui() {
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
             ImGui::BeginChild("##sponsor_card", ImVec2(card_w, sponsor_card_height),
-                ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+                ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
             if (background_texture) {
                 const ImVec2 card_min = ImGui::GetCursorScreenPos();
@@ -5286,37 +5236,29 @@ void render_ui() {
                 const ImVec2 icon_max(icon_min.x + size.x, icon_min.y + size.y);
                 ImGui::GetWindowDrawList()->AddImage(texture, icon_min, icon_max, uv0, uv1,
                     ImGui::GetColorU32(ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f)));
-                // The hit box is the visible part only, so an oversized icon
-                // never grows the card's scrollable content.
-                const ImVec2 hit_min(std::max(icon_min.x, icon_origin.x), std::max(icon_min.y, icon_origin.y));
-                const ImVec2 hit_max(std::min(icon_max.x, icon_origin.x + icon_area.x),
-                                     std::min(icon_max.y, icon_origin.y + icon_area.y));
-                ImGui::SetCursorScreenPos(hit_min);
-                ImGui::InvisibleButton("##sponsor_card_touch",
-                    ImVec2(std::max(1.0f, hit_max.x - hit_min.x), std::max(1.0f, hit_max.y - hit_min.y)));
-                static bool sponsor_dragged = false;
-                if (ImGui::IsItemActivated()) sponsor_dragged = false;
-                if (ImGui::IsItemActive() && s_sponsor.campaign_count > 1
-                        && std::abs(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x) >= 36.0f)
-                    sponsor_dragged = true;
-                if (ImGui::IsItemDeactivated()) {
-                    if (sponsor_dragged) {
-                        fcae_sponsor_next();
-                    } else if (strncmp(sponsor_destination, "https://", 8) == 0) {
-                        open_link(sponsor_destination);
-                    }
-                    sponsor_dragged = false;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(s_sponsor.campaign_count > 1
-                        ? "Click to open, drag to change sponsor"
-                        : "Click to open sponsor website");
-            } else {
-                const ImVec2 card_size(card_w, sponsor_card_height);
-                ImGui::InvisibleButton("##sponsor_card_touch", card_size);
-                if (ImGui::IsItemClicked() && strncmp(sponsor_destination, "https://", 8) == 0)
-                    open_link(sponsor_destination);
             }
+            const ImVec2 card_origin = ImGui::GetWindowPos();
+            ImGui::SetCursorScreenPos(card_origin);
+            ImGui::InvisibleButton("##sponsor_card_touch", ImVec2(card_w, sponsor_card_height));
+            static bool sponsor_dragged = false;
+            if (ImGui::IsItemActivated()) sponsor_dragged = false;
+            if (ImGui::IsItemActive() && s_sponsor.campaign_count > 1
+                    && std::abs(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x) >= 36.0f)
+                sponsor_dragged = true;
+            if (ImGui::IsItemDeactivated()) {
+                if (sponsor_dragged) {
+                    fcae_sponsor_next();
+                    ui_request_redraw();
+                } else if (ImGui::IsItemHovered()
+                        && strncmp(sponsor_destination, "https://", 8) == 0) {
+                    open_link(sponsor_destination);
+                }
+                sponsor_dragged = false;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(s_sponsor.campaign_count > 1
+                    ? "Click to open, drag to change sponsor"
+                    : "Click to open sponsor website");
 
             const ImVec2 text_card(card_w, sponsor_card_height);
             const ImVec2 text_origin = ImGui::GetWindowPos();
@@ -5365,7 +5307,7 @@ void render_ui() {
         };
         ImGui::SetNextWindowSize(
             dialog_width_for(kWidest, (int)(sizeof(kWidest) / sizeof(kWidest[0])), 480.0f),
-            ImGuiCond_Appearing);
+            ImGuiCond_Always);
     }
     constrain_modal();
     if (ImGui::BeginPopupModal("##connection_info_popup", nullptr,
@@ -5455,6 +5397,10 @@ void render_ui() {
         // a wrong one either clips the last rows or leaves a gap under them.
         // AutoResizeY makes the pane measure its own content instead: the height
         // follows what was drawn, and the width still fills the dialog.
+        const float body_max_height = std::max(ImGui::GetTextLineHeightWithSpacing(),
+            modal_size(10000.0f, 10000.0f).y - ImGui::GetCursorPosY()
+            - ImGui::GetFrameHeightWithSpacing() - ImGui::GetStyle().WindowPadding.y * 2.0f);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, body_max_height));
         ImGui::BeginChild("##connection_info_body", ImVec2(0, 0),
                           ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
 
@@ -5554,9 +5500,9 @@ void render_ui() {
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-    float remain = ImGui::GetContentRegionAvail().y;
-    if (remain < 120.0f) remain = 120.0f;
-    ImGui::BeginChild("##tabs_host", ImVec2(0, remain), ImGuiChildFlags_None);
+    const float remain = std::max(1.0f, ImGui::GetContentRegionAvail().y);
+    ImGui::BeginChild("##tabs_host", ImVec2(0, remain), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     if (ImGui::BeginTabBar("##Tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
 
@@ -6036,7 +5982,10 @@ void render_ui() {
             // never covers the newest lines, including on short desktop windows.
             const float log_footer_h = ImGui::GetFrameHeightWithSpacing()
                 + 2.0f * ImGui::GetStyle().WindowPadding.y + 4.0f;
-            ImGui::BeginChild("##log", ImVec2(0, -log_footer_h), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            const float log_height = std::max(1.0f, ImGui::GetContentRegionAvail().y
+                - log_footer_h - ImGui::GetStyle().ItemSpacing.y);
+            ImGui::BeginChild("##log", ImVec2(0, log_height), ImGuiChildFlags_Borders,
+                              ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
             // Take a thread-safe snapshot of the logs for rendering.
             // This avoids a data race with the FFI callback thread which

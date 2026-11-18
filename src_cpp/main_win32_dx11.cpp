@@ -148,15 +148,6 @@ static constexpr float kUiBaseFontSize = 22.0f;
 
 // Work out where the window goes.
 //
-// "A little higher" is a request about the window's top edge, so the position
-// has to be chosen rather than left to CW_USEDEFAULT (which cascades and lands
-// wherever the last window of the class did). The window is centred on the
-// monitor's work area -- the part the taskbar does not occupy -- in both axes,
-// then moved up by a tenth of its height. Centre alone reads as slightly low
-// because the eye weighs the visible content, not the frame.
-//
-// The requested size is clamped first so a small display never produces a
-// window taller than the space it has.
 static void place_window(int& x, int& y, int& width, int& height) {
     MONITORINFO info = {};
     info.cbSize = sizeof(info);
@@ -189,8 +180,8 @@ static void place_window(int& x, int& y, int& width, int& height) {
 
     x = work.left + (work_w - size_w) / 2;
     y = work.top  + (work_h - size_h) / 2;
-    // A tenth of the height upward, but never above the top of the work area.
-    y -= (int)(size_h * 0.1);
+    // Keep a slight upward bias without placing the window too high.
+    y -= size_h / 20;
     if (y < work.top) y = work.top;
 }
 
