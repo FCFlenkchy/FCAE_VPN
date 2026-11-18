@@ -115,11 +115,16 @@ static UINT window_dpi(HWND hwnd) {
 
 static float window_dpi_scale(HWND hwnd) { return (float)window_dpi(hwnd) / 96.0f; }
 
-// The designed size, in 96-DPI units, scaled to this window's monitor. Both the
-// window and the click targets inside it go through this, so a layout tuned at
-// 100% keeps its proportions at 150%.
-static constexpr int kWindowWidthDip  = 1180;
-static constexpr int kWindowHeightDip = 780;
+// The designed window size. Fixed, deliberately.
+//
+// An earlier revision scaled both this window *and* the ImGui font metrics by
+// the monitor DPI, which applies the factor twice: the window grew by 1.5x and
+// the text inside it by 1.5x again, so a layout that fits at 1024x700 overflowed
+// at 150%. One factor has to own the scaling. The window keeps the designed
+// size and the UI is laid out in its own pixels; a user who wants larger text
+// has ui_scale_percent, which grows the text without moving the frame.
+static constexpr int kWindowWidth  = 1024;
+static constexpr int kWindowHeight = 700;
 
 static void CleanupDeviceD3D();
 
@@ -156,14 +161,9 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                              suggested->bottom - suggested->top,
                              SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            // ImGui sizes every row from the font, so the new scale has to
-            // reach the font metrics too. FontScaleDpi is the per-monitor
-            // factor the non-docking branch leaves to the host. A DPI message
-            // can arrive while the window is still being created, before there
-            // is a context to ask for a style; the initial value is set when
-            // the context is built, so skipping it here loses nothing.
-            if (ImGui::GetCurrentContext() != nullptr)
-                ImGui::GetStyle().FontScaleDpi = window_dpi_scale(hWnd);
+            // The font factor is deliberately not touched here; see the style
+            // block below. Taking the suggested rectangle is enough to keep the
+            // window a sane physical size on a monitor change.
             ui_request_redraw();
             break;
         case WM_DISPLAYCHANGE:
@@ -332,16 +332,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Size in DIPs scaled to the primary monitor's DPI. Before the window
     // exists there is no per-window DPI to ask for, so this reads the system's;
     // WM_DPICHANGED below fixes the window up if it opens on another monitor.
-    {
-        const float scale = window_dpi_scale(nullptr);
-        const int width   = (int)(kWindowWidthDip * scale + 0.5f);
-        const int height  = (int)(kWindowHeightDip * scale + 0.5f);
-        g_created_width  = width;
-        g_created_height = height;
-    }
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, g_created_width, g_created_height,
+        CW_USEDEFAULT, CW_USEDEFAULT, kWindowWidth, kWindowHeight,
         nullptr, nullptr, inst, nullptr);
     if (!hWnd) {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
@@ -379,19 +372,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    // The per-monitor factor from the window's own monitor. The user's text
-    // scale is applied on top of it by ui_frame(), as FontScaleMain.
-    style.FontScaleDpi     = window_dpi_scale(hWnd);
+    // Left at 1.0 on purpose: the window is created at its designed pixel size
+    // and the UI lays itself out in those same pixels. Scaling the font by the
+    // monitor DPI here as well is what made text overflow its rows at 150%.
+    // The user's own text scale arrives from ui_frame() as FontScaleMain.
+    style.FontScaleDpi     = 1.0f;
     style.WindowRounding   = 10.0f;
     style.FrameRounding    = 6.0f;
     style.GrabRounding     = 4.0f;
     style.ScrollbarRounding = 6.0f;
-    // Vertical padding is chosen so GetFrameHeight() (font + 2 * FramePadding.y)
-    // lands on 32 px at 100%: the CONNECT row, the START/STOP pair and the
-    // update button all size themselves to that, and at 6 px the common row
-    // was ~34 px while the text inside shared only its own line box, which is
-    // what made several labels look high in their buttons.
-    style.FramePadding     = ImVec2(10, 4);
+    style.FramePadding     = ImVec2(10, 6);
     style.WindowPadding    = ImVec2(16, 12);
     // Button labels sit in the middle of their box on every platform: the
     // default left alignment read as off-centre wherever a label was narrower
@@ -549,7 +539,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
     CleanupDeviceD3D();
-    DestroyWindow(hWnd);
+    // A hand-off (TUN start needing elevation) already destroyed the window on
+    // this thread to get it off screen before the route/DNS restore ran, so
+    // this must not destroy it twice.
+    if (IsWindow(hWnd)) DestroyWindow(hWnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
     if (wc.hbrBackground) DeleteObject(wc.hbrBackground);
     return 0;

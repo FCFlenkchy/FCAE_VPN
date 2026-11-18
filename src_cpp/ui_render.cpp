@@ -164,6 +164,11 @@ static std::atomic<uintptr_t> s_ui_window{0};
 // Tick count at which an elevated relaunch succeeded; the window thread ends
 // this process once the hand-off window has passed. Zero while none is pending.
 static std::atomic<DWORD> s_elevation_handoff_at{0};
+// How long the copy that asked for elevation may look like it is still there
+// after the elevated process has started. Only long enough for the shell to
+// bring the new window forward; the window is hidden and destroyed at this
+// point, so nothing of this process stays on screen during cleanup.
+static constexpr DWORD kHandoffWindowMs = 150;
 #endif
 static int s_sponsor_ui_active_sent = -1;
 static int s_sponsor_connected_sent = -1;
@@ -780,16 +785,28 @@ void ui_request_redraw() {
 void ui_handoff_tick() {
 #ifdef _WIN32
     const DWORD at = s_elevation_handoff_at.load(std::memory_order_relaxed);
-    if (at != 0 && GetTickCount() - at >= 1000) {
+    if (at == 0) return;
+    // The worker arms this the moment the shell hands back the elevated
+    // process, so the window has done its job by then. Waiting here instead of
+    // exiting straight away is what made the old copy sit on screen: the frame
+    // loop only sees the flag on its next tick, and ui_shutdown() then spends
+    // its time in fcae_shutdown() restoring routes and DNS before the process
+    // finally exits -- all of it with the window still up.
+    //
+    // So the visible part happens now, and the cleanup follows invisibly:
+    // hide and destroy the window first (both happen on this, the owning,
+    // thread), then let the loop's teardown run.
+    if (GetTickCount() - at >= kHandoffWindowMs) {
         s_elevation_handoff_at.store(0, std::memory_order_relaxed);
         g_app.running.store(false);
-        // Destroy the window *here*, on the thread that created it, instead of
-        // leaving it to the shutdown path after the loop. The elevated copy
-        // starts before this one finishes tearing down, so any delay is a
-        // period where two full-size windows exist; destroying first makes the
-        // visible result a hand-over rather than a window left behind.
         const HWND hwnd = reinterpret_cast<HWND>(s_ui_window.load());
-        if (hwnd) ShowWindow(hwnd, SW_HIDE);
+        if (hwnd != nullptr) {
+            ShowWindow(hwnd, SW_HIDE);
+            // Destroying now, not after ui_shutdown(), is what the user sees:
+            // the window is gone before any route or DNS restore begins.
+            DestroyWindow(hwnd);
+            s_ui_window.store(0, std::memory_order_relaxed);
+        }
         PostQuitMessage(0);
     }
 #endif
@@ -1960,6 +1977,41 @@ static const char* state_label(FcaeState s) {
         case FCAE_STATE_ERROR:        return "ERROR";
     }
     return "UNKNOWN";
+}
+
+/// One proxy listener, the way sing-box configures one: a single switch and the
+/// port it answers on, on the same line.
+///
+/// Every backend used to spell this out itself, with a checkbox named "<backend>
+/// SOCKS5 proxy" and then an InputScalar a row or two below, enabled or not.
+/// Two different widgets for one idea is what made the settings pages look
+/// unlike each other, so they all go through here now. The port field is
+/// disabled while the listener is off, because a port for something that is not
+/// listening is only ever a way to mis-set it.
+///
+/// Returns true when the switch was toggled, so a caller that has to restart
+/// something can react; the toggle itself is already applied.
+static bool listener_row(const char* label, bool* enabled, ImU16* port,
+                         ImU16 min_port, ImU16 max_port) {
+    ImGui::PushID(label);
+    // The switch carries the port, so the row is: [x] SOCKS5   port [ 1819 ]
+    const bool toggled = ImGui::Checkbox("##enabled", enabled);
+    ImGui::SameLine(0, 8);
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(0, 10);
+    ImGui::BeginDisabled(!*enabled);
+    ImGui::PushItemWidth(90);
+    ImGui::InputScalar("##port", ImGuiDataType_U16, port, nullptr, nullptr, "%u");
+    ImGui::PopItemWidth();
+    ImGui::EndDisabled();
+    // Clamp once the field has lost focus, so typing "18" on the way to "1819"
+    // is not fought with on every keystroke.
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        if (*port < min_port) *port = min_port;
+        if (*port > max_port) *port = max_port;
+    }
+    ImGui::PopID();
+    return toggled;
 }
 
 /// A ring of dots that spins: the "something is happening" indicator beside the
@@ -3617,16 +3669,8 @@ static void core_listener_block(int backend) {
     // answer on is decided at start time, by the config the session runs.
     ImGui::Spacing();
     ImGui::TextDisabled("%s listener", label);
-    ImGui::PushItemWidth(120);
-    ImGui::Checkbox(backend == 1 ? "SOCKS5##singbox-socks" : "SOCKS5##xray-socks", &socks_enabled);
-    ImGui::SameLine();
-    ImGui::InputScalar(backend == 1 ? "port##singbox-socks-port" : "port##xray-socks-port",
-                       ImGuiDataType_U16, &socks_port);
-    ImGui::Checkbox(backend == 1 ? "HTTP##singbox-http" : "HTTP##xray-http", &http_enabled);
-    ImGui::SameLine();
-    ImGui::InputScalar(backend == 1 ? "port##singbox-http-port" : "port##xray-http-port",
-                       ImGuiDataType_U16, &http_port);
-    ImGui::PopItemWidth();
+    listener_row(backend == 1 ? "sing-box SOCKS5" : "Xray SOCKS5", &socks_enabled, &socks_port, 1, 65535);
+    listener_row(backend == 1 ? "sing-box HTTP" : "Xray HTTP", &http_enabled, &http_port, 1, 65535);
 }
 
 /// The saved-config editor: the name the user gives a config, the core that runs
@@ -3906,12 +3950,8 @@ static void render_firefox_settings() {
     if (g_app.firefox_job) ImGui::TextDisabled("Account operation in progress…");
     if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-    ImGui::PushItemWidth(100);
-    ImGui::Checkbox("Enable SOCKS5##firefox", &g_app.firefox_socks_enabled);
-    ImGui::Checkbox("Enable HTTP proxy##firefox", &g_app.firefox_http_enabled);
-    ImGui::InputScalar("SOCKS5 port", ImGuiDataType_U16, &g_app.firefox_socks_port);
-    ImGui::InputScalar("HTTP proxy port", ImGuiDataType_U16, &g_app.firefox_http_port);
-    ImGui::PopItemWidth();
+    listener_row("Firefox SOCKS5", &g_app.firefox_socks_enabled, &g_app.firefox_socks_port, 1, 65535);
+    listener_row("Firefox HTTP", &g_app.firefox_http_enabled, &g_app.firefox_http_port, 1, 65535);
     ImGui::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
     static const char* const firefox_transports[] = {"Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"};
     ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
@@ -5378,12 +5418,8 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "AETHER SETTINGS");
             ImGui::Separator();
-            ImGui::PushItemWidth(100);
-            ImGui::Checkbox("Aether SOCKS5 proxy", &g_app.socks_enabled);
-            ImGui::Checkbox("Aether HTTP proxy", &g_app.http_enabled);
-            ImGui::InputScalar("Aether SOCKS5 port", ImGuiDataType_U16, &g_app.socks_port);
-            ImGui::InputScalar("Aether HTTP port", ImGuiDataType_U16, &g_app.http_port);
-            ImGui::PopItemWidth();
+            listener_row("Aether SOCKS5", &g_app.socks_enabled, &g_app.socks_port, 1, 65535);
+            listener_row("Aether HTTP", &g_app.http_enabled, &g_app.http_port, 1, 65535);
             ImGui::Text("Transport Options");
             ImGui::Checkbox("ECH", &g_app.ech_enabled);
             if (g_app.ech_enabled) {
@@ -5539,10 +5575,17 @@ void render_ui() {
             }
 
             // Psiphon's own listeners, kept off the engine's and Tor's ports.
-            ImGui::Checkbox("Psiphon SOCKS5 proxy", &g_app.psiphon_socks_enabled);
-            ImGui::Checkbox("Psiphon HTTP proxy", &g_app.psiphon_http_enabled);
-            ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port, 0, 0);
-            ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port, 0, 0);
+            // These two carry an int because 0 means "use the built-in value".
+            // The shared row works on u16 ports, so the int is bridged here and
+            // 0 stays representable by leaving the switch's port field blank.
+            {
+                ImU16 socks_port = (ImU16)g_app.psiphon_socks_port;
+                ImU16 http_port  = (ImU16)g_app.psiphon_http_port;
+                listener_row("Psiphon SOCKS5", &g_app.psiphon_socks_enabled, &socks_port, 0, 65535);
+                listener_row("Psiphon HTTP", &g_app.psiphon_http_enabled, &http_port, 0, 65535);
+                g_app.psiphon_socks_port = socks_port;
+                g_app.psiphon_http_port  = http_port;
+            }
             ImGui::TextDisabled("0 restores the built-in value (fixed, never auto-picked).");
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
@@ -5551,17 +5594,20 @@ void render_ui() {
             // Tor is a hop, not a routing mode: an exit of the ordered chain is
             // what puts traffic on the Tor network, and the chain decides what
             // that Tor rides on. The engine's own routing modes are gone from
-            // here for that reason.
-            ImGui::TextWrapped(
-                "Tor runs when the route contains it: add Tor as an exit in the chain, behind the "
-                "protocol above it. What follows is how its own listeners and bridges are set up.");
+            // here for that reason. The paragraph that used to explain this in
+            // the panel is gone: it restated what the chain editor above already
+            // shows, and every settings page had one.
             // All Tor knobs stay editable; the engine ignores them when no Tor
             // is in play (to_config normalises).
-            ImGui::Checkbox("Tor SOCKS5 proxy", &g_app.tor_socks_enabled);
-            ImGui::Checkbox("Tor HTTP proxy", &g_app.tor_http_enabled);
-            ImGui::InputInt("Tor HTTP port", &g_app.tor_http_port, 0, 0);
-            if (g_app.tor_http_enabled && g_app.tor_http_port == 0) g_app.tor_http_port = 1822;
-            ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port, 0, 0);
+            {
+                ImU16 tor_socks_port = (ImU16)g_app.tor_socks_port;
+                ImU16 tor_http_port  = (ImU16)g_app.tor_http_port;
+                listener_row("Tor SOCKS5", &g_app.tor_socks_enabled, &tor_socks_port, 0, 65535);
+                listener_row("Tor HTTP", &g_app.tor_http_enabled, &tor_http_port, 0, 65535);
+                g_app.tor_socks_port = tor_socks_port;
+                g_app.tor_http_port  = tor_http_port;
+                if (g_app.tor_http_enabled && g_app.tor_http_port == 0) g_app.tor_http_port = 1822;
+            }
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
             ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);
             // Writable even with "No bridges": pasted lines override the

@@ -44,12 +44,11 @@
 
 #include "ui_render.h"
 
-// The designed window size in points. AppKit works in points, so a Retina
-// display and a 1x display both get the same physical size from these numbers
-// without any scaling here; the ImGui side still needs the backing scale, which
-// is applied as style.FontScaleDpi below.
-static constexpr int kWindowWidth = 1180;
-static constexpr int kWindowHeight = 780;
+// The designed window size, in AppKit points: 1024x700 of layout, which both a
+// Retina and a 1x display render at the same physical size without any scaling
+// here. Already scaled by the system, so nothing else may scale it again.
+static constexpr int kWindowWidth = 1024;
+static constexpr int kWindowHeight = 700;
 // The render gate's frame cadence, matching the GLFW host's 33 ms.
 static constexpr double kMinFrameInterval = 33.0 / 1000.0;
 // Upper bound on a single run-loop wait: how late a redraw requested by a
@@ -239,10 +238,11 @@ static id g_eventMonitor = nil;
     // One style block, shared by every desktop front end.
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    // Points per pixel for this display: 2 on Retina, 1 otherwise. The user's
-    // text scale multiplies in from ui_frame() as FontScaleMain.
-    style.FontScaleDpi      = self.window.backingScaleFactor > 0.0
-                            ? (float)self.window.backingScaleFactor : 1.0f;
+    // 1.0 on purpose. NSView already reports points, so the backing scale is
+    // accounted for by the window system; applying backingScaleFactor to the
+    // font as well drew every row twice as large on Retina. The user's own text
+    // scale arrives from ui_frame() as FontScaleMain.
+    style.FontScaleDpi      = 1.0f;
     style.WindowRounding    = 10.0f;
     style.FrameRounding     = 6.0f;
     style.GrabRounding      = 4.0f;

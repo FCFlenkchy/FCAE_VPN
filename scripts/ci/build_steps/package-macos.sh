@@ -41,6 +41,30 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 cp src_cpp/icon_1024.png "$APP/Contents/Resources/AppIcon.png"
 ls -la "$APP/Contents/Resources/"
 
+# FreeType is a text rasteriser, not an engine library: a package manager builds
+# it as a dylib, so a machine with Homebrew gets a binary that only runs on a
+# machine with Homebrew. When the build linked it dynamically, copy it into the
+# bundle and point the executable at the embedded copy. Static builds (and
+# builds without FreeType) skip all of this.
+FT_DYLIB="$(otool -L "$APP/Contents/MacOS/fcaevpn" | tail -n +2 \
+            | awk '/libfreetype/ {print $1; exit}')"
+if [ -n "$FT_DYLIB" ] && [ -f "$FT_DYLIB" ]; then
+  echo "Embedding FreeType: $FT_DYLIB"
+  FT_BASE="$(basename "$FT_DYLIB")"
+  cp "$FT_DYLIB" "$APP/Contents/Frameworks/$FT_BASE"
+  chmod u+w "$APP/Contents/Frameworks/$FT_BASE"
+  # Point the executable's reference inside the bundle instead of at the
+  # package-manager prefix. Only that reference matters -- it is what the loader
+  # follows -- so the dylib's own LC_ID_DYLIB is left alone.
+  #
+  # install_name_tool invalidates the code signature, which is why this runs
+  # here and not after the signing block further down.
+  install_name_tool -change "$FT_DYLIB" "@executable_path/../Frameworks/$FT_BASE" \
+    "$APP/Contents/MacOS/fcaevpn"
+  # The copied dylib's own dependencies are all system libraries (z, bz2, lzma,
+  # libSystem), which resolve everywhere, so nothing else has to move with it.
+fi
+
 echo "Binary dynamic dependencies:"
 otool -L "$APP/Contents/MacOS/fcaevpn" || true
 # Every load must resolve from the OS: an engine library or a
@@ -112,6 +136,9 @@ fi
 # code of its own and carries its own signature. Signing it before the bundle
 # keeps the seal over it intact.
 sign "$APP/Contents/MacOS/libcronet.dylib"
+if [ -n "$FT_DYLIB" ] && [ -f "$FT_DYLIB" ]; then
+  sign "$APP/Contents/Frameworks/$(basename "$FT_DYLIB")"
+fi
 sign --deep "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP" || true
 

@@ -98,37 +98,21 @@ int main(int argc, char** argv) {
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "fcaevpn");
 #endif
 
-    // The designed size in 96-DPI units, scaled by the desktop's text scale.
-    // Creating at a fixed 1024x700 and letting the compositor scale it is what
-    // made the window read as small under a fractional or 200% desktop scale.
-    // GLFW can only answer this once a monitor is known, and on Wayland only
-    // after the window exists, so the size is corrected below as well.
-    constexpr int kWindowWidthDip  = 1180;
-    constexpr int kWindowHeightDip = 780;
-    float content_scale = 1.0f;
-    {
-        GLFWmonitor* primary = glfwGetPrimaryMonitor();
-        if (primary != nullptr) glfwGetMonitorContentScale(primary, &content_scale, nullptr);
-    }
-    if (!(content_scale > 0.0f)) content_scale = 1.0f;
+    // The designed size, in pixels. Fixed on purpose: scaling both the window
+    // and the ImGui font by the desktop's content scale applied the factor
+    // twice, so the window grew and the text inside it grew again, and a layout
+    // that fits here overflowed. The window keeps its designed size; text size
+    // is the user's ui_scale_percent.
+    constexpr int kWindowWidth  = 1024;
+    constexpr int kWindowHeight = 700;
 
-    GLFWwindow* window = glfwCreateWindow((int)(kWindowWidthDip * content_scale + 0.5f),
-                                          (int)(kWindowHeightDip * content_scale + 0.5f),
-                                          "FCAE VPN", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(kWindowWidth, kWindowHeight, "FCAE VPN", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 1;
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
-
-    // Authoritative scale for this window (a different monitor may have a
-    // different one than the primary used above).
-    {
-        float sx = 1.0f, sy = 1.0f;
-        glfwGetWindowContentScale(window, &sx, &sy);
-        if (sx > 0.0f) content_scale = sx;
-    }
 
     {
         GLFWimage icons[sizeof(FCAE_ICONS) / sizeof(FCAE_ICONS[0])];
@@ -180,9 +164,9 @@ int main(int argc, char** argv) {
 
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    // Per-monitor factor, on top of which ui_frame() applies the user's own
-    // text scale through FontScaleMain.
-    style.FontScaleDpi     = content_scale;
+    // 1.0 on purpose; see the window-size comment. The user's own text scale
+    // arrives from ui_frame() as FontScaleMain and is the only factor applied.
+    style.FontScaleDpi     = 1.0f;
     style.WindowRounding   = 10.0f;
     style.FrameRounding    = 6.0f;
     style.GrabRounding     = 4.0f;

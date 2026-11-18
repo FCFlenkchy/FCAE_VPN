@@ -182,6 +182,7 @@ set(FCAE_FREETYPE "AUTO" CACHE STRING
 
 set(FCAE_FREETYPE_ENABLED FALSE)
 set(FCAE_FREETYPE_SOURCE "")
+set(FCAE_FREETYPE_SHARED FALSE)
 
 if(NOT FCAE_FREETYPE STREQUAL "OFF")
     set(_ft_may_look TRUE)
@@ -197,7 +198,32 @@ if(NOT FCAE_FREETYPE STREQUAL "OFF")
         if(FREETYPE_FOUND AND FREETYPE_INCLUDE_DIRS)
             set(FCAE_FREETYPE_ENABLED TRUE)
             set(FCAE_FREETYPE_SOURCE "${FREETYPE_LIBRARY}")
-            message(STATUS "FreeType: ${FREETYPE_VERSION_STRING} (${FREETYPE_LIBRARY})")
+            # Package managers very often install both a .so/.dylib and a
+            # static archive under the same base name. Prefer the archive: a
+            # dynamically linked FreeType inside a shipped app is a load-time
+            # dependency on a path the user's machine may not have, and the
+            # macOS packaging check rejects it outright.
+            get_filename_component(_ft_dir "${FREETYPE_LIBRARY}" DIRECTORY)
+            get_filename_component(_ft_file "${FREETYPE_LIBRARY}" NAME)
+            # Strip the shared-library tail properly. NAME_WE is not enough: it
+            # removes only the last extension, so "libfreetype.so" stays
+            # "libfreetype.so" and the candidate became "libfreetype.so.a".
+            string(REGEX REPLACE "\\.[^.]*$" "" _ft_stem "${_ft_file}")
+            string(REGEX REPLACE "\\.(so|dylib)$" "" _ft_stem "${_ft_stem}")
+            foreach(_ft_ext a lib)
+                set(_ft_candidate "${_ft_dir}/${_ft_stem}.${_ft_ext}")
+                if(EXISTS "${_ft_candidate}")
+                    set(FCAE_FREETYPE_SOURCE "${_ft_candidate}")
+                    break()
+                endif()
+            endforeach()
+            # Still shared? Then packaging has to put it inside the bundle.
+            if(FCAE_FREETYPE_SOURCE MATCHES "\\.(so|dylib)(\\.[0-9.]+)?$")
+                set(FCAE_FREETYPE_SHARED TRUE)
+                message(STATUS "FreeType: ${FREETYPE_VERSION_STRING} (shared, ${FCAE_FREETYPE_SOURCE}) -- the bundle must embed it")
+            else()
+                message(STATUS "FreeType: ${FREETYPE_VERSION_STRING} (static, ${FCAE_FREETYPE_SOURCE})")
+            endif()
         elseif(FCAE_FREETYPE STREQUAL "ON" OR FCAE_FREETYPE STREQUAL "system")
             message(FATAL_ERROR
                 "FCAE_FREETYPE=${FCAE_FREETYPE} but no FreeType was found. "
@@ -223,10 +249,13 @@ function(fcae_apply_freetype target_name)
         ${IMGUI_DIR}/misc/freetype
     )
     target_compile_definitions(${target_name} PRIVATE FCAE_HAVE_FREETYPE=1)
-    if(FREETYPE_LIBRARIES)
+    # FCAE_FREETYPE_SOURCE, not FREETYPE_LIBRARIES: it is the archive when one
+    # was found, so the binary carries no load-time dependency on a package
+    # manager path.
+    if(FCAE_FREETYPE_SOURCE)
+        target_link_libraries(${target_name} PRIVATE ${FCAE_FREETYPE_SOURCE})
+    elseif(FREETYPE_LIBRARIES)
         target_link_libraries(${target_name} PRIVATE ${FREETYPE_LIBRARIES})
-    elseif(FREETYPE_LIBRARY)
-        target_link_libraries(${target_name} PRIVATE ${FREETYPE_LIBRARY})
     endif()
 endfunction()
 
