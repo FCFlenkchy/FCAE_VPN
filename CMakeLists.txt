@@ -177,6 +177,15 @@ set(UI_SOURCES
 # FCAE_FREETYPE_ENABLED is what the UI sees, via a generated define, so the
 # runtime call and the compiled-in loader can never disagree.
 # ---------------------------------------------------------------------------
+# The Rust target triple the FFI archive was built for. The CI passes this from
+# its build matrix (scripts/ci/build_steps/build-frontend-*.sh). It was ignored
+# until now -- CMake reported it under "Manually-specified variables were not
+# used by the project" -- and the macOS code inferred the arch from
+# CMAKE_SYSTEM_PROCESSOR instead, which reports the *host*. On an Apple Silicon
+# runner building -arch x86_64 that inference picks the arm64 Rust archive.
+set(RUST_TARGET "" CACHE STRING
+    "Rust target triple libfcae_ffi.a was built for (e.g. x86_64-apple-darwin)")
+
 set(FCAE_FREETYPE "AUTO" CACHE STRING
     "FreeType text rasteriser: AUTO, ON, system, or OFF")
 
@@ -217,11 +226,95 @@ if(NOT FCAE_FREETYPE STREQUAL "OFF")
                     break()
                 endif()
             endforeach()
+            # --- does this library cover the architectures being built? -----
+            #
+            # The macOS x86_64 leg builds with -arch x86_64 on an Apple Silicon
+            # runner, where Homebrew installs into /opt/homebrew. Libraries
+            # there are thin arm64. Linking one does not produce an
+            # "incompatible architecture" error: the linker finds no usable
+            # members in the archive and reports *every* symbol as undefined,
+            # which is what "_FT_New_Library, referenced from
+            # imgui_freetype.cpp.o" actually means. The arm64 leg links the
+            # same archive happily, which is why only one leg failed.
+            #
+            # So the archive is checked against CMAKE_OSX_ARCHITECTURES and
+            # dropped if it cannot serve the build. Other sources are tried
+            # below; the last resort is ImGui's own rasteriser, which needs no
+            # external library at all.
+            if(APPLE AND CMAKE_OSX_ARCHITECTURES AND FCAE_FREETYPE_SOURCE MATCHES "\\.a$")
+                find_program(FCAE_LIPO_EXECUTABLE lipo)
+                if(FCAE_LIPO_EXECUTABLE)
+                    execute_process(
+                        COMMAND "${FCAE_LIPO_EXECUTABLE}" -archs "${FCAE_FREETYPE_SOURCE}"
+                        OUTPUT_VARIABLE _ft_archs
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET
+                        RESULT_VARIABLE _ft_lipo_rc)
+                    if(NOT _ft_lipo_rc EQUAL 0 OR _ft_archs STREQUAL "")
+                        # Not a Mach-O archive at all: not usable here.
+                        message(STATUS "FreeType: ${FCAE_FREETYPE_SOURCE} is unreadable for this arch, ignoring it")
+                        set(FCAE_FREETYPE_SOURCE "")
+                    else()
+                        set(_ft_covers_build TRUE)
+                        foreach(_ft_wanted IN LISTS CMAKE_OSX_ARCHITECTURES)
+                            if(NOT _ft_archs MATCHES "(^| )${_ft_wanted}( |$)")
+                                set(_ft_covers_build FALSE)
+                            endif()
+                        endforeach()
+                        if(NOT _ft_covers_build)
+                            message(STATUS
+                                "FreeType: ${FCAE_FREETYPE_SOURCE} is [${_ft_archs}] but this build targets "
+                                "[${CMAKE_OSX_ARCHITECTURES}]; it cannot be linked and is being skipped")
+                            set(FCAE_FREETYPE_SOURCE "")
+                        endif()
+                    endif()
+                endif()
+            endif()
+
+            # A prefix that does cover the build, if one exists. Homebrew on an
+            # Apple Silicon runner has /usr/local only on Intel-era images, but
+            # a universal build dropped there (or in /opt/local) is exactly what
+            # an x86_64 leg needs, so it is worth one look.
+            if(APPLE AND FCAE_FREETYPE_SOURCE STREQUAL "")
+                foreach(_ft_prefix "/usr/local/opt/freetype" "/opt/local" "/opt/homebrew/opt/freetype")
+                    if(EXISTS "${_ft_prefix}/lib/libfreetype.a")
+                        execute_process(
+                            COMMAND "${FCAE_LIPO_EXECUTABLE}" -archs "${_ft_prefix}/lib/libfreetype.a"
+                            OUTPUT_VARIABLE _ft_alt_archs
+                            OUTPUT_STRIP_TRAILING_WHITESPACE
+                            ERROR_QUIET
+                            RESULT_VARIABLE _ft_alt_rc)
+                        set(_ft_alt_ok TRUE)
+                        foreach(_ft_wanted IN LISTS CMAKE_OSX_ARCHITECTURES)
+                            if(NOT _ft_alt_archs MATCHES "(^| )${_ft_wanted}( |$)")
+                                set(_ft_alt_ok FALSE)
+                            endif()
+                        endforeach()
+                        if(_ft_alt_rc EQUAL 0 AND _ft_alt_ok)
+                            set(FCAE_FREETYPE_SOURCE "${_ft_prefix}/lib/libfreetype.a")
+                            message(STATUS "FreeType: using ${FCAE_FREETYPE_SOURCE} ([${_ft_alt_archs}])")
+                            break()
+                        endif()
+                    endif()
+                endforeach()
+            endif()
+
+            # Nothing usable: go without rather than fail the link. The UI
+            # draws its text with ImGui's built-in rasteriser, which is a
+            # little less crisp but needs no external library -- and a build
+            # that ships beats a build that cannot link.
+            if(APPLE AND CMAKE_OSX_ARCHITECTURES AND FCAE_FREETYPE_SOURCE STREQUAL "")
+                message(STATUS
+                    "FreeType: no library covers [${CMAKE_OSX_ARCHITECTURES}]; "
+                    "building with ImGui's built-in text rasteriser instead")
+                set(FCAE_FREETYPE_ENABLED FALSE)
+            endif()
+
             # Still shared? Then packaging has to put it inside the bundle.
-            if(FCAE_FREETYPE_SOURCE MATCHES "\\.(so|dylib)(\\.[0-9.]+)?$")
+            if(FCAE_FREETYPE_ENABLED AND FCAE_FREETYPE_SOURCE MATCHES "\\.(so|dylib)(\\.[0-9.]+)?$")
                 set(FCAE_FREETYPE_SHARED TRUE)
                 message(STATUS "FreeType: ${FREETYPE_VERSION_STRING} (shared, ${FCAE_FREETYPE_SOURCE}) -- the bundle must embed it")
-            else()
+            elseif(FCAE_FREETYPE_ENABLED)
                 message(STATUS "FreeType: ${FREETYPE_VERSION_STRING} (static, ${FCAE_FREETYPE_SOURCE})")
             endif()
         elseif(FCAE_FREETYPE STREQUAL "ON" OR FCAE_FREETYPE STREQUAL "system")
@@ -1009,8 +1102,16 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         fcae_ffi_lib_path(FCAE_FFI_A aarch64-apple-darwin)
     elseif(AETHER_TARGET STREQUAL "MACOS_X64")
         fcae_ffi_lib_path(FCAE_FFI_A x86_64-apple-darwin)
+    elseif(RUST_TARGET MATCHES "-apple-darwin$")
+        # What CI actually built, straight from its matrix. Authoritative when
+        # present: the host-detection branch below reports the *host* arch, and
+        # on an Apple Silicon runner cross-building -arch x86_64 that picks the
+        # arm64 archive -- a link failure that looks nothing like an arch
+        # mismatch.
+        fcae_ffi_lib_path(FCAE_FFI_A ${RUST_TARGET})
+        message(STATUS "Rust archive: using ${RUST_TARGET} (from RUST_TARGET)")
     else()
-        # Native build on macOS host — detect arch
+        # Native build on a macOS host and no triple given: detect arch.
         if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
             fcae_ffi_lib_path(FCAE_FFI_A aarch64-apple-darwin)
         else()
