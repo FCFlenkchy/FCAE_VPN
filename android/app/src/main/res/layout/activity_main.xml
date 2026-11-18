@@ -1868,12 +1868,12 @@
                         android:layout_height="32dp"
                         android:layout_weight="1"
                         android:ellipsize="end"
-                        android:gravity="center|end"
+                        android:gravity="center"
                         android:maxLines="1"
                         android:paddingStart="4dp"
                         android:paddingEnd="4dp"
                         android:singleLine="true"
-                        android:text="Want to become a sponsor? Click me"
+                        android:text="become a sponsor"
                         android:textColor="#FF60A5FA"
                         android:textSize="9sp" />
 

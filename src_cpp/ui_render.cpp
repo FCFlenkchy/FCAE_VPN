@@ -4772,8 +4772,9 @@ void render_ui() {
         if (!narrow) ImGui::SameLine();
         const float status_y = narrow ? ImGui::GetCursorPosY() : row_start_y;
         if (!narrow) ImGui::SetCursorPosX(row_start_x + status_x);
-        ImGui::SetCursorPosY(status_y + (kActionRowHeight - ImGui::GetTextLineHeight()) * 0.5f);
+        ImGui::SetCursorPosY(status_y + (kActionRowHeight - ImGui::GetFrameHeight()) * 0.5f);
         ImGui::BeginGroup();
+        ImGui::AlignTextToFramePadding();
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         if (startup) {
             ImGui::TextUnformatted("INITIALIZING...");
@@ -4796,8 +4797,9 @@ void render_ui() {
 
         if (g_app.save_status[0]) {
             ImGui::SameLine(0, 8);
-            ImGui::SetCursorPosY(status_y + (kActionRowHeight - ImGui::GetTextLineHeight()) * 0.5f);
+            ImGui::SetCursorPosY(status_y + (kActionRowHeight - ImGui::GetFrameHeight()) * 0.5f);
             ImGui::BeginGroup();
+            ImGui::AlignTextToFramePadding();
             ImGui::TextColored(s_save_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
                                                    : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
                                "%s", g_app.save_status);
@@ -5105,21 +5107,32 @@ void render_ui() {
             ImDrawList* const header_draw = ImGui::GetWindowDrawList();
             header_draw->AddRectFilled(header_min, header_max, IM_COL32(23, 26, 38, 255), kHeaderRounding);
             header_draw->AddRect(header_min, header_max, IM_COL32(41, 45, 61, 255), kHeaderRounding, 0, 1.0f);
-            // Items are placed explicitly: this group opens on the left column's
-            // SameLine, so flow layout would snap them to that line's y.
-            const float header_text_y = header_min.y + std::floor((kHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f);
             const float header_icon = icon_button_size();
-
             const float audio_x = header_max.x - 10.0f - header_icon;
             const float refresh_x = audio_x - 6.0f - header_icon;
             const float title_x = header_min.x + 10.0f;
+            constexpr float text_gap = 8.0f;
+            const char* const cta = "become a sponsor";
+            const float natural_text_w = ImGui::CalcTextSize("SPONSORS").x
+                + ImGui::CalcTextSize(cta).x;
+            const float text_scale = std::clamp(
+                (refresh_x - title_x - text_gap * 2.0f) / natural_text_w, 0.1f, 1.0f);
+            ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * text_scale);
             const float title_w = ImGui::CalcTextSize("SPONSORS").x;
-            if (title_x + title_w + 8.0f <= refresh_x) {
-                ImGui::SetCursorScreenPos(ImVec2(title_x, header_text_y));
-                if (ImGui::TextLink("SPONSORS")) open_link(sponsor_policy);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Become a sponsor: %s", sponsor_policy);
-            }
+            const float cta_w = ImGui::CalcTextSize(cta).x;
+            const float header_text_y = header_min.y
+                + std::floor((kHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f);
+            header_draw->AddText(ImVec2(title_x, header_text_y),
+                IM_COL32(140, 184, 255, 255), "SPONSORS");
+            const float link_left = title_x + title_w + text_gap;
+            const float link_right = refresh_x - text_gap;
+            // NewLine clears the inherited text baseline before absolute placement.
+            ImGui::NewLine();
+            ImGui::SetCursorScreenPos(ImVec2(
+                link_left + std::max(0.0f, (link_right - link_left - cta_w) * 0.5f), header_text_y));
+            if (ImGui::TextLink(cta)) open_link(sponsor_policy);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", sponsor_policy);
+            ImGui::PopFont();
             const float header_icon_y = header_min.y + kHeaderPadV;
             ImGui::SetCursorScreenPos(ImVec2(refresh_x, header_icon_y));
             if (round_icon_button("##sponsor_refresh", UiIcon::Refresh, false, "Refresh sponsor manifest")) {
