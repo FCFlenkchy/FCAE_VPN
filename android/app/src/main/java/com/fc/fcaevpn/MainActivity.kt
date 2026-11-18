@@ -1012,14 +1012,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Place the icon's centre at (iconX, iconY) in percent of the card.
-     *
-     * The view is the card-wide 70-unit media band and `icon_scale` grows it
-     * about its centre, but the clamp must use the picture actually drawn in
-     * it: a contained logo is narrower than the band, and clamping the band
-     * pinned every icon at scale >= 100 to the centre whatever `icon_x` said.
-     */
     private fun positionSponsorIcon(iconX: Int, iconY: Int, iconScale: Int, imageFit: Int, sourceWidth: Int, sourceHeight: Int) {
         if (!::sponsorCard.isInitialized || !::sponsorImage.isInitialized) return
         val safeX = iconX.coerceIn(0, 100)
@@ -1034,7 +1026,7 @@ class MainActivity : AppCompatActivity() {
             if (cardWidth <= 0 || cardHeight <= 0) return@post
             val key = "$safeX:$safeY:$scale:$imageFit:${sourceWidth}x$sourceHeight:${cardWidth}x$cardHeight"
             if (key == sponsorIconLayoutKey) return@post
-            val iconHeight = (70 * resources.displayMetrics.density).toInt()
+            val iconHeight = cardHeight
             val fit = if (imageFit == 1 || sourceWidth <= 0 || sourceHeight <= 0) 0f
                 else minOf(cardWidth / sourceWidth.toFloat(), iconHeight / sourceHeight.toFloat())
             val drawnWidth = (if (fit > 0f) sourceWidth * fit else cardWidth.toFloat()) * scale
@@ -1376,8 +1368,11 @@ class MainActivity : AppCompatActivity() {
                 else -> false
             }
         }
-        findViewById<android.view.View>(R.id.sponsorPolicyLink).setOnClickListener {
-            openExternal("https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md")
+        findViewById<android.widget.TextView>(R.id.sponsorPolicyLink).apply {
+            paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+            setOnClickListener {
+                openExternal("https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md")
+            }
         }
         // Sponsor media is durable application data, not an OS-evictable
         // cache. It must survive disconnects, process restarts, and cache

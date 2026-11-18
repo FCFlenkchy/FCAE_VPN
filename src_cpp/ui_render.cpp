@@ -5179,9 +5179,6 @@ void render_ui() {
             const float sponsor_card_height = std::max(80.0f,
                 ImGui::GetTextLineHeightWithSpacing() * 2.0f * message_scale
                 + kSponsorTextInset * 3.0f + 8.0f);
-            // Android's card: the icon band is 70 of 140dp, and media, icon and
-            // text all span the whole card rather than a padded inner area.
-            const float sponsor_media_height = sponsor_card_height * 70.0f / 140.0f;
             const ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f),
                 s_sponsor.background_color_opacity);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
@@ -5214,7 +5211,7 @@ void render_ui() {
             if (texture) {
                 const ImVec2 icon_origin = ImGui::GetCursorScreenPos();
                 const ImVec2 icon_area = ImGui::GetContentRegionAvail();
-                const ImVec2 band(icon_area.x, sponsor_media_height);
+                const ImVec2 band = icon_area;
                 const ImVec2 source((float)s_sponsor.width, (float)s_sponsor.height);
                 ImVec2 size = band;
                 ImVec2 uv0(0, 0);

@@ -1873,7 +1873,7 @@
                         android:paddingStart="4dp"
                         android:paddingEnd="4dp"
                         android:singleLine="true"
-                        android:text="become a sponsor"
+                        android:text="@string/sponsor_policy_link"
                         android:textColor="#FF60A5FA"
                         android:textSize="9sp" />
 
@@ -1915,9 +1915,8 @@
                     <ImageView
                         android:id="@+id/sponsorImage"
                         android:layout_width="match_parent"
-                        android:layout_height="70dp"
+                        android:layout_height="match_parent"
                         android:layout_gravity="top|center_horizontal"
-                        android:layout_marginTop="4dp"
                         android:contentDescription="Sponsor icon"
                         android:scaleType="centerInside" />
 
