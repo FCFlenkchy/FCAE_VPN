@@ -156,27 +156,54 @@ set(UI_SOURCES
 )
 
 # ---------------------------------------------------------------------------
-# FreeType (optional text rasteriser)
+# FreeType (text rasteriser)
 #
 # ImGui's default rasteriser is stb_truetype; misc/freetype/imgui_freetype.cpp
 # swaps in FreeType, which hints glyph stems so small UI text stays crisp and
 # renders each size on demand instead of baking a fixed atlas.
 #
-# Deliberately a soft dependency:
-#   * nothing defines IMGUI_ENABLE_FREETYPE globally. That define makes
-#     imgui.cpp require the FreeType symbol, so a machine without the library
-#     would fail to link instead of falling back. The UI selects the loader at
-#     runtime with io.Fonts->SetFontLoader(), which is in imgui.h's public API.
-#   * the Windows build here is cross-compiled on Linux. A host libfreetype
-#     found by find_package() would be x86-64 ELF, and linking it into a PE
-#     binary fails at the link step -- the late, all-platform-broken kind of
-#     failure this project keeps paying for. So a cross build never looks for
-#     it: -DFCAE_FREETYPE=system is the explicit opt-in, -DFCAE_FREETYPE=OFF
-#     the explicit opt-out, and AUTO skips the Windows cross build.
+# FreeType is built from source here and linked statically. It is not taken
+# from the system, and not linked as a shared object, for two separate reasons:
+#
+#   * Static is a packaging requirement. package-macos.sh has to embed a
+#     libfreetype.dylib and rewrite its install name when the build links one
+#     dynamically, because a package-manager FreeType only runs on a machine
+#     with that same package manager. Building it here removes the whole
+#     problem: the archive is linked in, so there is no FreeType dependency
+#     left for the shipped binary to satisfy.
+#
+#   * The system copy cannot be trusted to match the target. The CI matrix
+#     builds the macOS x86_64 leg with -DCMAKE_OSX_ARCHITECTURES=x86_64 on an
+#     Apple Silicon runner, where every library present -- Homebrew in
+#     /opt/homebrew, the Xcode SDK's own -- is thin arm64. Handing that archive
+#     to the linker does not raise "incompatible architecture": no member of it
+#     is ever a candidate, so it reports every _FT_* symbol as undefined, after
+#     a configure step that reported FreeType as found. That is the failure
+#     this project kept hitting, and it is not a FreeType limitation --
+#     FreeType builds for every target here. Built with the same
+#     CMAKE_OSX_ARCHITECTURES as the app, the archive matches by construction,
+#     which is why the source build replaces the search rather than patching
+#     around it.
+#
+# The vendored build runs with every optional format dependency (zlib, bzip2,
+# png, harfbuzz, brotli) disabled. FreeType's TrueType/CFF/Type1 engines need
+# none of them, and enabling any would pull libpng or libbrotli into the link
+# as either archives to resolve by hand or, worse, shared libraries.
 #
 # FCAE_FREETYPE_ENABLED is what the UI sees, via a generated define, so the
 # runtime call and the compiled-in loader can never disagree.
 # ---------------------------------------------------------------------------
+set(FCAE_FREETYPE_VERSION "2.13.3" CACHE STRING
+    "FreeType version to build")
+set(FCAE_FREETYPE_SHA256
+    "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
+    CACHE STRING "SHA256 of the FreeType source tarball")
+
+# Offline builds point this at a tarball already on disk; otherwise it is
+# fetched into .cache/ once and reused.
+set(FCAE_FREETYPE_TARBALL "" CACHE FILEPATH
+    "Local FreeType tarball (skips the download)")
+
 # The Rust target triple the FFI archive was built for. The CI passes this from
 # its build matrix (scripts/ci/build_steps/build-frontend-*.sh). It was ignored
 # until now -- CMake reported it under "Manually-specified variables were not
@@ -187,278 +214,155 @@ set(RUST_TARGET "" CACHE STRING
     "Rust target triple libfcae_ffi.a was built for (e.g. x86_64-apple-darwin)")
 
 set(FCAE_FREETYPE "AUTO" CACHE STRING
-    "FreeType text rasteriser: AUTO, ON, system, or OFF")
+    "FreeType text rasteriser: AUTO, ON, or OFF")
+
+# Whether a tarball on disk is the FreeType source release. An interrupted
+# download, a half-written file from a cancelled run, or a stale version under
+# the same name all have to be caught here, because the failure they cause
+# later is "archive_read_open_file(): Unrecognized archive format" from inside
+# file(ARCHIVE_EXTRACT), which says nothing about FreeType or the cache.
+#
+# At file scope on purpose: defining a function inside an if()/else() block is
+# a CMake flow-control error, not a nested definition.
+function(_fcae_freetype_ok path out_var)
+    set(${out_var} FALSE PARENT_SCOPE)
+    if(NOT EXISTS "${path}")
+        return()
+    endif()
+    file(SHA256 "${path}" _ft_actual)
+    if(_ft_actual STREQUAL FCAE_FREETYPE_SHA256)
+        set(${out_var} TRUE PARENT_SCOPE)
+    endif()
+endfunction()
 
 set(FCAE_FREETYPE_ENABLED FALSE)
-set(FCAE_FREETYPE_SOURCE "")
-set(FCAE_FREETYPE_SHARED FALSE)
+set(FCAE_FREETYPE_TARGET "")
 
 if(NOT FCAE_FREETYPE STREQUAL "OFF")
-    set(_ft_may_look TRUE)
-    # A cross build cannot use libraries from the build machine's sysroot.
-    if(CMAKE_CROSSCOMPILING AND NOT FCAE_FREETYPE STREQUAL "system"
-            AND NOT FCAE_FREETYPE STREQUAL "ON")
-        message(STATUS "FreeType: skipped (cross-compiling; pass -DFCAE_FREETYPE=system to force)")
-        set(_ft_may_look FALSE)
-    endif()
+    # FreetypeConfig.cmake installs the namespaced target; a source tree only
+    # defines plain `freetype`. Either is fine, so take whichever exists.
+    if(TARGET Freetype::Freetype)
+        set(_ft_target Freetype::Freetype)
+    elseif(TARGET freetype)
+        set(_ft_target freetype)
+    else()
+        set(_ft_target "")
 
-    if(_ft_may_look)
-        find_package(Freetype QUIET)
-        if(FREETYPE_FOUND AND FREETYPE_INCLUDE_DIRS)
-            set(FCAE_FREETYPE_ENABLED TRUE)
-            set(FCAE_FREETYPE_SOURCE "${FREETYPE_LIBRARY}")
-            # Package managers very often install both a .so/.dylib and a
-            # static archive under the same base name. Prefer the archive: a
-            # dynamically linked FreeType inside a shipped app is a load-time
-            # dependency on a path the user's machine may not have, and the
-            # macOS packaging check rejects it outright.
-            get_filename_component(_ft_dir "${FREETYPE_LIBRARY}" DIRECTORY)
-            get_filename_component(_ft_file "${FREETYPE_LIBRARY}" NAME)
-            # Strip the shared-library tail properly. NAME_WE is not enough: it
-            # removes only the last extension, so "libfreetype.so" stays
-            # "libfreetype.so" and the candidate became "libfreetype.so.a".
-            string(REGEX REPLACE "\\.[^.]*$" "" _ft_stem "${_ft_file}")
-            string(REGEX REPLACE "\\.(so|dylib)$" "" _ft_stem "${_ft_stem}")
-            foreach(_ft_ext a lib)
-                set(_ft_candidate "${_ft_dir}/${_ft_stem}.${_ft_ext}")
-                if(EXISTS "${_ft_candidate}")
-                    set(FCAE_FREETYPE_SOURCE "${_ft_candidate}")
-                    break()
-                endif()
-            endforeach()
-            # --- does this library cover the architectures being built? -----
-            #
-            # The macOS x86_64 leg builds with -arch x86_64 on an Apple Silicon
-            # runner, where Homebrew installs into /opt/homebrew. Libraries
-            # there are thin arm64. Linking one does not produce an
-            # "incompatible architecture" error: the linker finds no usable
-            # members in the archive and reports *every* symbol as undefined,
-            # which is what "_FT_New_Library, referenced from
-            # imgui_freetype.cpp.o" actually means. The arm64 leg links the
-            # same archive happily, which is why only one leg failed.
-            #
-            # So the archive is checked against CMAKE_OSX_ARCHITECTURES and
-            # dropped if it cannot serve the build. Other sources are tried
-            # below; the last resort is ImGui's own rasteriser, which needs no
-            # external library at all.
-            if(APPLE AND CMAKE_OSX_ARCHITECTURES AND FCAE_FREETYPE_SOURCE MATCHES "\\.a$")
-                find_program(FCAE_LIPO_EXECUTABLE lipo)
-                if(FCAE_LIPO_EXECUTABLE)
-                    execute_process(
-                        COMMAND "${FCAE_LIPO_EXECUTABLE}" -archs "${FCAE_FREETYPE_SOURCE}"
-                        OUTPUT_VARIABLE _ft_archs
-                        OUTPUT_STRIP_TRAILING_WHITESPACE
-                        ERROR_QUIET
-                        RESULT_VARIABLE _ft_lipo_rc)
-                    if(NOT _ft_lipo_rc EQUAL 0 OR _ft_archs STREQUAL "")
-                        # Not a Mach-O archive at all: not usable here.
-                        message(STATUS "FreeType: ${FCAE_FREETYPE_SOURCE} is unreadable for this arch, ignoring it")
-                        set(FCAE_FREETYPE_SOURCE "")
-                    else()
-                        set(_ft_covers_build TRUE)
-                        foreach(_ft_wanted IN LISTS CMAKE_OSX_ARCHITECTURES)
-                            if(NOT _ft_archs MATCHES "(^| )${_ft_wanted}( |$)")
-                                set(_ft_covers_build FALSE)
-                            endif()
-                        endforeach()
-                        if(NOT _ft_covers_build)
-                            message(STATUS
-                                "FreeType: ${FCAE_FREETYPE_SOURCE} is [${_ft_archs}] but this build targets "
-                                "[${CMAKE_OSX_ARCHITECTURES}]; it cannot be linked and is being skipped")
-                            set(FCAE_FREETYPE_SOURCE "")
-                        endif()
-                    endif()
-                endif()
+        if(FCAE_FREETYPE_TARBALL)
+            # The user named this file, so a bad hash is their typo or a bad
+            # download -- report it rather than silently fetching a different one.
+            _fcae_freetype_ok("${FCAE_FREETYPE_TARBALL}" _ft_ok)
+            if(NOT _ft_ok)
+                message(FATAL_ERROR
+                    "FreeType: -DFCAE_FREETYPE_TARBALL=${FCAE_FREETYPE_TARBALL} is missing "
+                    "or is not the ${FCAE_FREETYPE_VERSION} source tarball "
+                    "(expected sha256 ${FCAE_FREETYPE_SHA256}).")
             endif()
-
-            # A prefix that does cover the build, if one exists. Homebrew on an
-            # Apple Silicon runner has /usr/local only on Intel-era images, but
-            # a universal build dropped there (or in /opt/local) is exactly what
-            # an x86_64 leg needs, so it is worth one look.
-            if(APPLE AND FCAE_FREETYPE_SOURCE STREQUAL "")
-                foreach(_ft_prefix "/usr/local/opt/freetype" "/opt/local" "/opt/homebrew/opt/freetype")
-                    if(EXISTS "${_ft_prefix}/lib/libfreetype.a")
-                        execute_process(
-                            COMMAND "${FCAE_LIPO_EXECUTABLE}" -archs "${_ft_prefix}/lib/libfreetype.a"
-                            OUTPUT_VARIABLE _ft_alt_archs
-                            OUTPUT_STRIP_TRAILING_WHITESPACE
-                            ERROR_QUIET
-                            RESULT_VARIABLE _ft_alt_rc)
-                        set(_ft_alt_ok TRUE)
-                        foreach(_ft_wanted IN LISTS CMAKE_OSX_ARCHITECTURES)
-                            if(NOT _ft_alt_archs MATCHES "(^| )${_ft_wanted}( |$)")
-                                set(_ft_alt_ok FALSE)
-                            endif()
-                        endforeach()
-                        if(_ft_alt_rc EQUAL 0 AND _ft_alt_ok)
-                            set(FCAE_FREETYPE_SOURCE "${_ft_prefix}/lib/libfreetype.a")
-                            message(STATUS "FreeType: using ${FCAE_FREETYPE_SOURCE} ([${_ft_alt_archs}])")
-                            break()
-                        endif()
-                    endif()
-                endforeach()
-            endif()
-
-            # Nothing usable: go without rather than fail the link. The UI
-            # draws its text with ImGui's built-in rasteriser, which is a
-            # little less crisp but needs no external library -- and a build
-            # that ships beats a build that cannot link.
-            if(APPLE AND CMAKE_OSX_ARCHITECTURES AND FCAE_FREETYPE_SOURCE STREQUAL "")
-                message(STATUS
-                    "FreeType: no library covers [${CMAKE_OSX_ARCHITECTURES}]; "
-                    "building with ImGui's built-in text rasteriser instead")
-                set(FCAE_FREETYPE_ENABLED FALSE)
-            endif()
-
-            # Still shared? Then packaging has to put it inside the bundle.
-            if(FCAE_FREETYPE_ENABLED AND FCAE_FREETYPE_SOURCE MATCHES "\\.(so|dylib)(\\.[0-9.]+)?$")
-                set(FCAE_FREETYPE_SHARED TRUE)
-                message(STATUS "FreeType: ${FREETYPE_VERSION_STRING} (shared, ${FCAE_FREETYPE_SOURCE}) -- the bundle must embed it")
-            elseif(FCAE_FREETYPE_ENABLED)
-                message(STATUS "FreeType: ${FREETYPE_VERSION_STRING} (static, ${FCAE_FREETYPE_SOURCE})")
-            endif()
-        elseif(FCAE_FREETYPE STREQUAL "ON" OR FCAE_FREETYPE STREQUAL "system")
-            message(FATAL_ERROR
-                "FCAE_FREETYPE=${FCAE_FREETYPE} but no FreeType was found. "
-                "Install libfreetype6-dev / freetype2, or set -DFCAE_FREETYPE=OFF.")
+            set(_ft_tarball "${FCAE_FREETYPE_TARBALL}")
         else()
-            message(STATUS "FreeType: not found, using ImGui's built-in rasteriser")
+            set(_ft_tarball
+                "${CMAKE_SOURCE_DIR}/.cache/freetype-${FCAE_FREETYPE_VERSION}.tar.xz")
+            _fcae_freetype_ok("${_ft_tarball}" _ft_ok)
+            if(NOT _ft_ok)
+                # A cached file that does not match is discarded instead of
+                # reused; otherwise one interrupted download poisons every
+                # later configure on the same checkout.
+                if(EXISTS "${_ft_tarball}")
+                    message(STATUS "FreeType: cached tarball is incomplete, fetching again")
+                    file(REMOVE "${_ft_tarball}")
+                endif()
+                message(STATUS "FreeType: downloading ${FCAE_FREETYPE_VERSION}")
+                file(DOWNLOAD
+                    "https://download.savannah.gnu.org/releases/freetype/freetype-${FCAE_FREETYPE_VERSION}.tar.xz"
+                    "${_ft_tarball}.tmp"
+                    EXPECTED_HASH SHA256=${FCAE_FREETYPE_SHA256}
+                    TLS_VERIFY ON
+                    STATUS _ft_dl_status)
+                list(GET _ft_dl_status 0 _ft_dl_rc)
+                if(NOT _ft_dl_rc EQUAL 0)
+                    list(GET _ft_dl_status 1 _ft_dl_msg)
+                    file(REMOVE "${_ft_tarball}.tmp")
+                    message(FATAL_ERROR
+                        "FreeType ${FCAE_FREETYPE_VERSION} could not be downloaded: ${_ft_dl_msg}\n"
+                        "  url: https://download.savannah.gnu.org/releases/freetype/freetype-${FCAE_FREETYPE_VERSION}.tar.xz\n"
+                        "  Place the tarball at ${_ft_tarball} to build offline, or configure "
+                        "with -DFCAE_FREETYPE=OFF to build without the FreeType rasteriser.")
+                endif()
+                file(RENAME "${_ft_tarball}.tmp" "${_ft_tarball}")
+            endif()
         endif()
+
+        # Extracted into the build tree, never in place: FreeType's own
+        # CMakeLists.txt refuses to run over a tree that still holds a previous
+        # configure's CMakeCache.txt, and .cache/ survives between builds.
+        set(_ft_src_root "${CMAKE_BINARY_DIR}/freetype-src")
+        file(ARCHIVE_EXTRACT
+            INPUT "${_ft_tarball}"
+            DESTINATION "${_ft_src_root}")
+        set(_ft_source_dir "${_ft_src_root}/freetype-${FCAE_FREETYPE_VERSION}")
+        if(NOT EXISTS "${_ft_source_dir}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "FreeType: ${_ft_tarball} did not contain "
+                "freetype-${FCAE_FREETYPE_VERSION}/CMakeLists.txt")
+        endif()
+
+        # Cache entries, because FreeType reads these with option() and
+        # cmake_dependent_option(). See the header for why they are all off.
+        foreach(_ft_no_dep ZLIB BZIP2 PNG HARFBUZZ BROTLI)
+            set(FT_DISABLE_${_ft_no_dep} TRUE CACHE BOOL "" FORCE)
+        endforeach()
+
+        # The vendored tree declares cmake_minimum_required(VERSION 3.10..3.20),
+        # so every configure prints one deprecation warning about its policy
+        # floor. It is left visible on purpose: it is a third-party file this
+        # project does not patch, and the alternatives are worse. The
+        # CMAKE_WARN_DEPRECATED variable that would silence it is itself
+        # deprecated as of CMake 4.4 and ignored under policy CMP0218, so using
+        # it would trade a true warning for a stale mechanism.
+        add_subdirectory("${_ft_source_dir}" "${CMAKE_BINARY_DIR}/freetype-build"
+            EXCLUDE_FROM_ALL)
+
+        if(TARGET freetype)
+            set(_ft_target freetype)
+        elseif(TARGET Freetype::Freetype)
+            set(_ft_target Freetype::Freetype)
+        endif()
+        if(NOT _ft_target)
+            message(FATAL_ERROR "FreeType: the vendored build produced no usable target")
+        endif()
+        set(_ft_note "built from source")
     endif()
+
+    if(NOT DEFINED _ft_note)
+        set(_ft_note "from the toolchain")
+    endif()
+
+    # _ft_target is resolved inside the if()/else() above, which is a separate
+    # block scope; publishing it here is what lets fcae_apply_freetype() -- a
+    # function, called much later from inside the per-platform if() chains --
+    # link the same target the message above just reported.
+    set(FCAE_FREETYPE_TARGET "${_ft_target}")
+    set(FCAE_FREETYPE_ENABLED TRUE)
+    message(STATUS
+        "FreeType: ${FCAE_FREETYPE_VERSION} (static, ${_ft_note})")
 endif()
 
 if(FCAE_FREETYPE_ENABLED)
     list(APPEND IMGUI_SOURCES ${IMGUI_DIR}/misc/freetype/imgui_freetype.cpp)
 endif()
 
-# Resolve one of FreeType's own dependencies as a static archive and link it
-# into `target_name`. Missing dependencies are skipped, not fatal: the point is
-# to supply what the FreeType build actually calls out to.
-#
-# Two details in here are load-bearing, and both cost a debugging round:
-#
-#  * find_library() prefers the shared object. A directory holding both libz.so
-#    and libz.a resolves to libz.so every time, so the result is accepted only
-#    if it really ends in .a, and a static sibling is looked for by hand
-#    otherwise. (find_library(... SUFFIXES ".a") does not do this job: on CMake
-#    3.31 it still returned libz.so.)
-#  * find_library() caches under its result variable. Without clearing it, the
-#    second call silently reuses the first one's path -- every dependency
-#    resolved to libz.so, which is exactly what happened before the unset().
-#
-# Defined at file scope on purpose -- defining a function inside an if()/else()
-# block is a CMake flow-control error, not a nested definition.
-function(_fcae_link_static_dep target_name dep_names)
-    unset(_fcae_dep_lib CACHE)
-    find_library(_fcae_dep_lib NAMES ${dep_names})
-    if(_fcae_dep_lib AND _fcae_dep_lib MATCHES "\\.a$")
-        target_link_libraries(${target_name} PRIVATE ${_fcae_dep_lib})
-    else()
-        get_filename_component(_fcae_dep_dir "${_fcae_dep_lib}" DIRECTORY)
-        if(_fcae_dep_lib)
-            foreach(_fcae_stem IN LISTS dep_names)
-                if(EXISTS "${_fcae_dep_dir}/lib${_fcae_stem}.a")
-                    target_link_libraries(${target_name} PRIVATE "${_fcae_dep_dir}/lib${_fcae_stem}.a")
-                    break()
-                endif()
-            endforeach()
-        endif()
-    endif()
-endfunction()
-
-# One helper, so the three platform targets cannot drift apart on this: adds
-# the include paths, the define ui_render.cpp tests, and the library.
+# Adds the vendored FreeType to a platform target: the include paths, the
+# define ui_render.cpp tests, and the archive. All three platforms take this
+# one path, so they cannot drift apart on it.
 function(fcae_apply_freetype target_name)
     if(NOT FCAE_FREETYPE_ENABLED)
         return()
     endif()
-    target_include_directories(${target_name} PRIVATE
-        ${FREETYPE_INCLUDE_DIRS}
-        ${IMGUI_DIR}/misc/freetype
-    )
+    target_link_libraries(${target_name} PRIVATE ${FCAE_FREETYPE_TARGET})
+    target_include_directories(${target_name} PRIVATE ${IMGUI_DIR}/misc/freetype)
     target_compile_definitions(${target_name} PRIVATE FCAE_HAVE_FREETYPE=1)
-    if(FCAE_FREETYPE_SOURCE)
-        # A static FreeType is not self-contained, and FindFreetype does not
-        # say so: its FREETYPE_LIBRARIES is just the one library path, with the
-        # dependencies already baked into the shared object it normally points
-        # at. Linking the bare archive therefore fails at the very end of the
-        # build with "symbol(s) not found" for inflate, BZ2_*, png_* and
-        # HVF_* -- after everything has compiled, the most expensive place to
-        # find out.
-        #
-        # So the dependencies are resolved here by name. Everything is optional
-        # except zlib and bzip2, which a normal FreeType build always has;
-        # each is linked on whichever platform names it, and simply skipped
-        # where it does not exist.
-        target_link_libraries(${target_name} PRIVATE ${FCAE_FREETYPE_SOURCE})
-
-        if(WIN32)
-            # MinGW/MSYS2 name the same libraries this way; they resolve to the
-            # import libraries of whatever the toolchain ships.
-            target_link_libraries(${target_name} PRIVATE z bz2)
-        else()
-            # Each dependency is resolved archive-first. Linking FreeType
-            # statically and then dragging in libpng/libbrotli as shared
-            # libraries would leave the shipped app depending on Homebrew paths
-            # anyway -- it would just move the problem one library over.
-            #
-            # Two names are tried per dependency because packagers differ:
-            # a normal install has libpng16/libbrotlidec, Homebrew additionally
-            # suffixes its static ones "-static".
-            # Order matters for static archives: the linker makes a single
-            # left-to-right pass, so a library has to come after everything
-            # that references it. libpng needs zlib's deflate, brotlidec needs
-            # brotlicommon, harfbuzz needs zlib and ICU -- so the leaf
-            # libraries go last. Getting this backwards shows up as
-            # "undefined reference to deflate" with every file already
-            # compiled.
-            #
-            # Newer FreeType releases compile HarfBuzz' hvf shaper in and call
-            # out to it: that is the HVF_* symbols in the macOS link error.
-            _fcae_link_static_dep(${target_name} "harfbuzz;harfbuzz-static")
-            _fcae_link_static_dep(${target_name} "png16;png")
-            _fcae_link_static_dep(${target_name} "brotlidec;brotlidec-static")
-            _fcae_link_static_dep(${target_name} "bz2")
-            _fcae_link_static_dep(${target_name} "brotlicommon;brotlicommon-static")
-            _fcae_link_static_dep(${target_name} "z;zlib")
-        endif()
-        # Newer FreeType (2.15+) builds in an HVF driver for Apple's variable
-        # font support. It is not optional at build time -- configure has no
-        # --without-hvf switch, it just compiles the driver in whenever the SDK
-        # provides <hvf/Scaler.h> -- and the driver calls out to Apple's
-        # /usr/lib/libhvf.dylib. Linking the bare archive therefore leaves eight
-        # _HVF_* symbols unresolved (libhvf.a[26](hvf.o)).
-        #
-        # libhvf is part of the OS, not of FreeType, so it has to be named here
-        # like the other dependencies. It is absent before macOS 15.4, where the
-        # symbols are simply not needed either: if it cannot be found, nothing is
-        # added and the link is attempted as before.
-        if(APPLE)
-            find_library(FCAE_HVF_LIB NAMES hvf)
-            if(FCAE_HVF_LIB)
-                target_link_libraries(${target_name} PRIVATE ${FCAE_HVF_LIB})
-            endif()
-        endif()
-
-        if(FREETYPE_LIBRARIES)
-            # Any remaining entry is a dependency FindFreetype knows about. Its
-            # own freetype entry is skipped by *name*, not by comparing against
-            # FCAE_FREETYPE_SOURCE: that variable holds the archive while this
-            # list holds the shared library, so a string compare never matched
-            # and the .dylib was linked right after the .a -- which is the
-            # "ignoring duplicate libraries" warning in the build log, and a
-            # load-time dependency on Homebrew reintroduced by the back door.
-            foreach(_ft_dep IN LISTS FREETYPE_LIBRARIES)
-                get_filename_component(_ft_base "${_ft_dep}" NAME)
-                if(NOT _ft_base MATCHES "^libfreetype")
-                    target_link_libraries(${target_name} PRIVATE ${_ft_dep})
-                endif()
-            endforeach()
-        endif()
-    elseif(FREETYPE_LIBRARIES)
-        target_link_libraries(${target_name} PRIVATE ${FREETYPE_LIBRARIES})
-    endif()
 endfunction()
+
 
 # Public C header for the FFI layer, so sources just #include "fcae.h".
 set(FCAE_FFI_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/core/fcae-ffi/include)

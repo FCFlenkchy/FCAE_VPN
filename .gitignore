@@ -10,6 +10,9 @@
 *.exe
 
 # CMake
+# Vendored dependency tarballs. CMakeLists.txt fetches FreeType's source here
+# once and reuses it, so this must never be committed.
+/.cache/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
