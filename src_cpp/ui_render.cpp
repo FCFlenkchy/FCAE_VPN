@@ -4954,11 +4954,11 @@ void render_ui() {
             ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 12.0f);
             if (ImGui::BeginPopupModal("##about_popup", nullptr,
                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar)) {
+                const float footer_height = ImGui::GetFrameHeightWithSpacing();
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 7.0f));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
                 ImGui::TextUnformatted("About");
                 ImGui::Spacing();
-                const float footer_height = ImGui::GetFrameHeightWithSpacing();
                 if (ImGui::BeginChild("##about_content", ImVec2(0, -footer_height))) {
                     auto link = [](const char* label, const char* url) {
                         const float text_width = ImGui::CalcTextSize(label).x;
@@ -5029,15 +5029,9 @@ void render_ui() {
                         ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1), "GRAM address copied");
                 }
                 ImGui::EndChild();
-                const float close_width = ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2.0f;
-                ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
-                    ImGui::GetWindowContentRegionMax().x - close_width));
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 1, 1, 1));
-                if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
-                ImGui::PopStyleColor(2);
                 ImGui::PopStyleColor();
                 ImGui::PopStyleVar();
+                if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
             }
             ImGui::PopStyleVar(2);
