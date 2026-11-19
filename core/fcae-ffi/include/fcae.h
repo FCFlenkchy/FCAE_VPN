@@ -90,7 +90,7 @@ typedef enum {
     FCAE_BACKEND_FIREFOX = 2,
     FCAE_BACKEND_XRAY    = 3,  /* Xray-core, built in                   */
     FCAE_BACKEND_SINGBOX = 4,  /* sing-box, built in                    */
-    FCAE_BACKEND_MIHOMO  = 5   /* isolated Mihomo process               */
+    FCAE_BACKEND_MIHOMO  = 5   /* Mihomo, built in               */
 } FcaeBackend;
 
 /* What a backend supports, so the UI can describe it rather than hardcoding

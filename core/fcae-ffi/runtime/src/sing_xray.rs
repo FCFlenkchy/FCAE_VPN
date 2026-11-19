@@ -2816,14 +2816,14 @@ static LIVE: Mutex<Vec<LiveInstance>> = Mutex::new(Vec::new());
 
 /// Publish an instance the moment its handle owns the core, and until it is
 /// stopped it is what the connection info lists.
-pub(crate) fn publish_live(backend: FcaeBackend, handle: u64, name: String) {
+fn publish_live(backend: FcaeBackend, handle: u64, name: String) {
     let mut live = LIVE.lock();
     live.retain(|instance| instance.backend != backend || instance.handle != handle);
     live.push(LiveInstance { backend, handle, name });
 }
 
 /// Forget one instance once its core is closed. Idempotent.
-pub(crate) fn retire_live(backend: FcaeBackend, handle: u64) {
+fn retire_live(backend: FcaeBackend, handle: u64) {
     LIVE.lock()
         .retain(|instance| instance.backend != backend || instance.handle != handle);
 }
@@ -3344,7 +3344,7 @@ impl Running {
 }
 
 /// Measure the session's latency until one lands, then stop.
-pub(crate) fn measure_until_known(probe: &RttProbe, rtt_ms: &AtomicU32, stop: &AtomicBool) {
+fn measure_until_known(probe: &RttProbe, rtt_ms: &AtomicU32, stop: &AtomicBool) {
     let mut failed: u32 = 0;
     loop {
         if stop.load(Ordering::Acquire) || rtt_ms.load(Ordering::Acquire) != 0 {
@@ -3492,7 +3492,7 @@ enum RttSample {
 
 /// How a session measures its latency, decided once when it starts.
 #[derive(Clone)]
-pub(crate) struct RttProbe {
+struct RttProbe {
     /// What the published number is.
     sample: RttSample,
     /// What has to answer through the tunnel before that number is published.
@@ -3509,7 +3509,7 @@ pub(crate) struct RttProbe {
 impl RttProbe {
     /// The plan for this session, or `None` when there is nothing honest to
     /// measure.
-    pub(crate) fn plan(
+    fn plan(
         profile: &CoreProfile,
         upstream: Option<UpstreamProxy>,
         endpoints: &Endpoints,

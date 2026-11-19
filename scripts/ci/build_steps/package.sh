@@ -9,12 +9,6 @@ case "${FCAE_MATRIX_NAME}" in
   windows-x64) cp build/fcaevpn.exe "package/$ARTIFACT.exe" ;;
   *)           cp build/fcaevpn     "package/$ARTIFACT" ;;
 esac
-case "${FCAE_MATRIX_NAME}" in
-  windows-x64) cp build/mihomo.exe package/mihomo.exe ;;
-  linux-x64) cp build/mihomo package/mihomo ;;
-esac
-cp core/mihomo/LICENSE package/mihomo-LICENSE.txt
-cp build/mihomo-source.json package/mihomo-source.json
 chmod +x package/* 2>/dev/null || true
 
 if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
@@ -53,7 +47,7 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
   # The app exe was copied straight to its released name, so it is
   # the only .exe allowed to be here. Anything else is a leftover
   # from the restored build/ cache.
-  STRAY="$(find . -maxdepth 1 -name '*.exe' ! -name "$EXE" ! -name mihomo.exe -printf '%f\n')"
+  STRAY="$(find . -maxdepth 1 -name '*.exe' ! -name "$EXE" -printf '%f\n')"
   if [ -n "$STRAY" ]; then
     echo "::error::unexpected executable in the package:"
     printf '%s\n' "$STRAY" | sed 's/^/  /'

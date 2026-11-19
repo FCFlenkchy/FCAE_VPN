@@ -23,6 +23,7 @@ psiphon = []
 xray = []
 # Include the sing-box shim in the same Go archive (Go tag `fcae_singbox`).
 singbox = []
+mihomo = []
 
 [dependencies]
 fcae-runtime.workspace = true

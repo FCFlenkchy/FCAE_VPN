@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-python3 scripts/core/stage-mihomo.py "$FCAE_MATRIX_NAME"
-
 rm -rf target/release/build/aether-engine-* target/debug/build/aether-engine-* 2>/dev/null || true
 
 if [ "${FCAE_MATRIX_NAME}" = "macos-x64" ]; then

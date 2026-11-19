@@ -1529,6 +1529,10 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         }
     }
 
+    if usize::from(cfg.backend == FcaeBackend::Mihomo)
+        + cfg.chain.iter().filter(|hop|hop.backend == FcaeBackend::Mihomo).count() > 1 {
+        return Err(CoreError::InvalidConfig("Mihomo's in-process core supports one instance; repeated Mihomo hops are not supported".into()));
+    }
     Ok(cfg)
 }
 

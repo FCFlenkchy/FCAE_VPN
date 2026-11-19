@@ -18,6 +18,7 @@ members = [
     "bridges/hev-socks5-tunnel",
     "bridges/xray",
     "bridges/singbox",
+    "bridges/mihomo",
     "firefox",
     "bridges/firefox",
 ]
@@ -42,6 +43,7 @@ fcae-bridge-zeptun = { path = "bridges/zeptun" }
 fcae-bridge-hev-socks5-tunnel = { path = "bridges/hev-socks5-tunnel" }
 fcae-bridge-xray = { path = "bridges/xray" }
 fcae-bridge-singbox = { path = "bridges/singbox" }
+fcae-bridge-mihomo = { path = "bridges/mihomo" }
 fcae-firefox-bridge = { path = "bridges/firefox" }
 # Nothing of the engine is switched on implicitly. Today its only default is
 # `default = []`, so this pins the intent: Tor is asked for by name (the
@@ -59,7 +61,7 @@ once_cell = "1"
 parking_lot = "0.12"
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "process"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
 
 [profile.release]
 opt-level = 3

@@ -1724,6 +1724,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcae-bridge-mihomo"
+version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "fcae-abi",
+ "fcae-go-bridge",
+ "fcae-runtime",
+ "log",
+ "serde_json",
+]
+
+[[package]]
 name = "fcae-bridge-psiphon"
 version = "2.0.0"
 dependencies = [
@@ -1784,6 +1796,7 @@ dependencies = [
  "fcae-abi",
  "fcae-bridge-aether",
  "fcae-bridge-hev-socks5-tunnel",
+ "fcae-bridge-mihomo",
  "fcae-bridge-psiphon",
  "fcae-bridge-singbox",
  "fcae-bridge-xray",
@@ -1874,7 +1887,6 @@ dependencies = [
  "fcae-abi",
  "fcae-build",
  "futures",
- "getrandom 0.4.3",
  "libc",
  "log",
  "once_cell",
@@ -1884,7 +1896,6 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
- "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "windows-sys 0.61.2",

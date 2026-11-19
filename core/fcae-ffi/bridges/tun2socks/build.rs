@@ -44,11 +44,12 @@ fn main() {
     let psiphon = cfg!(feature = "psiphon");
     let xray = cfg!(feature = "xray");
     let singbox = cfg!(feature = "singbox");
+    let mihomo = cfg!(feature = "mihomo");
 
     if cfg!(feature = "stub") {
         // The archive is what exports these symbols; a stub build that also
         // asks for a core would fail at link time with an unhelpful message.
-        if psiphon || xray || singbox {
+        if psiphon || xray || singbox || mihomo {
             panic!(
                 "a proxy core needs the live Go archive, but `fcae-go-bridge/stub` is enabled; \
                  drop `stub`, or drop the core that needs it"
@@ -90,10 +91,15 @@ fn main() {
     fcae_build::go::track_sources(&go_dir);
     fcae_build::rerun_if_changed(submodule.join("go.mod"));
 
-    let module = assemble(&root, &go_dir, &submodule, psiphon, xray, singbox);
+    let module = assemble(&root, &go_dir, &submodule, psiphon, xray, singbox, mihomo);
 
     let mut archive = fcae_build::go::CArchive::new(&module, ".", "libfcae_go_bridge");
     archive.target = target;
+    if mihomo {
+        archive.tags.push("fcae_mihomo".into());
+        archive.tags.push("with_gvisor".into());
+        archive.ldflags.push("-X github.com/metacubex/mihomo/constant.Version=v1.19.34".into());
+    }
     if xray {
         archive.tags.push("fcae_xray".into());
     }
@@ -211,7 +217,7 @@ fn main() {
             );
             fcae_build::note(format!(
                 "one Go archive built in-process (tun2socks{}, no subprocess, no embedded binary)",
-                cores(psiphon, xray, singbox)
+                cores(psiphon, xray, singbox, mihomo)
             ));
         }
         Err(e) => panic!(
@@ -223,7 +229,7 @@ fn main() {
     }
 }
 
-fn cores(psiphon: bool, xray: bool, singbox: bool) -> String {
+fn cores(psiphon: bool, xray: bool, singbox: bool, mihomo: bool) -> String {
     let mut names = Vec::new();
     if psiphon {
         names.push("psiphon");
@@ -234,6 +240,7 @@ fn cores(psiphon: bool, xray: bool, singbox: bool) -> String {
     if singbox {
         names.push("sing-box");
     }
+    if mihomo { names.push("mihomo"); }
     if names.is_empty() {
         String::new()
     } else {
@@ -254,6 +261,7 @@ fn assemble(
     psiphon: bool,
     xray: bool,
     singbox: bool,
+    mihomo: bool,
 ) -> PathBuf {
     let module = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("go-bridge");
     std::fs::create_dir_all(&module).expect("create the Go bridge module");
@@ -278,6 +286,7 @@ fn assemble(
     for (enabled, dir, name) in [
         (xray, "xray", "xray.go"),
         (singbox, "singbox", "singbox.go"),
+        (mihomo, "mihomo", "mihomo.go"),
     ] {
         if !enabled {
             continue;
@@ -287,6 +296,13 @@ fn assemble(
         copy(&shim, &module.join(name));
     }
 
+    if mihomo && singbox {
+        let source = root.join("core/fcae-ffi/bridges/mihomo/go/expvar/expvar.go");
+        fcae_build::rerun_if_changed(&source);
+        let destination=module.join("mihomoexpvar");
+        std::fs::create_dir_all(&destination).expect("create namespaced metrics package");
+        copy(&source,&destination.join("expvar.go"));
+    }
     let local = |path: &Path| {
         assert!(
             path.is_absolute() && path.is_dir(),
@@ -322,6 +338,11 @@ fn assemble(
         manifest.push_str(&format!(
             "\nrequire github.com/sagernet/sing-box {SING_BOX}\n"
         ));
+    }
+    if mihomo {
+        let source = root.join("core/mihomo");
+        fcae_build::go::track_sources(&source);
+        manifest.push_str(&format!("\nrequire github.com/metacubex/mihomo v0.0.0\nreplace github.com/metacubex/mihomo => {}\n",local(&source)));
     }
     // Psiphon's quic-go fork decodes with qpack's pre-0.6 API; sing-box's and
     // Xray-core's forks require 0.6. MVS would hand all three 0.6.0, which

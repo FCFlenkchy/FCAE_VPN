@@ -279,6 +279,11 @@ impl<'a> CArchive<'a> {
             crate::note("using the committed go.sum (set FCAE_GO_TIDY=1 to refresh)");
         }
 
+        if self.tags.iter().any(|tag| tag == "fcae_mihomo")
+            && self.tags.iter().any(|tag| tag == "fcae_singbox")
+        {
+            isolate_mihomo_metrics(&go, self.module_dir)?;
+        }
         let mut ldflags = self.ldflags.clone();
         if shared && self.target.is_android() {
             // Android 15 ships 16 KB memory pages. A shared object linked with
@@ -303,6 +308,7 @@ impl<'a> CArchive<'a> {
         if !self.tags.is_empty() {
             cmd.arg("-tags").arg(self.tags.join(","));
         }
+
         if !ldflags.is_empty() {
             cmd.arg("-ldflags").arg(ldflags.join(" "));
         }
@@ -595,4 +601,71 @@ fn configure_ios_cgo(command: &mut Command) -> Result<(), GoError> {
         );
     command.env_remove("MACOSX_DEPLOYMENT_TARGET");
     Ok(())
+}
+
+
+// Tailscale forks publish identical expvar keys during package initialization.
+// Adapt a generated copy, keeping upstream sources and the module cache intact.
+fn isolate_mihomo_metrics(go: &str, module: &Path) -> Result<(), GoError> {
+    let listed = Command::new(go)
+        .current_dir(module)
+        .args([
+            "list",
+            "-m",
+            "-f",
+            "{{.Dir}}",
+            "github.com/metacubex/tailscale",
+        ])
+        .env("GOTOOLCHAIN", "auto")
+        .env("GOFLAGS", "-mod=readonly")
+        .output()
+        .map_err(|e| GoError::Build(e.to_string()))?;
+    if !listed.status.success() {
+        return Err(GoError::Build(
+            String::from_utf8_lossy(&listed.stderr).into_owned(),
+        ));
+    }
+    let root = PathBuf::from(String::from_utf8_lossy(&listed.stdout).trim());
+    let destination = module.join("mihomo-tailscale");
+    if root == destination {
+        return Ok(());
+    }
+    let mut pending = vec![root.clone()];
+    let mut replaced = 0;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).map_err(|e| GoError::Build(e.to_string()))? {
+            let path = entry.map_err(|e| GoError::Build(e.to_string()))?.path();
+            let output = destination.join(
+                path.strip_prefix(&root)
+                    .map_err(|e| GoError::Build(e.to_string()))?,
+            );
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            std::fs::create_dir_all(output.parent().expect("generated source parent"))
+                .map_err(|e| GoError::Build(e.to_string()))?;
+            let mut content = std::fs::read(&path).map_err(|e| GoError::Build(e.to_string()))?;
+            if path.extension().is_some_and(|extension| extension == "go") {
+                let text = String::from_utf8(content).map_err(|e| GoError::Build(e.to_string()))?;
+                if text.contains("\"expvar\"") {
+                    replaced += 1;
+                }
+                content=text.replace("\"expvar\"","\"github.com/FCFlenkchy/FCAE_VPN/core/fcae-ffi/bridges/tun2socks/mihomoexpvar\"").into_bytes();
+            }
+            std::fs::write(output, content).map_err(|e| GoError::Build(e.to_string()))?;
+        }
+    }
+    if replaced == 0 {
+        return Err(GoError::Build(
+            "Mihomo Tailscale metrics imports changed; review the namespace adapter".into(),
+        ));
+    }
+    let replacement = format!("github.com/metacubex/tailscale={}", destination.display());
+    CArchive::run_go_step(
+        go,
+        module,
+        &["mod", "edit", "-replace", &replacement],
+        "isolate Mihomo metrics",
+    )
 }

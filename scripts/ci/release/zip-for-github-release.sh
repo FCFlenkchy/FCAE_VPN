@@ -23,7 +23,7 @@ for dir in artifacts/*/; do
       cd "$dir"
       # upload/download-artifact do not preserve Unix modes; the
       # unzipped binary must run without a chmod detour.
-      find . -maxdepth 1 -type f \( -name 'FCAE_VPN-*' -o -name mihomo \) ! -name '*.asc' ! -name '*.exe' -exec chmod +x {} +
+      find . -maxdepth 1 -type f -name 'FCAE_VPN-*' ! -name '*.asc' ! -name '*.exe' -exec chmod +x {} +
       zip -9 -j "../../release-zips/${zip_name}" ./*
     )
     echo "Created release-zips/${zip_name}"

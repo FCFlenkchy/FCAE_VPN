@@ -8,10 +8,6 @@ mkdir -p "$APP/Contents/Frameworks"
 mkdir -p "$APP/Contents/Resources"
 
 cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
-cp build/mihomo "$APP/Contents/MacOS/mihomo"
-chmod +x "$APP/Contents/MacOS/mihomo"
-cp core/mihomo/LICENSE "$APP/Contents/Resources/mihomo-LICENSE.txt"
-cp build/mihomo-source.json "$APP/Contents/Resources/mihomo-source.json"
 chmod +x "$APP/Contents/MacOS/fcaevpn"
 # Desktop Psiphon shares the statically linked Go archive with tun2socks.
 
@@ -139,7 +135,6 @@ fi
 # The cronet dylib is loaded inside the process, not by the loader, so it is
 # code of its own and carries its own signature. Signing it before the bundle
 # keeps the seal over it intact.
-sign "$APP/Contents/MacOS/mihomo"
 sign "$APP/Contents/MacOS/libcronet.dylib"
 if [ -n "$FT_DYLIB" ] && [ -f "$FT_DYLIB" ]; then
   sign "$APP/Contents/Frameworks/$(basename "$FT_DYLIB")"

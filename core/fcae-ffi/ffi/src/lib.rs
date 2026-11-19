@@ -659,7 +659,7 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         #[cfg(feature = "singbox")]
         fcae_bridge_singbox::register();
         #[cfg(feature = "mihomo")]
-        fcae_runtime::registry::register(FcaeBackend::Mihomo, || std::sync::Arc::new(fcae_runtime::mihomo::MihomoBackend));
+        fcae_bridge_mihomo::register();
 
         #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
         let engines = Arc::new(TunEngines {
@@ -1392,7 +1392,7 @@ fn listener_records() -> Vec<String> {
     #[cfg(feature = "singbox")]
     let singbox = fcae_bridge_singbox::listeners();
     #[cfg(feature = "mihomo")]
-    let mihomo = fcae_runtime::mihomo::listeners();
+    let mihomo = fcae_bridge_mihomo::listeners();
     let mut records = Vec::new();
     let mut position = 0;
     for instance in live {
