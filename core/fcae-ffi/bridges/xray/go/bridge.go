@@ -31,6 +31,7 @@ static void xray_invoke_log(xray_log_fn fn, int level, const char *msg) {
 import "C"
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -192,10 +193,16 @@ func init() {
 // which is per-instance work that a second hop must not be serialised behind.
 func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 	text := C.GoString(config)
-	// "json" is the format `main/distro/all` registers through serial.
-	// StartInstance starts the instance as well as building it.
-	created, err := xcore.StartInstance("json", []byte(text))
+	configOptions, err := xcore.LoadConfig("json", bytes.NewReader([]byte(text)))
 	if err != nil {
+		return C.CString("xray: " + err.Error())
+	}
+	created, err := xcore.New(configOptions)
+	if err != nil {
+		return C.CString("xray: " + err.Error())
+	}
+	if err = created.Start(); err != nil {
+		_ = created.Close()
 		return C.CString("xray: " + err.Error())
 	}
 	core := &xrayCore{instance: created, listeners: xrayInbounds(text), label: xrayFlavor(text)}

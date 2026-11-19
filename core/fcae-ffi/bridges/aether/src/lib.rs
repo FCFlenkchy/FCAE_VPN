@@ -70,6 +70,31 @@ struct EngineJob {
     claimed: bool,
 }
 
+/// Retain teardown ownership if a start or stop future is dropped at an await.
+struct EngineJobGuard {
+    job: u64,
+    addr: SocketAddr,
+    armed: bool,
+}
+
+impl EngineJobGuard {
+    fn new(job: u64, addr: SocketAddr) -> Self {
+        Self { job, addr, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for EngineJobGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            retire_job(self.job, self.addr);
+        }
+    }
+}
+
 struct PendingTeardown {
     job: u64,
     addr: SocketAddr,
@@ -183,17 +208,11 @@ impl Backend for AetherBackend {
         cx.report(FcaeState::Connecting, "Establishing tunnel…");
         let job = ffi_start()?;
         LIVE_JOBS.lock().insert(job, EngineJob { addr: socks_addr, claimed: false });
+        let mut job_guard = EngineJobGuard::new(job, socks_addr);
 
         let timeout = if cfg.tor.is_enabled() { cfg.tor_start_timeout() } else { cfg.start_timeout() };
-        let ready = match wait_for_socks(socks_addr, timeout, job).await {
-            Ok(ready) => ready,
-            Err(error) => {
-                retire_job(job, socks_addr);
-                return Err(error);
-            }
-        };
+        let ready = wait_for_socks(socks_addr, timeout, job).await?;
         if !ready {
-            retire_job(job, socks_addr);
             return Err(CoreError::StartFailed(format!(
                 "Aether did not open its SOCKS listener on {socks_addr} within {timeout:?}"
             )));
@@ -211,6 +230,7 @@ impl Backend for AetherBackend {
             );
         }
         claim(job);
+        job_guard.disarm();
         Ok(Box::new(AetherHandle {
             rates: Mutex::new(rates::RateMeter::new(baseline)),
             baseline_rx,
@@ -769,6 +789,7 @@ impl BackendHandle for AetherHandle {
     async fn stop(&self, timeout: Duration) -> Result<()> {
         if self.stopped.swap(true, Ordering::AcqRel) { return Ok(()); }
         let (job, addr) = (self.job, self.socks_addr);
+        let mut job_guard = EngineJobGuard::new(job, addr);
         ffi_cancel(job);
         drop(self.relay.lock().take());
         let deadline = tokio::time::Instant::now() + timeout;
@@ -779,6 +800,7 @@ impl BackendHandle for AetherHandle {
         if ffi_poll(job).ok().flatten().is_some() && !socks_listening(addr).await {
             LIVE_JOBS.lock().remove(&job);
             ffi_free(job);
+            job_guard.disarm();
             return Ok(());
         }
         // The engine has not dropped the task that owns the listeners within
@@ -786,7 +808,7 @@ impl BackendHandle for AetherHandle {
         // the disconnect stays instant while the ports are still guaranteed to
         // be free before the next connect tries to bind them.
         log::debug!("[aether] {addr} not released within {timeout:?}; finishing in the background");
-        retire_job(job, addr);
+        drop(job_guard);
         Ok(())
     }
 

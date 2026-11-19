@@ -64,7 +64,8 @@ const (
 // refused with "a core is already running", so instances are kept in a registry
 // and every entry point carries the handle a start handed back.
 type sbCore struct {
-	box *box.Box
+	box    *box.Box
+	cancel context.CancelFunc
 	// Nil only if the tracker could not be attached; the core then reports no
 	// traffic totals.
 	traffic *trafficcontrol.Manager
@@ -181,7 +182,14 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 	// registers in it has to be readable from this context afterwards, and a
 	// registry created inside box.New would not be. include.Context only adds
 	// entries to an existing registry, it never clones one.
-	ctx := include.Context(service.ContextWithDefaultRegistry(context.Background()))
+	base, cancel := context.WithCancel(context.Background())
+	owned := false
+	defer func() {
+		if !owned {
+			cancel()
+		}
+	}()
+	ctx := include.Context(service.ContextWithDefaultRegistry(base))
 	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(text))
 	if err != nil {
 		return C.CString("sing-box: config: " + err.Error())
@@ -201,14 +209,16 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 	traffic := trafficcontrol.NewManager()
 	created.Router().AppendTracker(traffic)
 	if err = created.Start(); err != nil {
+		cancel()
 		_ = created.Close()
 		return C.CString("sing-box: " + err.Error())
 	}
-	core := &sbCore{box: created, traffic: traffic, listeners: sbInbounds(text), label: sbFlavor(text)}
+	core := &sbCore{box: created, cancel: cancel, traffic: traffic, listeners: sbInbounds(text), label: sbFlavor(text)}
 	sbMu.Lock()
 	sbNextID++
 	id := sbNextID
 	sbCores[id] = core
+	owned = true
 	sbMu.Unlock()
 	engineStarted(engineSingBox)
 	*handle = C.uint64_t(id)
@@ -227,6 +237,7 @@ func sb_stop(id C.uint64_t) {
 	if core == nil {
 		return
 	}
+	core.cancel()
 	_ = core.box.Close()
 	engineStopped(engineSingBox)
 }
@@ -240,6 +251,9 @@ func sb_stop_all() {
 	cores := sbCores
 	sbCores = make(map[uint64]*sbCore)
 	sbMu.Unlock()
+	for _, core := range cores {
+		core.cancel()
+	}
 	for _, core := range cores {
 		_ = core.box.Close()
 	}
