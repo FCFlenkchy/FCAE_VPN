@@ -5625,14 +5625,9 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "SHARED SETTINGS");
             ImGui::Text("Mode");
-#if defined(ANDROID)
-            const char* android_modes[] = { "Proxy (SOCKS/HTTP)", "TUN (system VPN)" };
+            const char* modes[] = { "PROXY", "TUN" };
             ImGui::SetNextItemWidth(-FLT_MIN);
-            ImGui::Combo("##android_mode", &g_app.mode, android_modes, 2);
-#else
-            ImGui::RadioButton("Proxy", &g_app.mode, 0);
-            ImGui::RadioButton("TUN",   &g_app.mode, 1);
-#endif
+            ImGui::Combo("##mode", &g_app.mode, modes, IM_ARRAYSIZE(modes));
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
             bool logging_enabled = g_app.logging_enabled.load(std::memory_order_relaxed);
             if (ImGui::Checkbox("Enable logging##shared", &logging_enabled))
