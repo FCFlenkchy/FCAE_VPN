@@ -565,7 +565,6 @@ static uint64_t config_signature() {
     h = fnv_cstr(h, g_app.access_client_id);
     h = fnv_cstr(h, g_app.access_client_secret);
     h = fnv_cstr(h, g_app.access_email);
-    h = fnv_cstr(h, g_app.routes_file);
     h = fnv_cstr(h, g_app.routes_inline);
     return h;
 }
@@ -688,7 +687,6 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.team_name);
     h = fnv_cstr(h, g_app.access_token);
     h = fnv_cstr(h, g_app.access_email);
-    h = fnv_cstr(h, g_app.routes_file);
     h = fnv_cstr(h, g_app.routes_inline);
     h = fnv_cstr(h, g_app.save_status);
     h = fnv_cstr(h, g_app.copy_status);
@@ -1460,8 +1458,6 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.access_client_secret, sizeof(g_app.access_client_secret), "%s", val.c_str());
     else if (key == "access_email")
         snprintf(g_app.access_email, sizeof(g_app.access_email), "%s", val.c_str());
-    else if (key == "routes_file")
-        snprintf(g_app.routes_file, sizeof(g_app.routes_file), "%s", val.c_str());
     else if (key == "routes_inline")
         snprintf(g_app.routes_inline, sizeof(g_app.routes_inline), "%s", val.c_str());
     else if (key == "routes_inline_hex")
@@ -1621,7 +1617,6 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "access_client_id=%s\n", g_app.access_client_id);
     fprintf(f, "access_client_secret=%s\n", g_app.access_client_secret);
     fprintf(f, "access_email=%s\n", g_app.access_email);
-    fprintf(f, "routes_file=%s\n", g_app.routes_file);
     fprintf(f, "routes_inline_hex=%s\n", encode_config_text(g_app.routes_inline).c_str());
     const bool write_ok = !ferror(f);
     const bool close_ok = fclose(f) == 0;
@@ -2119,7 +2114,6 @@ void ui_init() {
         // between machines; resolve_data_path() anchors them at use.
         bool migrated = make_portable(g_app.config_path, sizeof(g_app.config_path));
         migrated |= make_portable(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir));
-        migrated |= make_portable(g_app.routes_file, sizeof(g_app.routes_file));
         if (!g_app.psiphon_data_dir[0]) {
             snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "psiphon");
             migrated = true;
@@ -4607,7 +4601,7 @@ void render_ui() {
                 g_app.start_busy.store(true);
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {
-                    std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
+                    std::string noize, peer, path, sni, team, token, email, routes_inline;
                     std::string ech_dns, ech_domain, gool_inner, tls_ciphers, api_address, api_host, api_sni, exit_loc;
                     std::string tls_groups, tls13_ciphers, tls_key_shares, tls_sigalgs, tls_cert_compression;
                     std::string tls_alps, tls_trust_anchors, tls_server_padding;
@@ -4638,7 +4632,6 @@ void render_ui() {
                 o->team  = g_app.team_name;
                 o->token = g_app.access_token;
                 o->email = g_app.access_email;
-                o->routes = resolve_data_path(g_app.routes_file);
                 o->psi_dir = resolve_data_path(g_app.psiphon_data_dir);
                 o->upstream = g_app.upstream_proxy;
                 o->root = data_dir();
@@ -4707,7 +4700,6 @@ void render_ui() {
                 o->c.zero_trust.team_name      = o->team.empty() ? nullptr : o->team.c_str();
                 o->c.zero_trust.access_token   = o->token.empty() ? nullptr : o->token.c_str();
                 o->c.zero_trust.access_email   = o->email.empty() ? nullptr : o->email.c_str();
-                o->c.routing.rules_file        = o->routes.empty() ? nullptr : o->routes.c_str();
                 o->c.routing.rules_inline      = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
                 o->c.aether.ech_dns            = o->ech_dns.empty() ? nullptr : o->ech_dns.c_str();
                 o->c.aether.ech_domain         = o->ech_domain.empty() ? nullptr : o->ech_domain.c_str();
@@ -5744,7 +5736,6 @@ void render_ui() {
                 UiText::InputTextWithHint("ECH domain", "cloudflare-ech.com",
                                          g_app.ech_domain, sizeof(g_app.ech_domain));
                 ImGui::PopItemWidth();
-                ImGui::TextDisabled("Without a usable ECH key the tunnel does not start.");
             }
             ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
             if (g_app.protocol == 6) {
@@ -5889,19 +5880,14 @@ void render_ui() {
                              kTransports, IM_ARRAYSIZE(kTransports));
             }
 
-            // Psiphon's own listeners, kept off the engine's and Tor's ports.
-            // These two carry an int because 0 means "use the built-in value".
-            // The shared row works on u16 ports, so the int is bridged here and
-            // 0 stays representable by leaving the switch's port field blank.
             {
                 ImU16 socks_port = (ImU16)g_app.psiphon_socks_port;
                 ImU16 http_port  = (ImU16)g_app.psiphon_http_port;
-                listener_row("Psiphon SOCKS5", &g_app.psiphon_socks_enabled, &socks_port, 0, 65535);
-                listener_row("Psiphon HTTP", &g_app.psiphon_http_enabled, &http_port, 0, 65535);
+                listener_row("Psiphon SOCKS5", &g_app.psiphon_socks_enabled, &socks_port, 1, 65535);
+                listener_row("Psiphon HTTP", &g_app.psiphon_http_enabled, &http_port, 1, 65535);
                 g_app.psiphon_socks_port = socks_port;
                 g_app.psiphon_http_port  = http_port;
             }
-            ImGui::TextDisabled("0 restores the built-in value (fixed, never auto-picked).");
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f), "TOR SETTINGS (AETHER)");
@@ -5943,7 +5929,6 @@ void render_ui() {
             ImGui::Spacing();
             ImGui::Text("Authentication (choose one):");
             UiText::InputTextWithHint("##access_token", "JWT token from enrolment page", g_app.access_token, sizeof(g_app.access_token));
-            ImGui::TextDisabled("Access Token (copy token=... from login page)");
             ImGui::Spacing();
             ImGui::Text("--- or Service Token ---");
             UiText::InputTextWithHint("##access_client_id", "Client ID", g_app.access_client_id, sizeof(g_app.access_client_id));
@@ -5956,25 +5941,15 @@ void render_ui() {
         }
 
         if (ImGui::BeginTabItem("Routes")) {
-            ImGui::BeginChild("##routes_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::BeginChild("##routes_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
-            ImGui::Text("Routing Rules File (Aether only)");
-            UiText::InputTextWithHint("##routes_file", "path/to/routes.txt", g_app.routes_file, sizeof(g_app.routes_file));
-#if defined(ANDROID)
-            if (ImGui::Button("Choose routing rules file")) android_ui_command("importRoutes");
-#endif
-            ImGui::TextDisabled("Format: [block] / [direct] sections with domain, IP, CIDR, port rules.");
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::Text("Inline Routing Rules (Aether only; comma-separated)");
-            ImGui::PushItemWidth(-1);
-            UiText::InputTextMultiline("##routes_inline", g_app.routes_inline, sizeof(g_app.routes_inline),
-                ImVec2(0, 100), ImGuiInputTextFlags_AllowTabInput);
-            ImGui::PopItemWidth();
-            ImGui::TextDisabled("Format: [direct]ip:190.9.2.4,192.33.45.6:400,domain.com [block]gazo.com,10.0.0.0/8,...");
-            ImGui::Spacing();
-            ImGui::TextWrapped("Example:\n[block]\nads.example\nkeyword:tracker\n\n[direct]\nprivate\n10.0.0.0/8\nport:3000-3010");
+            ImGui::TextUnformatted("Inline Routing Rules (Aether only)");
+            const float rules_height = (std::max)(ImGui::GetTextLineHeightWithSpacing() * 4.0f,
+                                                   ImGui::GetContentRegionAvail().y);
+            UiText::InputTextMultilineWithHint("##routes_inline",
+                "[direct] domain.com,ip:1.2.3.4\n[block] ads.example,10.0.0.0/8\nRules: domain, IP, CIDR, port:3000-3010",
+                g_app.routes_inline, sizeof(g_app.routes_inline), ImVec2(-FLT_MIN, rules_height),
+                ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_WordWrap);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

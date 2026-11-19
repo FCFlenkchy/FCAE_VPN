@@ -66,11 +66,9 @@ object ImGuiBridge {
                     }
                     val chain = value.getJSONArray("chainTransports")
                     session.putExtra("chainTransports", IntArray(chain.length()) { chain.getInt(it) })
-                    for (key in arrayOf("configPath", "routesFile")) {
-                        val path = session.getStringExtra(key).orEmpty()
-                        if (path.isNotEmpty() && !java.io.File(path).isAbsolute)
-                            session.putExtra(key, java.io.File(app.filesDir, path).absolutePath)
-                    }
+                    val configPath = session.getStringExtra("configPath").orEmpty()
+                    if (configPath.isNotEmpty() && !java.io.File(configPath).isAbsolute)
+                        session.putExtra("configPath", java.io.File(app.filesDir, configPath).absolutePath)
                     val validation = validate(session)
                     if (validation.isNotEmpty()) {
                         FCAEVpnService.invalidateRecalledSession(app)
@@ -123,7 +121,6 @@ object ImGuiBridge {
     @JvmStatic external fun nativePlatformState(revision: Long, mode: Int, selected: Array<String>, tile: Boolean, widgets: Boolean)
     @JvmStatic external fun nativeApps(packages: Array<String>, labels: Array<String>, search: Array<String>)
     @JvmStatic external fun nativeAppIcon(name: String, pixels: IntArray?)
-    @JvmStatic external fun nativeImportRoutes(text: String)
     @JvmStatic external fun nativeSurface(directory: String, density: Float, touchSlop: Float)
     @JvmStatic external fun nativeResize(width: Int, height: Int)
     @JvmStatic external fun nativeFrame(): Int

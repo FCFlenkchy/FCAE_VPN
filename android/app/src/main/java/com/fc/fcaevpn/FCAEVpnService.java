@@ -1430,7 +1430,6 @@ public class FCAEVpnService extends VpnService {
         final String teamName  = intent.getStringExtra("teamName");
         final String accessTok = intent.getStringExtra("accessToken");
         final String accessEm  = intent.getStringExtra("accessEmail");
-        final String routesF   = intent.getStringExtra("routesFile");
         final String routesI   = intent.getStringExtra("routesInline");
         final int torMode      = intent.getIntExtra("torMode", 0);
         final int torBridges   = intent.getIntExtra("torBridges", 0);
@@ -1472,7 +1471,7 @@ public class FCAEVpnService extends VpnService {
         final String teamVal   = (teamName == null) ? "" : teamName;
         final String tokenVal  = (accessTok == null) ? "" : accessTok;
         final String emailVal  = (accessEm == null) ? "" : accessEm;
-        final String routesVal = (routesF == null) ? "" : routesF;
+        final String routesVal = "";
         final String routesIVal = (routesI == null) ? "" : routesI;
 
         final Runnable startup = () -> {
@@ -2208,7 +2207,6 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "teamName");
         putStr(e, i, "accessToken");
         putStr(e, i, "accessEmail");
-        putStr(e, i, "routesFile");
         putStr(e, i, "routesInline");
         putInt(e, i, "torMode", 0);
         putInt(e, i, "torBridges", 0);
@@ -2303,7 +2301,6 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "teamName");
         copyStr(p, i, "accessToken");
         copyStr(p, i, "accessEmail");
-        copyStr(p, i, "routesFile");
         copyStr(p, i, "routesInline");
         copyInt(p, i, "torMode", 0);
         copyInt(p, i, "torBridges", 0);

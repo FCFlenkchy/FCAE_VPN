@@ -281,7 +281,6 @@ void android_ui_save_session(bool connect) {
     json.text("teamName", c.zero_trust.team_name);
     json.text("accessToken", c.zero_trust.access_token);
     json.text("accessEmail", c.zero_trust.access_email);
-    json.text("routesFile", c.routing.rules_file);
     json.text("routesInline", c.routing.rules_inline);
     json.text("torBridgeLines", c.tor.bridge_lines);
     json.text("coreConfigs", c.core.library);
@@ -573,19 +572,6 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeError(JNIEnv* env, jclass, jstring value) 
     ui_request_redraw();
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_ImGuiBridge_nativeImportRoutes(JNIEnv* env, jclass, jstring text) {
-    const std::string value = native_string(env, text);
-    const std::string path = files_dir + "/routes-import.txt";
-    FILE* file = fopen(path.c_str(), "wb");
-    if (!file) { last_error = "Cannot write routing rules"; return; }
-    const bool written = fwrite(value.data(), 1, value.size(), file) == value.size();
-    const bool closed = fclose(file) == 0;
-    if (!written || !closed) { last_error = "Cannot save routing rules"; return; }
-    snprintf(g_app.routes_file, sizeof(g_app.routes_file), "%s", path.c_str());
-    android_ui_flush_settings();
-    ui_request_redraw();
-}
 
 void android_ui_render_controls() { if (settings) settings->controls(); }
 void android_ui_render_routing() { if (settings) settings->routing(); }

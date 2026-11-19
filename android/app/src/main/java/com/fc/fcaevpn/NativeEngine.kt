@@ -362,7 +362,7 @@ object NativeEngine {
             teamName = session.getStringExtra("teamName").orEmpty(),
             accessToken = session.getStringExtra("accessToken").orEmpty(),
             accessEmail = session.getStringExtra("accessEmail").orEmpty(),
-            routesFile = session.getStringExtra("routesFile").orEmpty(),
+            routesFile = "",
             routesInline = session.getStringExtra("routesInline").orEmpty(),
             torMode = session.getIntExtra("torMode", 0),
             torBridges = session.getIntExtra("torBridges", 0),

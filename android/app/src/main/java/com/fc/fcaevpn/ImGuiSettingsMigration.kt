@@ -52,7 +52,6 @@ internal object ImGuiSettingsMigration {
         "team_name" to "team",
         "access_token" to "accessToken",
         "access_email" to "accessEmail",
-        "routes_file" to "routesFile",
         "firefox_account_id" to "firefoxAccountId",
         "firefox_location" to "firefoxLocation",
         "firefox_server" to "firefoxServer",

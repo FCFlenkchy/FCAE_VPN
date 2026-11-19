@@ -114,28 +114,6 @@ class MainActivity : AppCompatActivity() {
     @Deprecated("Uses the existing VPN consent request contract")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 3 && resultCode == Activity.RESULT_OK) {
-            val uri = data?.data ?: return
-            val app = applicationContext
-            ImGuiBridge.worker.execute {
-                try {
-                    val bytes = app.contentResolver.openInputStream(uri)?.use { input ->
-                        val output = java.io.ByteArrayOutputStream()
-                        val buffer = ByteArray(8192)
-                        while (true) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            require(output.size() + count <= 4 * 1024 * 1024) { "File exceeds 4 MiB" }
-                            output.write(buffer, 0, count)
-                        }
-                        output.toByteArray()
-                    } ?: error("Cannot read file")
-                    runOnUiThread { surface?.enqueue {
-                        ImGuiBridge.nativeImportRoutes(bytes.toString(Charsets.UTF_8))
-                    } }
-                } catch (error: Exception) { ImGuiBridge.reportError("Import failed: ${error.message}") }
-            }
-        }
         if (requestCode == 1) {
             if (resultCode == Activity.RESULT_OK) startPending()
             else {
@@ -185,12 +163,6 @@ class MainActivity : AppCompatActivity() {
             }
             "clipboard" -> (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                 .setPrimaryClip(ClipData.newPlainText("FCAE VPN", payload))
-            "importRoutes" -> {
-                try {
-                    startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT)
-                        .addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), 3)
-                } catch (_: Exception) { showError("No document picker is available.") }
-            }
         }
     }
 

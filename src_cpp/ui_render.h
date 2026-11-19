@@ -226,8 +226,7 @@ struct AppState {
     char access_client_id[128] = {};
     char access_client_secret[128] = {};
     char access_email[128] = {};
-    char routes_file[256] = {};
-    // Inline routing rules (comma-separated, takes precedence over file)
+    // Inline routing rules (comma- or newline-separated)
     char routes_inline[2048] = {};
     int sys_profile       = 0;   // 0=Auto, 1=Low, 2=Medium, 3=High
 
@@ -262,7 +261,7 @@ struct AppState {
     char psiphon_region_list[1024] = {0};
     int  psiphon_transport = 0;        // index into kPsiphonTransports, 0 = auto
     char psiphon_data_dir[512] = {0};
-    int  psiphon_socks_port = 1823;    // config.rs DEFAULT_PSIPHON_SOCKS_PORT; 0 also maps to it
+    int  psiphon_socks_port = 1823;    // config.rs DEFAULT_PSIPHON_SOCKS_PORT
     int  psiphon_http_port  = 1824;    // config.rs DEFAULT_PSIPHON_HTTP_PORT
     // Server-entry sources. tunnel-core has exactly three ways to learn its
     // first server entries; with none of them the controller sits on
@@ -729,7 +728,7 @@ struct AppState {
                       psiphon_exit ? "" : tun_dns6);
         c.dns.server = dns_server_built[0] ? dns_server_built : nullptr;
 
-        c.routing.rules_file   = routes_file[0] ? routes_file : nullptr;
+        c.routing.rules_file   = nullptr;
         c.routing.rules_inline = routes_inline[0] ? routes_inline : nullptr;
 
         c.zero_trust.team_name    = team_name[0] ? team_name : nullptr;
@@ -805,8 +804,8 @@ struct AppState {
         c.psiphon.config_json   = psiphon_config_json_built.c_str();
         c.psiphon.egress_region = psiphon_region[0] ? psiphon_region : nullptr;
         c.psiphon.data_root_dir = psiphon_data_dir[0] ? psiphon_data_dir : nullptr;
-        c.psiphon.socks_port    = (uint16_t)psiphon_socks_port;
-        c.psiphon.http_port     = (uint16_t)psiphon_http_port;
+        c.psiphon.socks_port    = (uint16_t)std::clamp(psiphon_socks_port, 1, 65535);
+        c.psiphon.http_port     = (uint16_t)std::clamp(psiphon_http_port, 1, 65535);
         c.firefox.account_id = firefox_account_id[0] ? firefox_account_id : nullptr;
         c.firefox.location = firefox_location[0] ? firefox_location : nullptr;
         c.firefox.server = firefox_server[0] ? firefox_server : nullptr;
