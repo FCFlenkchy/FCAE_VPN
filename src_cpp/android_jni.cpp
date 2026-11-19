@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "fcae.h"
+#include "ui_render.h"
 
 // Android-only FFI helpers: kept out of the generated public C header because
 // they are embedding hooks rather than part of the cross-platform ABI.
@@ -584,6 +585,9 @@ static void push_log_line(char prefix, const char* message, bool truncate = true
     line += " ";
     line += message;
     append_log_file(line);
+    const int level = prefix == 'E' ? FCAE_LOG_ERROR : prefix == 'W' ? FCAE_LOG_WARN
+        : prefix == 'D' ? FCAE_LOG_DEBUG : FCAE_LOG_INFO;
+    log_callback(static_cast<FcaeLogLevel>(level), message, nullptr);
     if (truncate && line.size() > 512) line.resize(512);
     g_log_bytes += line.size();
     g_logs.push_back(std::move(line));
@@ -1839,4 +1843,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpdateFromJson(JNIEnv* env, jclass, 
 
     LOGI("Version check from JSON: %s", ok ? "OK" : "FAIL");
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+FcaeStatus android_ui_initialize_runtime() {
+    ensure_init();
+    return g_inited.load() ? FCAE_OK : FCAE_NOT_INITIALIZED;
 }

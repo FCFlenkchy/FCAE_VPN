@@ -126,20 +126,20 @@ Only `id` and `destination_url` are required. An omitted optional field uses its
 | `message_opacity` | integer | no | `100` | 0–100 percent. Multiplies the alpha of `message_color`. |
 | `title_x`, `title_y` | integer | no | `50`, `50` | 0–100, percent of the card. X is the horizontal centre of the text block; Y is measured from the top of the usable card area. |
 | `message_x`, `message_y` | integer | no | `50`, `72` | 0–100, as above. |
-| `title_scale` | integer | no | `100` | 50–200 percent of the base title size (16 sp on Android; the UI font size on desktop). Aliases: `title_size`, `title_font_scale`, `title_font_size`, `title_scale_percent`. |
-| `message_scale` | integer | no | `100` | 50–200 percent of the base message size, which is 7/8 of the title's on both platforms (14 sp on Android). Aliases: `message_size`, `message_font_scale`, `message_font_size`, `message_scale_percent`. |
+| `title_scale` | integer | no | `100` | 50–200 percent of the current UI font size in the shared Android/desktop ImGui interface. Aliases: `title_size`, `title_font_scale`, `title_font_size`, `title_scale_percent`. |
+| `message_scale` | integer | no | `100` | 50–200 percent of the base message size, which is 7/8 of the base title size on both platforms. Aliases: `message_size`, `message_font_scale`, `message_font_size`, `message_scale_percent`. |
 
-Text blocks are clamped so their text always stays inside the card. If the title and message would overlap, the lower one is moved just below the upper one, and both are lifted if needed to stay on the card. The desktop card is shorter than Android's (80 px against 140 dp), so the same scale fills a larger share of it; keep long text at 100 or below.
+Text blocks are positioned within the card and adjusted to reduce overlap. Content that cannot fit is clipped; keep titles and messages short and use scales of 100 or below for longer text. Android and desktop now use the same ImGui layout, rather than separate 140 dp and 80 px card designs. Font size, UI scale, and available width affect wrapping and how much text fits.
 
 #### Icon (foreground media)
 
-The icon is fitted into a media band that spans the card's width and is half the card's height: 70 dp on Android and 40 px on desktop. `image_fit` decides how it fits the band, then `icon_scale` resizes the result.
+Foreground media is fitted into the card's full available content area on both Android and desktop; there is no separate half-height icon band. `image_fit` decides how it fits that area, then `icon_scale` resizes the result. Foreground media and text share the same card, so leave space in the artwork if you also supply `title` or `message`.
 
 | Field | Type | Required | Default | Accepted values |
 |---|---|---|---|---|
 | `icon_url` | string | no | no icon | `https://` URL, ASCII, at most 2048 characters. PNG, JPEG, WebP, GIF, or MP4. |
 | `icon_x`, `icon_y` | integer | no | `50`, `25` | 0–100, percent position of the icon's centre. The drawn icon is clamped inside the card, so 0 and 100 anchor it to an edge; an icon wider or taller than the card is centred on that axis. |
-| `icon_scale` | integer | no | `100` | 50–160 percent of the fitted size, in both fit modes. Above 100 the icon grows beyond its band; anything past the card's edge is cut off. Aliases: `icon_size`, `icon_size_percent`, `icon_scale_percent`, `image_size`. |
+| `icon_scale` | integer | no | `100` | 50–160 percent of the fitted size, in both fit modes. Above 100 the icon grows beyond its fitted size; anything past the card's edge is cut off. Aliases: `icon_size`, `icon_size_percent`, `icon_scale_percent`, `image_size`. |
 | `icon_opacity` | integer | no | `100` | 0–100 percent. |
 | `image_fit` | string | no | `contain` | How the icon fits its box: `contain` shows all of it, `cover` fills the box and crops the overflow. |
 
@@ -178,24 +178,30 @@ Write numbers without quotes, and omit a field instead of setting it to `null`.
 
 We recommend designing your text into your artwork and leaving `title` and `message` out. FCAE's native text is a fallback, not a design tool:
 
-- **Scripts.** The desktop client draws text with a built-in font that covers basic Latin only. Persian, Arabic, Chinese, emoji, and right-to-left text do not display correctly there. Text inside an image or video looks the same on every platform.
-- **Consistency.** Native text uses a different font, size, and line wrapping on Android and desktop. Artwork keeps your typeface, colors, and layout exactly as designed.
+- **Scripts.** The shared Android/desktop ImGui interface uses a built-in font with basic Latin coverage. Do not rely on native sponsor text to display Persian, Arabic, Chinese, emoji, or right-to-left text correctly. Text inside an image or video looks the same on every platform.
+- **Consistency.** Android and desktop share the same text renderer, but screen width, display density, and UI scale can still change text size and wrapping. Artwork preserves your typeface and internal layout, although the card can crop its edges.
 - **Branding.** Logos, custom fonts, and styled headlines are only possible in media.
 
 ### How to do it
 
-1. Use `background_url` for the artwork, because the background covers the largest area of the card. The icon band is short (40 px on desktop, 70 dp on Android), so it suits a logo but not readable text.
+1. Use `background_url` for full-card artwork. Use `icon_url` for a foreground logo or creative that needs `image_fit: "contain"` to remain fully visible at `icon_scale: 100`. Both use the card's available content area; backgrounds are centred and cropped to fill it.
 2. Set `"background_opacity": 100`. The default of 42 deliberately dims the background behind native text and would fade your artwork.
 3. Leave out `title` and `message` so native text is not drawn over your artwork.
 4. Set `background_color` to your artwork's dominant color. It is what users see before the media has downloaded.
 
 ### Designing the artwork
 
-The card is a wide strip whose shape differs by platform: 140 dp tall and the screen width minus 40 dp on Android (about 320 × 140 dp, 2.3 : 1, on a typical phone), 80 px tall and 280–380 px wide on desktop (3.5–4.75 : 1). The background is centred and cropped to fit, so the edges may be cut off.
+Android and desktop use the same responsive ImGui card layout:
+
+- When the stats and card fit side by side, the card sits on the right and targets about **2/5 of the available row width**, with a minimum width of 320 logical UI units.
+- On narrower screens, including phones, the card moves below the stats and uses the available content width. It is not sized as screen width minus a fixed 40 dp margin.
+- The card has a minimum height of **80 logical UI units**. Its height can increase with font size, UI scale, and message scale; it does not grow to match an image's aspect ratio. Logical UI units are not a guarantee of physical screen pixels.
+
+There is no fixed card aspect ratio or universal visible safe area. Backgrounds are centred and cropped to fit the current card, so the edges may be cut off. Preview creative at narrow phone widths and wider side-by-side layouts, including larger UI scales.
 
 - Design at **800 × 300 px** (MP4 may be larger and is downscaled).
-- Keep all text and logos inside the **centre 680 × 160 px**. That area is visible on every platform; the rest may be cropped.
-- Use bold lettering at least **40 px tall** in the 800 × 300 design, with strong contrast. The desktop card shows the artwork at about a third to a half of its size, and Android keeps media at 320 × 180 px to save memory, so fine detail softens.
+- Keep important text and logos near the centre. The **centre 680 × 160 px** of an 800 × 300 design is a starting guide, not a guaranteed safe area; narrower or wider cards may crop it. Use foreground media with `"image_fit": "contain"` and `"icon_scale": 100` if the entire creative must remain visible, accepting unused space around it.
+- Use bold lettering at least **40 px tall** in the 800 × 300 design, with strong contrast. The displayed size varies with the layout, and Android still decodes media to a 320 × 180 px canvas to save memory, so fine detail softens. The UI migration does not change decoder limits.
 - For animation, prefer MP4 over GIF: it is far smaller for the same quality and is less likely to be merged into coarser frames.
 
 A media-first campaign looks like this:
@@ -230,8 +236,8 @@ A media-first campaign looks like this:
 
 ## Presentation
 
-- Sponsor cards are drawn natively by FCAE. Sponsors cannot supply HTML, JavaScript, fonts, or layout code; the fields above are the complete list of what can be customized.
-- The card has a fixed height (140 dp on Android, 80 px on desktop), so missing media or different scales never move the rest of the interface.
+- Sponsor cards are drawn by FCAE's shared Dear ImGui interface on Android and desktop. Sponsors cannot supply HTML, JavaScript, fonts, or layout code; the fields above are the complete list of what can be customized.
+- Card sizing follows the shared responsive layout described above. Missing media and image aspect ratios do not resize the card; font/UI scale and message scale can affect its height. Resize media inside the card rather than designing around the former 140 dp Android card.
 - With one active campaign it stays in place. With two, they alternate. With three or more, FCAE picks randomly without repeating the card just shown. Each card stays for its `duration_seconds`; users may also swipe or drag to the next card.
 - `starts_at` and `ends_at` are honored while the client runs: a campaign appears and disappears at those moments without waiting for a manifest refresh.
 - When the app is minimized or in the background, the card keeps the still it was showing and rotation pauses; every other decoded frame is released. Animation resumes when the app returns.

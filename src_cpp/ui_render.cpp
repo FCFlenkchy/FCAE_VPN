@@ -1,4 +1,7 @@
 #include "ui_render.h"
+#if defined(ANDROID)
+#include "android_ui.h"
+#endif
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -27,7 +30,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#elif !defined(ANDROID)
+#else
 #include <fcntl.h>
 #include <pwd.h>
 #include <sys/stat.h>
@@ -729,6 +732,9 @@ static void ui_poll_telemetry(double now) {
     telem.struct_size = sizeof(telem);
     telem.abi_version = FCAE_ABI_VERSION;
     fcae_get_telemetry(&telem);
+#if defined(ANDROID)
+    android_ui_telemetry(telem);
+#endif
     static double next_lan_probe = 0.0;
     if (telem.lan_enabled && now >= next_lan_probe) {
         char lan_ip[64] = {};
@@ -883,7 +889,11 @@ bool ui_should_render(bool interacting) {
     firefox_poll_background();
     firefox_expire_status(now);
     firefox_refresh_usage(now);
+#if defined(ANDROID)
+    s_tun_paused = android_ui_paused();
+#else
     s_tun_paused = fcae_tun_paused();
+#endif
     {
         std::lock_guard<std::mutex> lock(g_app.logs_mutex);
         s_frame_log_revision = g_app.logs_revision;
@@ -967,7 +977,7 @@ static std::string join_cfg(const std::string& dir) { return join_path(dir, "FCA
 
 static std::string exe_dir() {
 #if defined(ANDROID)
-    return "/data/data/com.fc.fcaevpn/files";
+    return android_ui_data_dir();
 #elif defined(_WIN32)
     std::wstring w(MAX_PATH, L'\0');
     for (;;) {
@@ -1619,11 +1629,21 @@ static bool save_config(bool quiet = false) {
         return false;
     }
     s_config_needs_retry = false;
+#if defined(ANDROID)
+    android_ui_save_session(false);
+#endif
     if (!quiet) {
         g_app.add_log(4, ("[ui] config saved: " + path).c_str());
     }
     return true;
 }
+
+#if defined(ANDROID)
+void android_ui_flush_settings() {
+    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready)
+        save_config(true);
+}
+#endif
 
 static uint64_t s_config_observed = 0;
 static uint64_t s_config_persisted = 0;
@@ -2141,7 +2161,12 @@ void ui_init() {
         opt.state_cb      = nullptr;   // the UI already polls telemetry each frame
         opt.user_data     = nullptr;
         opt.max_log_level = FCAE_LOG_INFO;
-        if (fcae_init(&opt) != FCAE_OK) {
+#if defined(ANDROID)
+        const FcaeStatus init_status = android_ui_initialize_runtime();
+#else
+        const FcaeStatus init_status = fcae_init(&opt);
+#endif
+        if (init_status != FCAE_OK) {
             g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
             runtime_ok = false;
         }
@@ -2152,6 +2177,9 @@ void ui_init() {
         if (runtime_ok && g_app.auto_update_check) {
             fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
         }
+#if defined(ANDROID)
+        if (runtime_ok) android_ui_save_session(false);
+#endif
         s_runtime_init.store(
             runtime_ok ? RuntimeInitState::Ready : RuntimeInitState::Failed,
             std::memory_order_release);
@@ -2573,7 +2601,8 @@ static bool open_external_url(const char* url) {
 #if defined(_WIN32)
     return (INT_PTR)ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL) > 32;
 #elif defined(ANDROID)
-    return false;
+    android_ui_command("url", url);
+    return true;
 #else
     pid_t pid = fork();
     if (pid == 0) {
@@ -4403,6 +4432,14 @@ void render_ui() {
         bool show_disconnect = connected || busy || tun_paused;
         if (startup) ImGui::BeginDisabled();
         if (ImGui::Button(show_disconnect ? "DISCONNECT" : "CONNECT", ImVec2(btn_w, kActionRowHeight))) {
+#if defined(ANDROID)
+            if (connected || busy || errored || tun_paused) {
+                android_ui_command("disconnect");
+            } else {
+                save_config(true);
+                android_ui_save_session(true);
+            }
+#else
             if (connected || busy || errored || tun_paused) {
                 g_app.start_busy.store(false);
                 // Cut the data plane on this click before thread scheduling can
@@ -4707,6 +4744,7 @@ void render_ui() {
                     }
                 }).detach();
             }
+#endif
         }
         if (startup) {
             ImGui::EndDisabled();
@@ -4724,12 +4762,16 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
                 if (ImGui::Button("START", ImVec2(stop_btn_w, kActionRowHeight))) {
+#if defined(ANDROID)
+                    android_ui_command("resume");
+#else
                     std::thread([] {
                         if (fcae_resume_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
                         }
                         ui_request_redraw();
                     }).detach();
+#endif
                 }
                 ImGui::PopStyleColor(3);
             } else {
@@ -4739,12 +4781,16 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
                 if (ImGui::Button("STOP", ImVec2(stop_btn_w, kActionRowHeight))) {
+#if defined(ANDROID)
+                    android_ui_command("pause");
+#else
                     std::thread([] {
                         if (fcae_pause_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
                         }
                         ui_request_redraw();
                     }).detach();
+#endif
                 }
                 ImGui::PopStyleColor(3);
             }
@@ -5539,6 +5585,9 @@ void render_ui() {
         if (ImGui::BeginTabItem("Connection")) {
             ImGui::BeginChild("##proto_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
+#if defined(ANDROID)
+            if (ImGui::Button("Android controls & app routing")) android_ui_command("settings");
+#endif
             if (ImGui::Button("Protocol")) open_protocol_editor();
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Firefox settings")) open_firefox_settings();
@@ -5894,6 +5943,9 @@ void render_ui() {
             ImGui::Spacing();
             ImGui::Text("Routing Rules File (Aether only)");
             ImGui::InputTextWithHint("##routes_file", "path/to/routes.txt", g_app.routes_file, sizeof(g_app.routes_file));
+#if defined(ANDROID)
+            if (ImGui::Button("Choose routing rules file")) android_ui_command("import", "routes");
+#endif
             ImGui::TextDisabled("Format: [block] / [direct] sections with domain, IP, CIDR, port rules.");
             ImGui::Spacing();
             ImGui::Separator();

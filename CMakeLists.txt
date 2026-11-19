@@ -736,7 +736,7 @@ endfunction()
 # Target-specific configuration
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
-    # Kotlin UI + JNI bridge only (no ImGui / NativeActivity)
+    # Android services and platform bridge; shared ImGui sources are added below.
     add_library(fcaevpn_native SHARED
         ${CMAKE_SOURCE_DIR}/src_cpp/android_jni.cpp
     )
@@ -1214,6 +1214,17 @@ endif()
 
 # Common compile flags
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64" OR AETHER_TARGET STREQUAL "ANDROID_ARM32" OR AETHER_TARGET STREQUAL "ANDROID_X86_64" OR AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
+    target_sources(fcaevpn_native PRIVATE
+        ${IMGUI_SOURCES} ${UI_SOURCES}
+        ${CMAKE_SOURCE_DIR}/src_cpp/main_android_gles.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_opengl3.cpp)
+    target_include_directories(fcaevpn_native PRIVATE ${IMGUI_DIR} ${IMGUI_BACKEND_DIR})
+    target_compile_definitions(fcaevpn_native PRIVATE IMGUI_IMPL_OPENGL_ES3 FCAE_VERSION="${FCAE_VERSION}")
+    if(FCAE_IS_PRERELEASE)
+        target_compile_definitions(fcaevpn_native PRIVATE FCAE_IS_PRERELEASE)
+    endif()
+    target_link_libraries(fcaevpn_native PRIVATE EGL GLESv3)
+    fcae_apply_freetype(fcaevpn_native)
     set(AETHER_COMPILE_TARGET fcaevpn_native)
 else()
     set(AETHER_COMPILE_TARGET fcaevpn)

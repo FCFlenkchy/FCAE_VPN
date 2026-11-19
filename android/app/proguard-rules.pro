@@ -28,3 +28,6 @@
 
 # JNI calls these methods by name from Go-owned threads.
 -keep class com.fc.fcaevpn.PsiphonTunnel { *; }
+
+# Shared ImGui host callbacks are looked up by JNI.
+-keep class com.fc.fcaevpn.ImGuiBridge { *; }
