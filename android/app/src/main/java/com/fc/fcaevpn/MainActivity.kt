@@ -11,12 +11,10 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
-import android.widget.LinearLayout
-import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
-import com.google.android.material.switchmaterial.SwitchMaterial
 
 class MainActivity : AppCompatActivity() {
     private var surface: ImGuiSurface? = null
@@ -25,7 +23,6 @@ class MainActivity : AppCompatActivity() {
     private var pendingGeneration = 0L
     @Volatile internal var commandGeneration = 0L
         private set
-    private var importKind = "routes"
     private var requestConnect = false
     private var requestGrant = false
 
@@ -34,6 +31,14 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(state)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         ImGuiBridge.attach(this)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (surface?.handleBack() == true) return
+                isEnabled = false
+                try { onBackPressedDispatcher.onBackPressed() }
+                finally { isEnabled = true }
+            }
+        })
         ImGuiBridge.worker.execute {
             try {
                 check(NativeEngine.ensureLoaded()) { NativeEngine.nativeLoadFailure() }
@@ -110,7 +115,6 @@ class MainActivity : AppCompatActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 3 && resultCode == Activity.RESULT_OK) {
             val uri = data?.data ?: return
-            val kind = importKind
             val app = applicationContext
             ImGuiBridge.worker.execute {
                 try {
@@ -126,7 +130,7 @@ class MainActivity : AppCompatActivity() {
                         output.toByteArray()
                     } ?: error("Cannot read file")
                     runOnUiThread { surface?.enqueue {
-                        ImGuiBridge.nativeImport(kind, bytes.toString(Charsets.UTF_8))
+                        ImGuiBridge.nativeImportRoutes(bytes.toString(Charsets.UTF_8))
                     } }
                 } catch (error: Exception) { ImGuiBridge.reportError("Import failed: ${error.message}") }
             }
@@ -175,78 +179,18 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) { showError("Could not open the link.") }
             "clipboard" -> (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                 .setPrimaryClip(ClipData.newPlainText("FCAE VPN", payload))
-            "import" -> {
-                importKind = payload
+            "importRoutes" -> {
                 try {
                     startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT)
                         .addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), 3)
                 } catch (_: Exception) { showError("No document picker is available.") }
             }
-            "settings" -> showPlatformSettings()
         }
     }
 
-    private fun showPlatformSettings() {
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val padding = (20 * resources.displayMetrics.density).toInt()
-            setPadding(padding, 0, padding, 0)
-        }
-        val tile = SwitchMaterial(this).apply { text = "Quick Settings tile" }
-        val widgets = SwitchMaterial(this).apply { text = "Home-screen widgets" }
-        ExternalControls.bind(this, tile, widgets)
-        content.addView(tile)
-        content.addView(widgets)
-        val prefs = getSharedPreferences("fcae_vpn", MODE_PRIVATE)
-        val routing = android.widget.Spinner(this).apply {
-            adapter = android.widget.ArrayAdapter(this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                arrayOf("Route all apps", "Only selected apps", "Exclude selected apps"))
-            setSelection(prefs.getInt("splitTunnelMode", 0).coerceIn(0, 2))
-        }
-        content.addView(routing)
-        content.addView(android.widget.Button(this).apply {
-            text = "Import core configuration"
-            setOnClickListener {
-                AlertDialog.Builder(this@MainActivity).setTitle("Configuration backend")
-                    .setItems(arrayOf("Xray", "sing-box")) { _, backend ->
-                        platformCommand("import", "core$backend")
-                    }.show()
-            }
-        })
-        content.addView(android.widget.Button(this).apply {
-            text = "Select apps"
-            setOnClickListener { selectApps() }
-        })
-        AlertDialog.Builder(this).setTitle("Android controls & app routing").setView(content)
-            .setPositiveButton("Save") { _, _ ->
-                prefs.edit().putInt("splitTunnelMode", routing.selectedItemPosition).apply()
-                Toast.makeText(this, "App routing applies on the next connection.", Toast.LENGTH_SHORT).show()
-            }.setNegativeButton("Close", null).show()
-    }
+    internal fun enqueueUiAction(action: () -> Unit) { surface?.enqueue(action) }
 
-    private fun selectApps() {
-        ImGuiBridge.worker.execute {
-            try {
-                val apps = packageManager.getInstalledApplications(0)
-                    .filter { it.packageName != packageName }
-                    .map { it.packageName to packageManager.getApplicationLabel(it).toString() }
-                    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.second })
-                runOnUiThread {
-                    if (isFinishing || isDestroyed) return@runOnUiThread
-                    val prefs = getSharedPreferences("fcae_vpn", MODE_PRIVATE)
-                    val selected = prefs.getStringSet("splitTunnelApps", emptySet()).orEmpty().toMutableSet()
-                    AlertDialog.Builder(this).setTitle("Apps")
-                        .setMultiChoiceItems(apps.map { "${it.second}\n${it.first}" }.toTypedArray(),
-                            BooleanArray(apps.size) { apps[it].first in selected }) { _, index, checked ->
-                            if (checked) selected.add(apps[index].first) else selected.remove(apps[index].first)
-                        }.setPositiveButton("Save") { _, _ ->
-                            prefs.edit().putStringSet("splitTunnelApps", selected).apply()
-                        }.setNegativeButton("Cancel", null).show()
-                }
-            } catch (error: Exception) { ImGuiBridge.reportError("Could not list apps: ${error.message}") }
-        }
-    }
+    internal fun requestUiFrame() { surface?.requestFrame() }
 
     internal fun showError(message: String) {
         surface?.enqueue { ImGuiBridge.nativeError(message) }

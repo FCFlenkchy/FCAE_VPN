@@ -7,6 +7,7 @@ import android.os.Looper
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 object ImGuiBridge {
     private val main = Handler(Looper.getMainLooper())
@@ -16,6 +17,14 @@ object ImGuiBridge {
     @Volatile private var activity = WeakReference<MainActivity>(null)
     @Volatile private var application: Context? = null
     private var lastSession = ""
+    private val framePosted = AtomicBoolean(false)
+
+    @JvmStatic fun requestFrame() {
+        if (framePosted.compareAndSet(false, true)) main.post {
+            framePosted.set(false)
+            activity.get()?.requestUiFrame()
+        }
+    }
 
     fun attach(owner: MainActivity) {
         application = owner.applicationContext
@@ -26,8 +35,18 @@ object ImGuiBridge {
         if (activity.get() === owner) activity.clear()
     }
 
+    fun postNative(action: () -> Unit) {
+        main.post { activity.get()?.enqueueUiAction(action) }
+    }
+
+    @JvmStatic fun foldAppQuery(value: String): String = appSearchKey(value)
+
     @JvmStatic fun dispatch(action: String, payload: String) {
         val app = application ?: return
+        if (action in setOf("androidLoad", "androidSave", "appsLoad", "appIcon")) {
+            AndroidPlatformSettings.dispatch(app, action, payload)
+            return
+        }
         if (action == "save" || action == "connect") {
             val generation = activity.get()?.commandGeneration ?: return
             worker.execute {
@@ -101,15 +120,19 @@ object ImGuiBridge {
             state.totalRx, state.totalTx, state.rtt.toLong(), if (state.paused) 1 else 0)
     }
 
-    @JvmStatic external fun nativeImport(kind: String, text: String)
-    @JvmStatic external fun nativeSurface(directory: String, density: Float)
+    @JvmStatic external fun nativePlatformState(revision: Long, mode: Int, selected: Array<String>, tile: Boolean, widgets: Boolean)
+    @JvmStatic external fun nativeApps(packages: Array<String>, labels: Array<String>, search: Array<String>)
+    @JvmStatic external fun nativeAppIcon(name: String, pixels: IntArray?)
+    @JvmStatic external fun nativeImportRoutes(text: String)
+    @JvmStatic external fun nativeSurface(directory: String, density: Float, touchSlop: Float)
     @JvmStatic external fun nativeResize(width: Int, height: Int)
     @JvmStatic external fun nativeFrame(): Int
-    @JvmStatic external fun nativePointer(x: Float, y: Float, action: Int)
+    @JvmStatic external fun nativePointer(x: Float, y: Float, action: Int, timeMillis: Long, touch: Boolean)
     @JvmStatic external fun nativeWheel(x: Float, y: Float)
     @JvmStatic external fun nativeKey(code: Int, down: Boolean, modifiers: Int)
     @JvmStatic external fun nativeText(value: String)
     @JvmStatic external fun nativeClipboard(value: String)
     @JvmStatic external fun nativeVisibility(visible: Boolean)
+    @JvmStatic external fun nativeBack()
     @JvmStatic external fun nativeError(message: String)
 }

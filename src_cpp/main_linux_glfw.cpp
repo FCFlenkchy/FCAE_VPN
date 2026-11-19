@@ -1,3 +1,4 @@
+#include "ui_style.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
@@ -191,42 +192,7 @@ int main(int argc, char** argv) {
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    // 1.0 on purpose; see the window-size comment. The user's own text scale
-    // arrives from ui_frame() as FontScaleMain and is the only factor applied.
-    style.FontScaleDpi     = 1.0f;
-    // The size the ui_render.cpp layout is designed against; see the same
-    // setting in the Win32 host.
-    style.FontSizeBase     = kUiBaseFontSize;
-    style.WindowRounding   = 10.0f;
-    style.FrameRounding    = 6.0f;
-    style.GrabRounding     = 4.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.FramePadding     = ImVec2(10, 6);
-    style.WindowPadding    = ImVec2(16, 12);
-    // Button labels sit in the middle of their box on every platform: the
-    // default left alignment read as off-centre wherever a label was narrower
-    // than the fixed width these rows use.
-    style.ButtonTextAlign  = ImVec2(0.5f, 0.5f);
-
-    ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg]        = ImVec4(0.08f, 0.08f, 0.12f, 1.0f);
-    colors[ImGuiCol_ChildBg]         = ImVec4(0.10f, 0.10f, 0.14f, 1.0f);
-    colors[ImGuiCol_PopupBg]         = ImVec4(0.10f, 0.10f, 0.14f, 0.95f);
-    colors[ImGuiCol_FrameBg]         = ImVec4(0.14f, 0.14f, 0.20f, 1.0f);
-    colors[ImGuiCol_FrameBgHovered]  = ImVec4(0.18f, 0.18f, 0.26f, 1.0f);
-    colors[ImGuiCol_FrameBgActive]   = ImVec4(0.22f, 0.22f, 0.30f, 1.0f);
-    colors[ImGuiCol_TitleBg]         = ImVec4(0.06f, 0.06f, 0.10f, 1.0f);
-    colors[ImGuiCol_TitleBgActive]   = ImVec4(0.10f, 0.10f, 0.16f, 1.0f);
-    colors[ImGuiCol_Button]          = ImVec4(0.16f, 0.40f, 0.60f, 1.0f);
-    colors[ImGuiCol_ButtonHovered]   = ImVec4(0.20f, 0.50f, 0.70f, 1.0f);
-    colors[ImGuiCol_ButtonActive]    = ImVec4(0.14f, 0.36f, 0.56f, 1.0f);
-    colors[ImGuiCol_Tab]             = ImVec4(0.12f, 0.12f, 0.18f, 1.0f);
-    colors[ImGuiCol_TabHovered]      = ImVec4(0.20f, 0.30f, 0.45f, 1.0f);
-    colors[ImGuiCol_TabSelected]     = ImVec4(0.16f, 0.36f, 0.52f, 1.0f);
-    colors[ImGuiCol_SliderGrab]      = ImVec4(0.30f, 0.60f, 0.80f, 1.0f);
-    colors[ImGuiCol_SliderGrabActive]= ImVec4(0.35f, 0.70f, 0.90f, 1.0f);
+    ui_apply_style(kUiBaseFontSize);
 
     // Registered before the loop parks, so a redraw requested from a worker
     // thread can end the wait in glfwWaitEventsTimeout() immediately instead of

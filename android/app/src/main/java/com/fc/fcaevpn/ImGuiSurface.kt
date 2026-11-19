@@ -8,6 +8,9 @@ import android.os.Looper
 import android.text.Editable
 import android.text.InputType
 import android.text.SpannableStringBuilder
+import android.view.Choreographer
+import android.view.InputDevice
+import android.view.ViewConfiguration
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.inputmethod.BaseInputConnection
@@ -19,10 +22,24 @@ import javax.microedition.khronos.opengles.GL10
 
 class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Renderer {
     private val main = Handler(Looper.getMainLooper())
-    @Volatile private var running = false
+    private val choreographer = Choreographer.getInstance()
+    private val pending = ArrayDeque<() -> Unit>()
     private var keyboard = false
-    private var lastScrollY = 0f
-    private val repaint = Runnable { if (running) requestRender() }
+    private var popupOpen = false
+    private var backHandled = false
+    private var activePointer = MotionEvent.INVALID_POINTER_ID
+    private val frameCallback: Choreographer.FrameCallback = Choreographer.FrameCallback { frames.onVsync() }
+    private val repaint = Runnable { frames.request() }
+    private val frames: ImGuiFrameScheduler = ImGuiFrameScheduler(object : ImGuiFrameScheduler.Driver {
+        override fun postFrame() { choreographer.postFrameCallback(frameCallback) }
+        override fun cancelFrame() { choreographer.removeFrameCallback(frameCallback) }
+        override fun postWake(delayMillis: Long) {
+            main.removeCallbacks(repaint)
+            main.postDelayed(repaint, delayMillis)
+        }
+        override fun cancelWake() { main.removeCallbacks(repaint) }
+        override fun render() { requestRender() }
+    })
 
     init {
         setEGLContextClientVersion(3)
@@ -34,14 +51,16 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
         requestFocus()
     }
 
+    fun requestFrame() { frames.request() }
+
     fun enqueue(action: () -> Unit) {
-        queueEvent { action() }
-        requestRender()
+        synchronized(pending) { pending.addLast(action) }
+        frames.request()
     }
 
     fun resumeRendering() {
-        running = true
         onResume()
+        frames.start()
         val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val value = manager.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
         enqueue {
@@ -51,27 +70,40 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     }
 
     fun pauseRendering() {
-        running = false
-        main.removeCallbacks(repaint)
-        queueEvent { ImGuiBridge.nativeVisibility(false) }
+        frames.stop()
+        activePointer = MotionEvent.INVALID_POINTER_ID
+        val events = synchronized(pending) { pending.toList().also { pending.clear() } }
+        queueEvent {
+            events.forEach { it() }
+            ImGuiBridge.nativeVisibility(false)
+        }
         onPause()
+        keyboard = false
+        (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(windowToken, 0)
     }
 
     fun stopRendering() {
-        running = false
+        frames.stop()
+        synchronized(pending) { pending.clear() }
         main.removeCallbacksAndMessages(null)
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        ImGuiBridge.nativeSurface(context.filesDir.absolutePath, resources.displayMetrics.density)
+        ImGuiBridge.nativeSurface(context.filesDir.absolutePath, resources.displayMetrics.density,
+            ViewConfiguration.get(context).scaledTouchSlop.toFloat())
     }
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         ImGuiBridge.nativeResize(width, height)
     }
     override fun onDrawFrame(gl: GL10?) {
+        val epoch = frames.generation
+        val events = synchronized(pending) { pending.toList().also { pending.clear() } }
+        events.forEach { it() }
         val result = ImGuiBridge.nativeFrame()
         main.post {
-            if (!running) return@post
+            if (!frames.isCurrent(epoch)) return@post
+            popupOpen = result and 0x20000 != 0
             val wantsKeyboard = result and 0x10000 != 0
             if (wantsKeyboard != keyboard) {
                 keyboard = wantsKeyboard
@@ -82,31 +114,61 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
                     input.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                 } else input.hideSoftInputFromWindow(windowToken, 0)
             }
-            main.removeCallbacks(repaint)
-            main.postDelayed(repaint, (result and 0xffff).coerceIn(16, 1000).toLong())
+            frames.rendered(epoch, result and 0xffff)
         }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        requestFocus()
-        val x = event.x
-        val y = event.y
+        val touch = !event.isFromSource(InputDevice.SOURCE_MOUSE)
         val action = event.actionMasked
-        if (event.pointerCount >= 2) {
-            if (action == MotionEvent.ACTION_MOVE) {
-                val delta = (y - lastScrollY) / (resources.displayMetrics.density * 48f)
-                enqueue { ImGuiBridge.nativeWheel(0f, delta) }
-            } else enqueue { ImGuiBridge.nativePointer(x, y, MotionEvent.ACTION_CANCEL) }
-        } else if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE ||
-            action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-            enqueue { ImGuiBridge.nativePointer(x, y, action) }
+        if (action == MotionEvent.ACTION_DOWN) {
+            requestFocus()
+            parent?.requestDisallowInterceptTouchEvent(true)
+            activePointer = event.getPointerId(0)
         }
-        lastScrollY = y
+        // A second finger cancels, rather than releasing the first finger over
+        // an unrelated control or jumping to another pointer's coordinates.
+        if (action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_CANCEL) {
+            cancelPointer(event.eventTime, touch)
+            return true
+        }
+        val index = event.findPointerIndex(activePointer)
+        if (index < 0) return true
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP) {
+            val x = event.getX(index)
+            val y = event.getY(index)
+            val time = event.eventTime
+            enqueue { ImGuiBridge.nativePointer(x, y, action, time, touch) }
+            if (action == MotionEvent.ACTION_UP) {
+                activePointer = MotionEvent.INVALID_POINTER_ID
+                parent?.requestDisallowInterceptTouchEvent(false)
+                performClick()
+            }
+        } else if (action == MotionEvent.ACTION_POINTER_UP && event.getPointerId(event.actionIndex) == activePointer) {
+            cancelPointer(event.eventTime, touch)
+        }
+        return true
+    }
+
+    private fun cancelPointer(time: Long, touch: Boolean) {
+        if (activePointer != MotionEvent.INVALID_POINTER_ID)
+            enqueue { ImGuiBridge.nativePointer(0f, 0f, MotionEvent.ACTION_CANCEL, time, touch) }
+        activePointer = MotionEvent.INVALID_POINTER_ID
+        parent?.requestDisallowInterceptTouchEvent(false)
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
         return true
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_SCROLL) {
+        if (event.actionMasked == MotionEvent.ACTION_SCROLL || event.actionMasked == MotionEvent.ACTION_HOVER_MOVE) {
+            val px = event.x
+            val py = event.y
+            val time = event.eventTime
+            enqueue { ImGuiBridge.nativePointer(px, py, MotionEvent.ACTION_MOVE, time, false) }
+            if (event.actionMasked == MotionEvent.ACTION_HOVER_MOVE) return true
             val x = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
             val y = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
             enqueue { ImGuiBridge.nativeWheel(x, y) }
@@ -115,12 +177,24 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
         return super.onGenericMotionEvent(event)
     }
 
+    fun handleBack(): Boolean {
+        if (keyboard) {
+            enqueue {
+                ImGuiBridge.nativeKey(KeyEvent.KEYCODE_ESCAPE, true, 0)
+                ImGuiBridge.nativeKey(KeyEvent.KEYCODE_ESCAPE, false, 0)
+            }
+            return true
+        }
+        if (!popupOpen) return false
+        enqueue { ImGuiBridge.nativeBack() }
+        return true
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (!keyboard) return super.dispatchKeyEvent(event)
-            if (event.action == KeyEvent.ACTION_DOWN)
-                enqueue { ImGuiBridge.nativeKey(KeyEvent.KEYCODE_ESCAPE, true, 0) }
-            else enqueue { ImGuiBridge.nativeKey(KeyEvent.KEYCODE_ESCAPE, false, 0) }
+            if (event.action == KeyEvent.ACTION_DOWN) backHandled = handleBack()
+            if (!backHandled) return super.dispatchKeyEvent(event)
+            if (event.action == KeyEvent.ACTION_UP) backHandled = false
             return true
         }
         if (event.action != KeyEvent.ACTION_DOWN && event.action != KeyEvent.ACTION_UP)
@@ -131,7 +205,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
         val unicode = if (down && !event.isCtrlPressed && !event.isMetaPressed) event.unicodeChar else 0
         enqueue {
             ImGuiBridge.nativeKey(code, down, meta)
-            if (unicode > 0 && unicode and android.view.KeyCharacterMap.COMBINING_ACCENT == 0)
+            if (unicode >= 32 && unicode != 127 && unicode and android.view.KeyCharacterMap.COMBINING_ACCENT == 0)
                 ImGuiBridge.nativeText(String(Character.toChars(unicode)))
         }
         return true
@@ -164,7 +238,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
                 repeat(afterLength.coerceIn(0, 128)) { sendKey(KeyEvent.KEYCODE_FORWARD_DEL) }
                 return true
             }
-            override fun sendKeyEvent(event: KeyEvent): Boolean = dispatchKeyEvent(event)
+            override fun sendKeyEvent(event: KeyEvent): Boolean = this@ImGuiSurface.dispatchKeyEvent(event)
             override fun performEditorAction(editorAction: Int): Boolean {
                 sendKey(KeyEvent.KEYCODE_ENTER)
                 return true

@@ -10,3 +10,9 @@ void android_ui_telemetry(FcaeTelemetry& telemetry);
 bool android_ui_paused();
 
 void android_ui_flush_settings();
+
+void android_ui_wake();
+
+void android_ui_render_controls();
+void android_ui_render_routing();
+void android_ui_render_app_picker();

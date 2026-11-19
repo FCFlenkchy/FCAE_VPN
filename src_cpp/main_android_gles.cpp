@@ -1,7 +1,13 @@
 #include "ui_render.h"
 #include "android_ui.h"
 #include "imgui_impl_opengl3.h"
-#include "imgui_internal.h"
+#include "android_imgui_input.h"
+#include "android_settings_ui.h"
+#include <unordered_map>
+#include "ui_style.h"
+#if defined(FCAE_HAVE_FREETYPE)
+#include "imgui_freetype.h"
+#endif
 #include <GLES3/gl3.h>
 #include <jni.h>
 #include <codecvt>
@@ -13,6 +19,12 @@ JavaVM* vm = nullptr;
 jclass bridge = nullptr;
 jmethodID dispatch_method = nullptr;
 jmethodID snapshot_method = nullptr;
+jmethodID wake_method = nullptr;
+jmethodID fold_method = nullptr;
+std::unique_ptr<AndroidSettingsUi> settings;
+std::atomic<bool> wake_ready{false};
+AndroidImGuiInput input;
+double interaction_until = 0.0;
 std::string files_dir;
 std::string last_error;
 std::string clipboard;
@@ -30,6 +42,12 @@ struct Texture {
     uint64_t generation = 0;
 };
 Texture textures[3];
+struct AppIcon {
+    std::vector<uint8_t> rgba;
+    GLuint texture = 0;
+    int used_frame = 0;
+};
+std::unordered_map<std::string, AppIcon> app_icons;
 
 class Env {
 public:
@@ -63,6 +81,72 @@ std::string native_string(JNIEnv* env, jstring value) {
     std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> converter;
     try { return converter.to_bytes(utf16); }
     catch (const std::range_error&) { return {}; }
+}
+
+std::vector<std::string> strings(JNIEnv* env, jobjectArray values) {
+    std::vector<std::string> result;
+    if (!values) return result;
+    const jsize count = env->GetArrayLength(values);
+    result.reserve(count);
+    for (jsize i = 0; i < count; ++i) {
+        auto value = static_cast<jstring>(env->GetObjectArrayElement(values, i));
+        result.push_back(native_string(env, value));
+        env->DeleteLocalRef(value);
+    }
+    return result;
+}
+
+std::string fold_query(const std::string& value) {
+    Env scope;
+    if (!scope.value || !fold_method) return value;
+    jstring text = java_string(scope.value, value);
+    auto result = static_cast<jstring>(scope.value->CallStaticObjectMethod(bridge, fold_method, text));
+    if (scope.value->ExceptionCheck()) {
+        scope.value->ExceptionClear();
+        scope.value->DeleteLocalRef(text);
+        scope.value->DeleteLocalRef(result);
+        return value;
+    }
+    const std::string folded = native_string(scope.value, result);
+    scope.value->DeleteLocalRef(text);
+    scope.value->DeleteLocalRef(result);
+    return folded;
+}
+
+bool reserve_icon() {
+    if (app_icons.size() < 128) return true;
+    auto victim = app_icons.end();
+    for (auto it = app_icons.begin(); it != app_icons.end(); ++it)
+        if (it->second.used_frame < ImGui::GetFrameCount() &&
+            (victim == app_icons.end() || it->second.used_frame < victim->second.used_frame)) victim = it;
+    if (victim == app_icons.end()) return false;
+    if (victim->second.texture) glDeleteTextures(1, &victim->second.texture);
+    app_icons.erase(victim);
+    return true;
+}
+
+ImTextureID app_icon(const std::string& package) {
+    auto found = app_icons.find(package);
+    if (found == app_icons.end()) {
+        if (!reserve_icon()) return {};
+        found = app_icons.emplace(package, AppIcon{}).first;
+        android_ui_command("appIcon", package);
+    }
+    AppIcon& icon = found->second;
+    icon.used_frame = ImGui::GetFrameCount();
+    if (!icon.texture && !icon.rgba.empty()) {
+        GLint previous = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+        glGenTextures(1, &icon.texture);
+        glBindTexture(GL_TEXTURE_2D, icon.texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 48, 48, 0, GL_RGBA, GL_UNSIGNED_BYTE, icon.rgba.data());
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous));
+    }
+    return static_cast<ImTextureID>(icon.texture);
 }
 
 struct Json {
@@ -115,6 +199,14 @@ void android_ui_command(const char* action, const std::string& payload) {
     }
     env->DeleteLocalRef(command);
     env->DeleteLocalRef(argument);
+}
+
+void android_ui_wake() {
+    if (!wake_ready.load(std::memory_order_acquire)) return;
+    Env scope;
+    if (!scope.value) return;
+    scope.value->CallStaticVoidMethod(bridge, wake_method);
+    if (scope.value->ExceptionCheck()) scope.value->ExceptionClear();
 }
 
 void android_ui_save_session(bool connect) {
@@ -266,24 +358,34 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_ImGuiBridge_nativeSurface(JNIEnv* env, jclass type, jstring directory, jfloat scale) {
+Java_com_fc_fcaevpn_ImGuiBridge_nativeSurface(JNIEnv* env, jclass type, jstring directory, jfloat scale, jfloat touch_slop) {
     if (!initialized) {
         env->GetJavaVM(&vm);
         bridge = static_cast<jclass>(env->NewGlobalRef(type));
         dispatch_method = env->GetStaticMethodID(bridge, "dispatch", "(Ljava/lang/String;Ljava/lang/String;)V");
         snapshot_method = env->GetStaticMethodID(bridge, "snapshot", "()[J");
+        wake_method = env->GetStaticMethodID(bridge, "requestFrame", "()V");
+        fold_method = env->GetStaticMethodID(bridge, "foldAppQuery", "(Ljava/lang/String;)Ljava/lang/String;");
+        settings = std::make_unique<AndroidSettingsUi>(
+            [](const char* action, const std::string& payload) { android_ui_command(action, payload); },
+            fold_query, app_icon);
         files_dir = native_string(env, directory);
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+#if defined(FCAE_HAVE_FREETYPE)
+        io.Fonts->SetFontLoader(ImGuiFreeType::GetFontLoader());
+#endif
+        io.BackendPlatformName = "fcae_android";
+        io.ConfigWindowsMoveFromTitleBarOnly = true;
         ImFontConfig font;
         font.SizePixels = 16.0f;
         font.RasterizerDensity = std::max(0.5f, scale);
         io.Fonts->AddFontDefaultVector(&font);
-        ImGui::StyleColorsDark();
-        ImGui::GetStyle().FrameRounding = 8.0f;
+        ui_apply_style(font.SizePixels);
+        ImGui::GetStyle().TouchExtraPadding = ImVec2(3.0f, 3.0f);
         ImGuiPlatformIO& platform = ImGui::GetPlatformIO();
         platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) {
             clipboard = text ? text : "";
@@ -291,11 +393,18 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeSurface(JNIEnv* env, jclass type, jstring 
         };
         platform.Platform_GetClipboardTextFn = [](ImGuiContext*) { return clipboard.c_str(); };
         initialized = true;
+        wake_ready.store(true, std::memory_order_release);
         ui_init();
     }
     density = std::max(0.5f, scale);
+    input.reset();
+    input.set_touch_slop(touch_slop / density);
     if (renderer_initialized) ImGui_ImplOpenGL3_Shutdown();
     for (Texture& texture : textures) texture = {};
+    for (auto it = app_icons.begin(); it != app_icons.end();) {
+        if (it->second.rgba.empty()) it = app_icons.erase(it);
+        else { it->second.texture = 0; ++it; }
+    }
     ImGui_ImplOpenGL3_Init("#version 300 es");
     renderer_initialized = true;
     last_frame = 0.0;
@@ -316,38 +425,37 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     io.DisplayFramebufferScale = ImVec2(density, density);
     io.DeltaTime = last_frame > 0 ? static_cast<float>(std::clamp(now - last_frame, 0.001, 0.25)) : 1.0f / 60.0f;
     last_frame = now;
-    ui_should_render(io.MouseDown[0] || io.WantTextInput);
+    input.new_frame(io.DeltaTime);
+    const bool interacting = input.active() || now < interaction_until || io.MouseDown[0]
+        || GImGui->InputEventsQueue.Size != 0;
+    ui_should_render(interacting || io.WantTextInput);
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     ui_frame();
     ImGui::Render();
     glViewport(0, 0, surface_width, surface_height);
-    glClearColor(0.078f, 0.078f, 0.125f, 1.0f);
+    const ImVec4 background = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+    glClearColor(background.x, background.y, background.z, background.w);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    return static_cast<jint>(std::min(ui_sleep_ms(), io.WantTextInput ? 33u : 1000u))
-        | (io.WantTextInput ? 0x10000 : 0);
+    // ImGui trickles press/release across frames. Never let the release of a
+    // quick tap, a held slider, or an inertial scroll wait for an idle poll.
+    const bool immediate = interacting || input.active() || GImGui->InputEventsQueue.Size != 0;
+    const unsigned delay = immediate ? 0u : std::min(ui_sleep_ms(), io.WantTextInput ? 33u : 250u);
+    return static_cast<jint>(delay) | (io.WantTextInput ? 0x10000 : 0)
+        | (GImGui->OpenPopupStack.Size ? 0x20000 : 0);
 }
 extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_ImGuiBridge_nativePointer(JNIEnv*, jclass, jfloat x, jfloat y, jint action) {
+Java_com_fc_fcaevpn_ImGuiBridge_nativePointer(JNIEnv*, jclass, jfloat x, jfloat y, jint action, jlong time_ms, jboolean touch) {
     if (!initialized) return;
-    ImGuiIO& io = ImGui::GetIO();
-    static float previous_y = 0.0f;
-    static float down_y = 0.0f;
-    const float logical_y = y / density;
-    if (action == 0) down_y = logical_y;
-    if (action == 2 && ImGui::GetActiveID() == 0 && std::abs(logical_y - down_y) > 8.0f)
-        io.AddMouseWheelEvent(0.0f, (logical_y - previous_y) / 48.0f);
-    previous_y = logical_y;
-    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-    io.AddMousePosEvent(x / density, logical_y);
-    if (action == 0) io.AddMouseButtonEvent(0, true);
-    if (action == 1 || action == 3) io.AddMouseButtonEvent(0, false);
-    ui_request_redraw();
+    input.pointer(x / density, y / density, action, time_ms / 1000.0, touch);
+    interaction_until = ui_now_seconds() + 0.25;
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeWheel(JNIEnv*, jclass, jfloat x, jfloat y) {
-    if (initialized) ImGui::GetIO().AddMouseWheelEvent(x, y);
+    if (!initialized) return;
+    ImGui::GetIO().AddMouseWheelEvent(x, y);
+    interaction_until = ui_now_seconds() + 0.25;
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeKey(JNIEnv*, jclass, jint code, jboolean down, jint modifiers) {
@@ -374,8 +482,12 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeVisibility(JNIEnv*, jclass, jboolean visible) {
     if (!initialized) return;
     ui_set_window_visible(visible); ui_set_window_focused(visible);
+    ImGui::GetIO().AddFocusEvent(visible);
+    if (visible && settings) settings->refresh();
+    last_frame = 0.0;
     if (!visible) {
-        ImGui::GetIO().AddMouseButtonEvent(0, false);
+        input.reset();
+        interaction_until = 0.0;
         android_ui_flush_settings();
     }
 }
@@ -388,24 +500,68 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeError(JNIEnv* env, jclass, jstring value) 
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_ImGuiBridge_nativeImport(JNIEnv* env, jclass, jstring kind, jstring text) {
+Java_com_fc_fcaevpn_ImGuiBridge_nativeImportRoutes(JNIEnv* env, jclass, jstring text) {
     const std::string value = native_string(env, text);
-    if (native_string(env, kind) == "routes") {
-        const std::string path = files_dir + "/routes-import.txt";
-        FILE* file = fopen(path.c_str(), "wb");
-        if (!file) { last_error = "Cannot write routing rules"; return; }
-        const bool written = fwrite(value.data(), 1, value.size(), file) == value.size();
-        const bool closed = fclose(file) == 0;
-        if (!written || !closed) { last_error = "Cannot save routing rules"; return; }
-        snprintf(g_app.routes_file, sizeof(g_app.routes_file), "%s", path.c_str());
-    } else {
-        AppState::CoreConfigEntry entry;
-        entry.name = "Imported config " + std::to_string(g_app.core_configs.size() + 1);
-        entry.text = value;
-        entry.backend = native_string(env, kind) == "core1" ? 1 : 0;
-        g_app.core_configs.push_back(std::move(entry));
-        g_app.refresh_core_listeners();
-    }
+    const std::string path = files_dir + "/routes-import.txt";
+    FILE* file = fopen(path.c_str(), "wb");
+    if (!file) { last_error = "Cannot write routing rules"; return; }
+    const bool written = fwrite(value.data(), 1, value.size(), file) == value.size();
+    const bool closed = fclose(file) == 0;
+    if (!written || !closed) { last_error = "Cannot save routing rules"; return; }
+    snprintf(g_app.routes_file, sizeof(g_app.routes_file), "%s", path.c_str());
     android_ui_flush_settings();
+    ui_request_redraw();
+}
+
+void android_ui_render_controls() { if (settings) settings->controls(); }
+void android_ui_render_routing() { if (settings) settings->routing(); }
+void android_ui_render_app_picker() { if (settings) settings->picker(); }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_ImGuiBridge_nativePlatformState(JNIEnv* env, jclass, jlong revision, jint mode, jobjectArray selected, jboolean tile, jboolean widgets) {
+    if (settings) settings->state(static_cast<uint64_t>(revision), mode, strings(env, selected), tile, widgets);
+    ui_request_redraw();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_ImGuiBridge_nativeApps(JNIEnv* env, jclass, jobjectArray packages, jobjectArray labels, jobjectArray search) {
+    if (!settings) return;
+    const auto names = strings(env, packages);
+    const auto titles = strings(env, labels);
+    const auto folded = strings(env, search);
+    if (names.size() != titles.size() || names.size() != folded.size()) return;
+    std::vector<AndroidSettingsUi::App> apps;
+    apps.reserve(names.size());
+    for (size_t i = 0; i < names.size(); ++i) apps.push_back({names[i], titles[i], folded[i]});
+    settings->apps(std::move(apps));
+    ui_request_redraw();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_ImGuiBridge_nativeAppIcon(JNIEnv* env, jclass, jstring name, jintArray pixels) {
+    const std::string package = native_string(env, name);
+    auto found = app_icons.find(package);
+    if (found == app_icons.end() || !pixels || env->GetArrayLength(pixels) != 48 * 48) return;
+    std::vector<jint> colors(48 * 48);
+    env->GetIntArrayRegion(pixels, 0, static_cast<jsize>(colors.size()), colors.data());
+    auto& rgba = found->second.rgba;
+    rgba.resize(colors.size() * 4);
+    for (size_t i = 0; i < colors.size(); ++i) {
+        const uint32_t argb = static_cast<uint32_t>(colors[i]);
+        rgba[i * 4] = static_cast<uint8_t>(argb >> 16);
+        rgba[i * 4 + 1] = static_cast<uint8_t>(argb >> 8);
+        rgba[i * 4 + 2] = static_cast<uint8_t>(argb);
+        rgba[i * 4 + 3] = static_cast<uint8_t>(argb >> 24);
+    }
+    ui_request_redraw();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_ImGuiBridge_nativeBack(JNIEnv*, jclass) {
+    if (!initialized) return;
+    input.reset();
+    if (GImGui->OpenPopupStack.Size)
+        ImGui::ClosePopupToLevel(GImGui->OpenPopupStack.Size - 1, true);
+    interaction_until = ui_now_seconds() + 0.25;
     ui_request_redraw();
 }

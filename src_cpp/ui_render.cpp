@@ -155,6 +155,7 @@ static std::atomic<uintptr_t> s_ui_window{0};
 // Tick count at which an elevated relaunch succeeded; the window thread ends
 // this process once the hand-off window has passed. Zero while none is pending.
 static std::atomic<DWORD> s_elevation_handoff_at{0};
+static std::atomic<bool> s_elevation_pending{false};
 // How long the copy that asked for elevation may look like it is still there
 // after the elevated process has started. Only long enough for the shell to
 // bring the new window forward; the window is hidden and destroyed at this
@@ -757,7 +758,11 @@ static void ui_poll_telemetry(double now) {
 /// visible flicker -- instead of on the next frame. `windows.h` is included at
 /// the top of this file on Windows, so the stored handle is cast back to HWND.
 void ui_request_redraw() {
+#if defined(ANDROID)
+    if (!g_app.redraw_requested.exchange(true)) android_ui_wake();
+#else
     g_app.redraw_requested.store(true);
+#endif
 #ifdef _WIN32
     if (auto window = reinterpret_cast<HWND>(s_ui_window.load())) PostMessageW(window, WM_NULL, 0, 0);
 #elif defined(__linux__) && !defined(ANDROID)
@@ -921,7 +926,7 @@ unsigned ui_sleep_ms() {
     const bool focused = s_ui_window_focused.load();
     if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Starting)
         return 16;
-    if (s_busy_anim || (s_sponsor.available && s_sponsor.animated))
+    if (s_busy_anim || s_update_in_progress || (s_sponsor.available && s_sponsor.animated))
         return focused ? kUiFrameIntervalMs : 2 * kUiFrameIntervalMs;
     if (!focused) return kUiUnfocusedIntervalMs;
     if (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput) return kUiCaretIntervalMs;
@@ -4430,7 +4435,11 @@ void render_ui() {
         float btn_w = narrow ? (std::max)(action_btn_min, ImGui::GetContentRegionAvail().x - pair_reserve)
                              : action_btn_min;
         bool show_disconnect = connected || busy || tun_paused;
-        if (startup) ImGui::BeginDisabled();
+        bool connect_disabled = startup;
+#ifdef _WIN32
+        connect_disabled |= s_elevation_pending.load(std::memory_order_acquire);
+#endif
+        if (connect_disabled) ImGui::BeginDisabled();
         if (ImGui::Button(show_disconnect ? "DISCONNECT" : "CONNECT", ImVec2(btn_w, kActionRowHeight))) {
 #if defined(ANDROID)
             if (connected || busy || errored || tun_paused) {
@@ -4514,9 +4523,12 @@ void render_ui() {
                     // The decision to exit is published here and acted on by
                     // the window thread: PostQuitMessage only affects the thread
                     // that calls it, so a worker cannot end this process.
-                    std::thread([exe_path = std::wstring(exe_path)] {
+                    const HWND consent_owner = reinterpret_cast<HWND>(s_ui_window.load());
+                    s_elevation_pending.store(true, std::memory_order_release);
+                    std::thread([exe_path = std::wstring(exe_path), consent_owner] {
                         SHELLEXECUTEINFOW sei = {};
                         sei.cbSize = sizeof(sei);
+                        sei.hwnd = consent_owner;
                         sei.lpVerb = L"runas";
                         sei.lpFile = exe_path.c_str();
                         wchar_t handoff_args[64];
@@ -4542,6 +4554,7 @@ void render_ui() {
                             // only needs to let UAC dismiss and the new instance
                             // take the single-instance slot.
                             s_elevation_handoff_at.store(GetTickCount(), std::memory_order_relaxed);
+                            ui_request_redraw();
                         } else {
                             // Say what happened rather than leaving TUN silently
                             // "not working": the usual cause is a declined UAC
@@ -4563,6 +4576,8 @@ void render_ui() {
                             set_save_status_error(
                                 "TUN needs Admin (error %lu) -- click CONNECT to retry UAC",
                                 static_cast<unsigned long>(err));
+                            s_elevation_pending.store(false, std::memory_order_release);
+                            ui_request_redraw();
                         }
                     }).detach();
                     ImGui::PopStyleColor(3);  // button colors
@@ -4746,10 +4761,8 @@ void render_ui() {
             }
 #endif
         }
-        if (startup) {
-            ImGui::EndDisabled();
-            ImGui::SetItemTooltip("Finishing initialization...");
-        }
+        if (connect_disabled) ImGui::EndDisabled();
+        if (startup) ImGui::SetItemTooltip("Finishing initialization...");
         ImGui::PopStyleColor(3);
 
         if (show_tun_control) {
@@ -4837,40 +4850,29 @@ void render_ui() {
         // as the window allows; on narrow windows it drops to its own line,
         // still flush right. Gated until the runtime is live.
         if (startup) ImGui::BeginDisabled();
-        if (!narrow) {
-            ImGui::SameLine(0, 10);
-            ImGui::SetCursorPosY(row_start_y);
-        }
         {
-            // Sized from the longest label this button ever shows, not from a
-            // constant. At the old 13 px font the widest was "Check for Updates"
-            // at 119 px, which fitted a hard-coded 136 -- but at the doubled
-            // base size that same label is 239 px, so it ran past the button's
-            // edges and read as "not centred in its background". Measuring keeps
-            // the label centred whatever the font size is.
-            const float btn_pad   = ImGui::GetStyle().FramePadding.x * 2.0f;
-            // The widest label is used for all states, so the button keeps one
-            // width instead of twitching whenever the label changes: a button
-            // that resizes while it is pinned to the right edge also drags its
-            // own text around, which reads as the label jumping off-centre.
-            float btn_width = std::max(ImGui::CalcTextSize("Check for Updates").x,
-                              std::max(ImGui::CalcTextSize("Check Timed Out").x,
-                                       ImGui::CalcTextSize("Checking... 999s").x)) + btn_pad;
-            // Only if the window is too narrow to hold it does it give ground.
-            {
-                const float room = ImGui::GetWindowContentRegionMax().x - 260.0f;
-                if (room > 60.0f && btn_width > room) btn_width = room;
+            const ImGuiStyle& style = ImGui::GetStyle();
+            float btn_width = 0.0f;
+            for (const char* label : {"Check for Updates", "Update Available!", "Check Timed Out",
+                                      "Checking... 999s", "ATTENTION!", "Check Failed", "Up to Date"})
+                btn_width = std::max(btn_width, ImGui::CalcTextSize(label).x);
+            const float label_width = btn_width;
+            const float padding = style.FramePadding.x * 2.0f;
+            btn_width += padding;
+            const float content_right = ImGui::GetWindowContentRegionMax().x;
+            const float content_left = ImGui::GetWindowContentRegionMin().x;
+            btn_width = std::min(btn_width, std::max(1.0f, content_right - content_left));
+            const bool compact_label = label_width + padding > btn_width;
+            if (compact_label)
+                ImGui::PushFont(nullptr, style.FontSizeBase * std::max(1.0f, btn_width - padding - 1.0f) / label_width);
+            const float last_item_right = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (!narrow && content_right - last_item_right >= btn_width + 10.0f) {
+                ImGui::SameLine(0, 10);
+                ImGui::SetCursorPosY(row_start_y);
             }
-            // The button height follows the text: at 32 px exactly, a raised
-            // text scale would push the label past the button's edge. The
-            // designed 32 px stays the floor.
-            const float update_btn_h = (ImGui::GetFrameHeight() > 32.0f)
-                                     ? ImGui::GetFrameHeight() : 32.0f;
-            {
-                const float right_x = ImGui::GetWindowContentRegionMax().x - btn_width;
-                if (ImGui::GetCursorPosX() < right_x)
-                    ImGui::SetCursorPosX(right_x);
-            }
+            ImGui::SetCursorPosX(content_right - btn_width);
+            const float update_btn_h = std::max(32.0f, ImGui::GetFrameHeight());
+            ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
             FcaeUpdateInfo info = {};
             info.struct_size = sizeof(info);
             info.abi_version = FCAE_ABI_VERSION;
@@ -4962,6 +4964,8 @@ void render_ui() {
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
             }
+            ImGui::PopStyleVar();
+            if (compact_label) ImGui::PopFont();
         }
         if (startup) ImGui::EndDisabled();
 
@@ -5585,9 +5589,6 @@ void render_ui() {
         if (ImGui::BeginTabItem("Connection")) {
             ImGui::BeginChild("##proto_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
-#if defined(ANDROID)
-            if (ImGui::Button("Android controls & app routing")) android_ui_command("settings");
-#endif
             if (ImGui::Button("Protocol")) open_protocol_editor();
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Firefox settings")) open_firefox_settings();
@@ -5595,6 +5596,9 @@ void render_ui() {
             if (ImGui::Button("Xray & sing-box settings")) open_core_configs();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "APP SETTINGS");
+#if defined(ANDROID)
+            android_ui_render_controls();
+#endif
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
             if (ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases)) {
                 // Channel change takes effect immediately, like the Android
@@ -5613,8 +5617,14 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "SHARED SETTINGS");
             ImGui::Text("Mode");
+#if defined(ANDROID)
+            const char* android_modes[] = { "Proxy (SOCKS/HTTP)", "TUN (system VPN)" };
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::Combo("##android_mode", &g_app.mode, android_modes, 2);
+#else
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
+#endif
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
             bool logging_enabled = g_app.logging_enabled.load(std::memory_order_relaxed);
             if (ImGui::Checkbox("Enable logging##shared", &logging_enabled))
@@ -5687,6 +5697,9 @@ void render_ui() {
                 ImGui::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
                 ImGui::PopItemWidth();
                 ImGui::Checkbox("Exclude private IPs", &g_app.tun_exclude_private);
+#if defined(ANDROID)
+                android_ui_render_routing();
+#endif
                 if (g_app.parsed_tun_mtu() == 0xffffffffu)
                     ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
                 const char* t2s_logs[] = { "Silent", "Error", "Warn", "Info", "Debug" };
@@ -5944,7 +5957,7 @@ void render_ui() {
             ImGui::Text("Routing Rules File (Aether only)");
             ImGui::InputTextWithHint("##routes_file", "path/to/routes.txt", g_app.routes_file, sizeof(g_app.routes_file));
 #if defined(ANDROID)
-            if (ImGui::Button("Choose routing rules file")) android_ui_command("import", "routes");
+            if (ImGui::Button("Choose routing rules file")) android_ui_command("importRoutes");
 #endif
             ImGui::TextDisabled("Format: [block] / [direct] sections with domain, IP, CIDR, port rules.");
             ImGui::Spacing();
@@ -6156,6 +6169,9 @@ void render_ui() {
 
     ImGui::EndChild();
 
+#if defined(ANDROID)
+    android_ui_render_app_picker();
+#endif
     render_protocol_editor();
     s_firefox_captcha_embedded = false;
     render_core_configs();

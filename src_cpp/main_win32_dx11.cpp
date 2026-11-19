@@ -1,3 +1,4 @@
+#include "ui_style.h"
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -20,6 +21,7 @@ static ID3D11Device*           g_pd3dDevice       = nullptr;
 static ID3D11DeviceContext*    g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*         g_pSwapChain       = nullptr;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
+static bool g_has_presented_frame = false;
 static ID3D11Texture2D*        g_sponsor_textures[3] = {};
 static ID3D11ShaderResourceView* g_sponsor_views[3] = {};
 static uint64_t g_sponsor_loaded[3] = {};
@@ -206,6 +208,11 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             // class background -- a white, frozen window that still accepted
             // clicks. The flag is already set by whoever posted this.
             return 0;
+        case WM_ERASEBKGND:
+            // D3D paints the whole client area. A separate GDI erase between
+            // focus/desktop restoration and Present can flash the background.
+            if (g_imgui_win32_ready && g_mainRenderTargetView && g_has_presented_frame) return 1;
+            break;
         case WM_PAINT:
             ui_request_redraw();
             break;
@@ -229,6 +236,7 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_THEMECHANGED:
         case WM_SYSCOLORCHANGE:
         case WM_ACTIVATE:
+        case WM_ACTIVATEAPP:
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
         case WM_SHOWWINDOW:
@@ -249,6 +257,7 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
                 const HRESULT resized = g_pSwapChain->ResizeBuffers(
                     0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
+                if (SUCCEEDED(resized)) g_has_presented_frame = false;
                 // If resizing failed, keep rendering to the existing back
                 // buffer instead of leaving the window permanently blank.
                 ID3D11Texture2D* pBackBuffer = nullptr;
@@ -378,7 +387,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // An explicit background brush rather than the default white: uncovered
     // edges, and the moments before the first frame reaches the flip chain,
     // must show the UI's own background, not a white sheet.
-    wc.hbrBackground = CreateSolidBrush(RGB(13, 13, 20));   // 0.05, 0.05, 0.08
+    wc.hbrBackground = CreateSolidBrush(RGB(20, 20, 31));   // shared WindowBg, including startup
     if (!wc.hIcon) {
         wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     }
@@ -449,39 +458,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    // Left at 1.0 on purpose: the window is created at its designed pixel size
-    // and the UI lays itself out in those same pixels. Scaling the font by the
-    // monitor DPI here as well is what made text overflow its rows at 150%.
-    // The user's own text scale arrives from ui_frame() as FontScaleMain.
-    style.FontScaleDpi     = 1.0f;
-    // The size the layout is designed against, so a card's heights and the
-    // action row's 32 px floor are computed from the same number the glyphs are
-    // drawn at. Without this it defaults to the font's legacy size on the first
-    // frame and the two can disagree.
-    style.FontSizeBase     = kUiBaseFontSize;
-    style.WindowRounding   = 10.0f;
-    style.FrameRounding    = 6.0f;
-    style.GrabRounding     = 4.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.FramePadding     = ImVec2(10, 6);
-    style.WindowPadding    = ImVec2(16, 12);
-    // Button labels sit in the middle of their box on every platform: the
-    // default left alignment read as off-centre wherever a label was narrower
-    // than the fixed width these rows use.
-    style.ButtonTextAlign  = ImVec2(0.5f, 0.5f);
-
-    ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg]        = ImVec4(0.08f, 0.08f, 0.12f, 1.0f);
-    colors[ImGuiCol_ChildBg]         = ImVec4(0.10f, 0.10f, 0.14f, 1.0f);
-    colors[ImGuiCol_FrameBg]         = ImVec4(0.14f, 0.14f, 0.20f, 1.0f);
-    colors[ImGuiCol_FrameBgHovered]  = ImVec4(0.18f, 0.18f, 0.26f, 1.0f);
-    colors[ImGuiCol_Button]          = ImVec4(0.16f, 0.40f, 0.60f, 1.0f);
-    colors[ImGuiCol_ButtonHovered]   = ImVec4(0.20f, 0.50f, 0.70f, 1.0f);
-    colors[ImGuiCol_Tab]             = ImVec4(0.12f, 0.12f, 0.18f, 1.0f);
-    colors[ImGuiCol_TabHovered]      = ImVec4(0.20f, 0.30f, 0.45f, 1.0f);
-    colors[ImGuiCol_SliderGrab]      = ImVec4(0.30f, 0.60f, 0.80f, 1.0f);
+    ui_apply_style(kUiBaseFontSize);
 
     const bool imgui_win32_initialized = ImGui_ImplWin32_Init(hWnd);
     const bool imgui_dx11_initialized = imgui_win32_initialized
@@ -560,6 +537,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             DispatchMessage(&msg);
         }
         if (done) break;
+        // Complete an approved elevation even while minimized or while the
+        // content gate has no reason to open another ImGui frame.
+        ui_handoff_tick();
+        if (!g_app.running.load() || !IsWindow(hWnd)) break;
         if (got_input) last_input_time = std::chrono::steady_clock::now();
         paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
 
@@ -593,6 +574,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         ImGui::NewFrame();
 
         ui_frame();
+        if (!g_app.running.load() || !IsWindow(hWnd) || !IsWindowVisible(hWnd)) {
+            ImGui::EndFrame();
+            continue;
+        }
 
         ImGui::Render();
 
@@ -605,13 +590,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         ImGui::EndFrame();
         if (!g_mainRenderTargetView) continue;
 
-        const float clear_color[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
+        const ImVec4 background = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+        const float clear_color[4] = { background.x, background.y, background.z, background.w };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
         // Ignore Present failure; the next frame sees the device guard.
-        g_pSwapChain->Present(1, 0);
+        if (g_pSwapChain->Present(1, 0) == S_OK) g_has_presented_frame = true;
         last_frame_time = std::chrono::steady_clock::now();
     }
 
