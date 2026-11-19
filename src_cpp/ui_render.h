@@ -240,9 +240,8 @@ struct AppState {
     // The FFI's own log callback level is fixed at info and not exposed.
     int  engine_log  = 3;
 
-    // Verbosity of the core the route runs (FcaeEngineLog; Xray, sing-box):
-    // 0 = silent, which is the default. Both cores log a line per connection
-    // at info, so the setting is here for when one of them needs watching.
+    // Route-core verbosity (FcaeEngineLog; Xray, sing-box, Mihomo).
+    // 0 = silent by default; independent of the app's own FFI log level.
     int  core_log    = 0;
 
     // Verbosity of the tun2socks data plane (FcaeT2sLog): 1 = silent ..
@@ -912,6 +911,9 @@ extern AppState g_app;
 void ui_init();
 void ui_frame();
 void ui_shutdown();
+#if defined(ANDROID)
+void ui_release_view();
+#endif
 void render_ui();
 void log_callback(FcaeLogLevel level, const char* message, void* user_data);
 

@@ -171,6 +171,8 @@ static int s_sponsor_ui_active_sent = -1;
 static int s_sponsor_connected_sent = -1;
 static std::string s_sponsor_last_error;
 static bool s_tun_paused = false;
+static uint64_t s_logs_revision = ~0ULL;
+static std::vector<std::pair<int, std::string>> s_logs_snapshot;
 
 static const std::string& data_dir();
 static std::string join_path(const std::string& dir, const char* name);
@@ -795,16 +797,7 @@ void ui_handoff_tick() {
 #ifdef _WIN32
     const DWORD at = s_elevation_handoff_at.load(std::memory_order_relaxed);
     if (at == 0) return;
-    // The worker arms this the moment the shell hands back the elevated
-    // process, so the window has done its job by then. Waiting here instead of
-    // exiting straight away is what made the old copy sit on screen: the frame
-    // loop only sees the flag on its next tick, and ui_shutdown() then spends
-    // its time in fcae_shutdown() restoring routes and DNS before the process
-    // finally exits -- all of it with the window still up.
-    //
-    // So the visible part happens now, and the cleanup follows invisibly:
-    // hide and destroy the window first (both happen on this, the owning,
-    // thread), then let the loop's teardown run.
+    // The elevated child has presented its first frame before this is armed.
     if (GetTickCount() - at >= kHandoffWindowMs) {
         s_elevation_handoff_at.store(0, std::memory_order_relaxed);
         g_app.running.store(false);
@@ -3958,9 +3951,11 @@ static void render_core_configs() {
         }
         log_combo_w += ImGui::GetStyle().FramePadding.x * 2.0f
                      + ImGui::GetFrameHeight() * 0.9f;   // room for the arrow
-        ImGui::PushItemWidth(log_combo_w);
-        ImGui::Combo("Xray & sing-box log level", &g_app.core_log, kCoreLogs, 6);
-        ImGui::PopItemWidth();
+        ImGui::TextWrapped("Xray / sing-box / Mihomo log level");
+        ImGui::SetNextItemWidth(std::min(log_combo_w, std::max(1.0f, ImGui::GetContentRegionAvail().x)));
+        ImGui::Combo("##core_log_level", &g_app.core_log, kCoreLogs, 6);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Applies on the next connection. Mihomo maps Trace to Debug.");
     }
     ImGui::Spacing();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
@@ -4546,15 +4541,40 @@ void render_ui() {
                     // that calls it, so a worker cannot end this process.
                     const HWND consent_owner = reinterpret_cast<HWND>(s_ui_window.load());
                     s_elevation_pending.store(true, std::memory_order_release);
-                    std::thread([exe_path = std::wstring(exe_path), consent_owner] {
+                    RECT bounds = {};
+                    GetWindowRect(consent_owner, &bounds);
+                    WINDOWPLACEMENT placement = {};
+                    placement.length = sizeof(placement);
+                    int show = SW_SHOWNORMAL;
+                    if (GetWindowPlacement(consent_owner, &placement) && placement.showCmd == SW_SHOWMAXIMIZED) {
+                        show = SW_SHOWMAXIMIZED;
+                        bounds = placement.rcNormalPosition;
+                        MONITORINFO monitor = {};
+                        monitor.cbSize = sizeof(monitor);
+                        if (GetMonitorInfoW(MonitorFromWindow(consent_owner, MONITOR_DEFAULTTONEAREST), &monitor))
+                            OffsetRect(&bounds, monitor.rcWork.left - monitor.rcMonitor.left,
+                                       monitor.rcWork.top - monitor.rcMonitor.top);
+                    }
+                    std::thread([exe_path = std::wstring(exe_path), consent_owner, bounds, show] {
+                        wchar_t event_name[96];
+                        std::swprintf(event_name, 96, L"Local\\FCAE.UI.Ready.%lu",
+                                      static_cast<unsigned long>(GetCurrentProcessId()));
+                        HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, event_name);
+                        if (!ready) {
+                            g_app.add_log(FCAE_LOG_ERROR, "[ui] Cannot create elevation handoff event");
+                            s_elevation_pending.store(false, std::memory_order_release);
+                            ui_request_redraw();
+                            return;
+                        }
                         SHELLEXECUTEINFOW sei = {};
                         sei.cbSize = sizeof(sei);
                         sei.hwnd = consent_owner;
                         sei.lpVerb = L"runas";
                         sei.lpFile = exe_path.c_str();
-                        wchar_t handoff_args[64];
-                        std::swprintf(handoff_args, 64, L"--fcae-wait-parent %lu",
-                                      static_cast<unsigned long>(GetCurrentProcessId()));
+                        wchar_t handoff_args[192];
+                        std::swprintf(handoff_args, 192, L"--fcae-wait-parent %lu --fcae-window %ld %ld %ld %ld %d",
+                                      static_cast<unsigned long>(GetCurrentProcessId()), bounds.left, bounds.top,
+                                      bounds.right - bounds.left, bounds.bottom - bounds.top, show);
                         sei.lpParameters = handoff_args;
                         sei.nShow = SW_NORMAL;
                         // SEE_MASK_NOASYNC keeps the shell from failing a caller
@@ -4563,18 +4583,15 @@ void render_ui() {
                         if (ShellExecuteExW(&sei)) {
                             DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
                             fcae_ui_diagnostic(3, child_pid);
+                            HANDLE waits[] = {ready, sei.hProcess};
+                            const DWORD wait = WaitForMultipleObjects(sei.hProcess ? 2 : 1, waits, FALSE, 30000);
                             if (sei.hProcess) CloseHandle(sei.hProcess);
-                            char msg[160];
-                            snprintf(msg, sizeof(msg),
-                                "[ui] TUN mode needs elevation -- relaunched elevated (PID %lu). "
-                                "This copy will exit in ~1s.",
-                                static_cast<unsigned long>(child_pid));
-                            g_app.add_log(FCAE_LOG_INFO, msg);
-                            // Hand-off window: the elevated copy waits for this
-                            // process to exit (--fcae-wait-parent), so the delay
-                            // only needs to let UAC dismiss and the new instance
-                            // take the single-instance slot.
-                            s_elevation_handoff_at.store(GetTickCount(), std::memory_order_relaxed);
+                            if (wait == WAIT_OBJECT_0) {
+                                s_elevation_handoff_at.store(GetTickCount() | 1u, std::memory_order_relaxed);
+                            } else {
+                                g_app.add_log(FCAE_LOG_ERROR, "[ui] Elevated window did not become ready; keeping this window open");
+                                s_elevation_pending.store(false, std::memory_order_release);
+                            }
                             ui_request_redraw();
                         } else {
                             // Say what happened rather than leaving TUN silently
@@ -4600,6 +4617,7 @@ void render_ui() {
                             s_elevation_pending.store(false, std::memory_order_release);
                             ui_request_redraw();
                         }
+                        CloseHandle(ready);
                     }).detach();
                     ImGui::PopStyleColor(3);  // button colors
                     ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
@@ -5123,9 +5141,9 @@ void render_ui() {
         const float min_card_w = 320.0f;
         const float column_gap  = 24.0f;
         const bool use_columns  = (avail_w - (left_column_w + column_gap)) >= min_card_w;
-        const float card_w = use_columns
+        const float card_w = std::floor(std::max(1.0f, use_columns
             ? std::clamp(avail_w * 0.4f, min_card_w, avail_w - left_column_w - column_gap)
-            : avail_w;
+            : avail_w));
         const float sponsor_offset_x = ImGui::GetCursorPosX() + (use_columns ? avail_w - card_w : 0.0f);
 
         ImGui::BeginGroup(); // Left column: Stats
@@ -5272,12 +5290,22 @@ void render_ui() {
             ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+            ImGui::SetNextWindowScroll(ImVec2(0.0f, 0.0f));
             ImGui::BeginChild("##sponsor_card", ImVec2(card_w, sponsor_card_height),
-                ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
+                    | ImGuiWindowFlags_NoNavInputs | ImGuiWindowFlags_NoNavFocus);
+            // Use the actual rounded child size and one consistent interior
+            // rectangle. The requested float size may round by a pixel.
+            const float card_border = ImGui::GetStyle().ChildBorderSize;
+            const ImVec2 card_pos = ImGui::GetWindowPos();
+            const ImVec2 card_size = ImGui::GetWindowSize();
+            const ImVec2 media_origin(card_pos.x + card_border, card_pos.y + card_border);
+            const ImVec2 media_area(std::max(1.0f, card_size.x - card_border * 2.0f),
+                                    std::max(1.0f, card_size.y - card_border * 2.0f));
 
             if (background_texture) {
-                const ImVec2 card_min = ImGui::GetCursorScreenPos();
-                const ImVec2 card_size = ImGui::GetContentRegionAvail();
+                const ImVec2 card_min = media_origin;
+                const ImVec2 card_size = media_area;
                 const ImVec2 source((float)s_sponsor.background_width, (float)s_sponsor.background_height);
                 const float cover = std::max(card_size.x / source.x, card_size.y / source.y) * background_scale;
                 const ImVec2 drawn(source.x * cover, source.y * cover);
@@ -5296,8 +5324,8 @@ void render_ui() {
             }
 
             if (texture) {
-                const ImVec2 icon_origin = ImGui::GetCursorScreenPos();
-                const ImVec2 icon_area = ImGui::GetContentRegionAvail();
+                const ImVec2 icon_origin = media_origin;
+                const ImVec2 icon_area = media_area;
                 const ImVec2 band = icon_area;
                 const ImVec2 source((float)s_sponsor.width, (float)s_sponsor.height);
                 ImVec2 size = band;
@@ -5336,9 +5364,8 @@ void render_ui() {
                 ImGui::GetWindowDrawList()->AddImage(texture, icon_min, icon_max, uv0, uv1,
                     ImGui::GetColorU32(ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f)));
             }
-            const ImVec2 card_origin = ImGui::GetWindowPos();
-            ImGui::SetCursorScreenPos(card_origin);
-            ImGui::InvisibleButton("##sponsor_card_touch", ImVec2(card_w, sponsor_card_height));
+            ImGui::SetCursorScreenPos(media_origin);
+            ImGui::InvisibleButton("##sponsor_card_touch", media_area);
 #if defined(ANDROID)
             android_ui_horizontal_drag_item();
 #endif
@@ -5363,8 +5390,8 @@ void render_ui() {
                     ? "Click to open, drag to change sponsor"
                     : "Click to open sponsor website");
 
-            const ImVec2 text_card(card_w, sponsor_card_height);
-            const ImVec2 text_origin = ImGui::GetWindowPos();
+            const ImVec2 text_card = media_area;
+            const ImVec2 text_origin = media_origin;
             if (sponsor_has_content) {
                 SponsorText title = layout_sponsor_text(sponsor_title, text_card, kSponsorTextInset,
                     s_sponsor.title_x, text_card.y * (float)s_sponsor.title_y / 100.0f, title_scale);
@@ -6098,8 +6125,8 @@ void render_ui() {
             // Take a thread-safe snapshot of the logs for rendering.
             // This avoids a data race with the FFI callback thread which
             // calls add_log() concurrently.
-            static uint64_t revision = ~0ULL;
-            static std::vector<std::pair<int, std::string>> logs_snapshot;
+            auto& revision = s_logs_revision;
+            auto& logs_snapshot = s_logs_snapshot;
             g_app.sync_logs(revision, logs_snapshot);
 
             const bool manual_scroll =
@@ -6203,3 +6230,32 @@ void render_ui() {
     if (horizontal_drag.update()) ui_request_redraw();
 #endif
 }
+
+#if defined(ANDROID)
+void ui_release_view() {
+    fcae_sponsor_set_ui_active(false);
+    std::vector<uint8_t>{}.swap(s_sponsor_rgba);
+    std::vector<uint8_t>{}.swap(s_sponsor_background_rgba);
+    s_sponsor_loaded_foreground_generation = 0;
+    s_sponsor_loaded_background_generation = 0;
+    s_painted_once = false;
+    s_about_popup_open = false;
+    s_connection_info_popup_open = false;
+    s_update_popup_open = false;
+    s_update_decode_popup_open = false;
+    s_update_error_popup_open = false;
+    std::vector<char>{}.swap(s_core_text_buf);
+    s_core_editor_open = s_core_configs_popup_open = false;
+    s_core_editor_fresh = false;
+    s_core_editor_row = -1;
+    s_core_name_buf[0] = s_core_status[0] = 0;
+    std::vector<int>{}.swap(s_chain_draft);
+    s_chain_editor_popup_open = false;
+    std::vector<uint8_t>{}.swap(s_firefox_captcha_rgba);
+    s_firefox_captcha_width = s_firefox_captcha_height = 0;
+    g_app.firefox_captcha_id = 0;
+    decltype(s_logs_snapshot){}.swap(s_logs_snapshot);
+    s_logs_revision = ~0ULL;
+    ui_request_redraw();
+}
+#endif

@@ -49,12 +49,12 @@ Aether supports custom routing rules directly in the UI (Routes tab) without nee
 
 ## Platforms
 
-| Platform | Backend | UI |
+| Platform | Rendering host | UI |
 |----------|---------|----|
 | Windows | DirectX 11 | ImGui |
 | Linux | GLFW + OpenGL | ImGui |
 | macOS | AppKit + Metal | ImGui |
-| Android | Kotlin Material VpnService + JNI bridge | Kotlin Material UI |
+| Android | GLSurfaceView + OpenGL ES 3 + JNI | ImGui |
 
 ### Screenshots
 
@@ -97,7 +97,7 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 
 - **Firefox IP Protection** — Implemented in Rust. See the [Firefox IP Protection source code](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/) (used [Arman VPN](https://github.com/armanlife/arman-vpn-client) and [FoxyVPN](https://github.com/Vauth/FoxyVPN) as references).
 - **[Aether](https://github.com/CluvexStudio/aether)** — The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, WARP-in-WARP and WARP-in-MASQUE protocols.
-- **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for all native desktop rendering.
+- **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for the shared desktop and Android interface.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C SOCKS5 tunnel engine, runs in-process.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon tunnel core library.
 - **[Xray-core](https://github.com/XTLS/Xray-core)** — Proxy core, in-process.

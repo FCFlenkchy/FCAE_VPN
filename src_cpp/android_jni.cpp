@@ -1,4 +1,4 @@
-// FCAE VPN — Android JNI bridge (Kotlin UI controls the in-process engine)
+// Android service and platform JNI bridge; the shared ImGui UI calls the FFI directly.
 #include <jni.h>
 #include <algorithm>
 #include <unistd.h>
@@ -6,7 +6,6 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
-#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -17,10 +16,6 @@
 // Android-only FFI helpers: kept out of the generated public C header because
 // they are embedding hooks rather than part of the cross-platform ABI.
 extern "C" bool fcae_sponsor_initialize_android_context(void* java_vm, void* context);
-extern "C" void fcae_sponsor_set_ui_active(bool active);
-// What the live cores are listening on, as `core|position|name|protocol|port|scope`
-// records separated by `;`.
-extern "C" uint32_t fcae_live_listeners(char* out, uint32_t capacity);
 
 #define LOG_TAG "FCAE_VPN"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -31,26 +26,10 @@ extern "C" uint32_t fcae_live_listeners(char* out, uint32_t capacity);
 // can hide a broken native dependency.
 
 static std::mutex g_log_mu;
-static std::deque<std::string> g_logs;
-static size_t g_log_bytes = 0;
 static std::string g_log_path;
 static constexpr size_t kLogFileLimit = 1024 * 1024;
 static constexpr size_t kLogFileKeep = 512 * 1024;
-// Psiphon notices are chatty; 30 lines vanished before the user saw them.
-static constexpr size_t kMaxLogs = 250;
 static std::atomic<bool> g_inited{false};
-static std::atomic<uint64_t> g_sponsor_logged_generation{0};
-// Sponsor generation layout mirrors the Rust publisher: campaign/metadata
-// above bit 24, foreground frame in bits 12..23, background frame in bits
-// 0..11. Only copy the media plane whose frame actually changed.
-static constexpr uint64_t kSponsorBackgroundFrameMask = 0xFFFULL;
-static constexpr uint64_t kSponsorForegroundFrameMask = 0xFFF000ULL;
-static bool sponsor_foreground_changed(uint64_t current, uint64_t previous) {
-    return ((current ^ previous) & ~kSponsorBackgroundFrameMask) != 0;
-}
-static bool sponsor_background_changed(uint64_t current, uint64_t previous) {
-    return ((current ^ previous) & ~kSponsorForegroundFrameMask) != 0;
-}
 
 // Psiphon socket protection.
 //
@@ -578,7 +557,7 @@ static void append_log_file(const std::string& line) {
     std::fclose(f);
 }
 
-static void push_log_line(char prefix, const char* message, bool truncate = true) {
+static void push_log_line(char prefix, const char* message) {
     if (!message || !message[0]) return;
     std::string line;
     line.push_back(prefix);
@@ -588,13 +567,6 @@ static void push_log_line(char prefix, const char* message, bool truncate = true
     const int level = prefix == 'E' ? FCAE_LOG_ERROR : prefix == 'W' ? FCAE_LOG_WARN
         : prefix == 'D' ? FCAE_LOG_DEBUG : FCAE_LOG_INFO;
     log_callback(static_cast<FcaeLogLevel>(level), message, nullptr);
-    if (truncate && line.size() > 512) line.resize(512);
-    g_log_bytes += line.size();
-    g_logs.push_back(std::move(line));
-    while (g_logs.size() > kMaxLogs || (g_log_bytes > 2 * 1024 * 1024 && g_logs.size() > 1)) {
-        g_log_bytes -= g_logs.front().size();
-        g_logs.pop_front();
-    }
 }
 
 static void jni_log_cb(FcaeLogLevel level, const char* message, void* /*user*/) {
@@ -634,13 +606,7 @@ static void ensure_init() {
     LOGI("fcae_init via JNI (abi v%u)", fcae_abi_version());
 }
 
-/// Read a telemetry snapshot.
-///
-/// The getters below used to each make their own FFI call, so one UI refresh
-/// cost ten round-trips and could observe ten *different* snapshots — the
-/// displayed RX and TX could come from different sampling windows. One call
-/// per getter is still made (the JNI surface is per-field), but each now goes
-/// through this single correctly-stamped helper.
+// Shared snapshot helper for the Android services and notifications.
 static FcaeTelemetry telemetry_snapshot() {
     FcaeTelemetry t = {};
     t.struct_size = sizeof(t);
@@ -677,77 +643,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativePsiphonAttachComplete(JNIEnv*, jclass, jl
     fcae_psiphon_attach_complete((uint64_t)id, (uint16_t)socks, (uint16_t)http);
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxCaptchaPending(JNIEnv*, jclass) {
-    return (jlong)fcae_firefox_captcha_pending();
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxCaptchaImage(JNIEnv* env, jclass, jlong id) {
-    const uint32_t needed = fcae_firefox_captcha_image((uint64_t)id, nullptr, 0);
-    if (!needed || needed > 8 * 1024 * 1024) return env->NewStringUTF("");
-    std::string image(needed + 1, '\0');
-    fcae_firefox_captcha_image((uint64_t)id, image.data(), (uint32_t)image.size());
-    image.resize(needed);
-    return env->NewStringUTF(image.c_str());
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxCaptchaAnswer(JNIEnv* env, jclass, jlong id, jstring answer) {
-    const std::string owned = jstr(env, answer);
-    return fcae_firefox_captcha_answer((uint64_t)id, owned.c_str()) ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxRelaySet(JNIEnv* env, jclass, jstring data_dir, jstring url) {
-    const std::string dir = jstr(env, data_dir), value = jstr(env, url);
-    return fcae_firefox_relay_set(dir.c_str(), value.c_str()) ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxRelayGet(JNIEnv* env, jclass, jstring data_dir) {
-    const std::string dir = jstr(env, data_dir);
-    char value[4097] = {};
-    const uint32_t size = fcae_firefox_relay_get(dir.c_str(), value, sizeof(value));
-    if (size == UINT32_MAX || size >= sizeof(value)) return nullptr;
-    return env->NewStringUTF(value);
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxAccountSubmit(JNIEnv* env, jclass, jstring request) {
-    const std::string owned = jstr(env, request);
-    return owned.empty() ? 0 : (jlong)fcae_firefox_account_submit(owned.c_str());
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxJobPoll(JNIEnv* env, jclass, jlong id) {
-    char small[512] = {};
-    uint32_t needed = fcae_firefox_job_poll((uint64_t)id, small, sizeof(small));
-    if (needed && needed < sizeof(small)) return env->NewStringUTF(small);
-    for (int attempt = 0; attempt < 4 && needed && needed <= 1024 * 1024; ++attempt) {
-        std::string json(needed + 1, '\0');
-        const uint32_t written = fcae_firefox_job_poll((uint64_t)id, json.data(), (uint32_t)json.size());
-        if (!written || written > 1024 * 1024) return env->NewStringUTF("");
-        if (written <= needed) {
-            json.resize(written);
-            return env->NewStringUTF(json.c_str());
-        }
-        needed = written;
-    }
-    return env->NewStringUTF("");
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxJobRelease(JNIEnv*, jclass, jlong id) {
-    fcae_firefox_job_release((uint64_t)id);
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeParseTcpBufferSize(JNIEnv* env, jclass, jstring text) {
-    const std::string value = jstr(env, text);
-    return (jint)fcae_parse_tcp_buffer_size(value.c_str());
-}
-
 // Canonical proxy URL (ok) or the parse error; both ASCII-safe for NewStringUTF.
 static bool normalize_upstream_proxy(JNIEnv* env, jstring text, char (&out)[2048]) {
     const std::string value = jstr(env, text);
@@ -763,39 +658,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpstreamProxy(JNIEnv* env, jclass, j
     return env->NewStringUTF(normalize_upstream_proxy(env, text, out) ? "" : out);
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeNormalizeUpstreamProxy(JNIEnv* env, jclass, jstring text) {
-    char out[2048];
-    return normalize_upstream_proxy(env, text, out) ? env->NewStringUTF(out) : nullptr;
-}
-
 // "" when the saved core config can be used, else the reason. The editor shows
 // it under the config field, so a bad paste is refused before it is saved.
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeCheckCoreConfig(JNIEnv* env, jclass, jstring config, jint backend) {
-    const std::string value = jstr(env, config);
-    char out[512] = {};
-    if (fcae_core_check_profile(value.c_str(), (int32_t)backend, out, sizeof(out)))
-        return env->NewStringUTF("");
-    // NewStringUTF needs modified UTF-8: a message that came back with a byte
-    // the runtime cannot represent would abort the editor instead of showing it.
-    for (char* c = out; *c; ++c)
-        if ((unsigned char)*c >= 0x80) *c = '?';
-    return env->NewStringUTF(out);
-}
-
-extern "C" JNIEXPORT jintArray JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeCoreListeners(JNIEnv* env, jclass, jstring config, jint backend) {
-    const std::string value = jstr(env, config);
-    uint32_t socks_port = 0;
-    uint32_t http_port = 0;
-    const uint32_t kinds =
-        fcae_core_listeners(value.c_str(), (int32_t)backend, &socks_port, &http_port);
-    const jint values[3] = {(jint)kinds, (jint)socks_port, (jint)http_port};
-    jintArray out = env->NewIntArray(3);
-    if (out) env->SetIntArrayRegion(out, 0, 3, values);
-    return out;
-}
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeInit(JNIEnv*, jclass) {
@@ -1152,41 +1016,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStop(JNIEnv*, jclass) {
     LOGI("fcae_stop");
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativePsiphonRegions(JNIEnv* env, jclass) {
-    ensure_init();
-    // Empty until Psiphon has connected once: the region list arrives in a
-    // post-handshake notice, so the UI offers "Auto" and refreshes later.
-    char buf[1024] = {0};
-    fcae_psiphon_regions(buf, (uint32_t)sizeof(buf));
-    return env->NewStringUTF(buf);
-}
-
 // TUN engine enumeration. These do NOT call ensure_init(): engine
 // availability is a compile-/platform-time property, and the activity
 // queries it while the engine is down (before any session exists).
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeTunEngineCount(JNIEnv*, jclass) {
-    return (jint)fcae_tun_engine_count();
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeTunEngineInfo(JNIEnv* env, jclass, jint index) {
-    FcaeTunEngineInfo info;
-    std::memset(&info, 0, sizeof(info));
-    info.struct_size = sizeof(info);
-    info.abi_version = FCAE_ABI_VERSION;
-    if (fcae_tun_engine_info((uint32_t)index, &info) != FCAE_OK) {
-        return env->NewStringUTF("?");
-    }
-    // "display_name|unavailable_reason"; the reason is empty when available.
-    // Both fields are NUL-terminated by the core; size bound keeps snprintf
-    // from even attempting to overflow.
-    char buf[1 + 64 + 1 + 192 + 1];
-    std::snprintf(buf, sizeof(buf), "%s|%s", info.display_name, info.unavailable_reason);
-    return env->NewStringUTF(buf);
-}
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeStopBegin(JNIEnv*, jclass) {
@@ -1246,103 +1078,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativeGetState(JNIEnv*, jclass) {
     return (jint)t.state;
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetRxBps(JNIEnv*, jclass) {
-    ensure_init();
-    FcaeTelemetry t = telemetry_snapshot();
-    return (jlong)t.rx_bytes_sec;
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetTxBps(JNIEnv*, jclass) {
-    ensure_init();
-    FcaeTelemetry t = telemetry_snapshot();
-    return (jlong)t.tx_bytes_sec;
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetTotalRx(JNIEnv*, jclass) {
-    ensure_init();
-    FcaeTelemetry t = telemetry_snapshot();
-    return (jlong)t.total_rx;
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetTotalTx(JNIEnv*, jclass) {
-    ensure_init();
-    FcaeTelemetry t = telemetry_snapshot();
-    return (jlong)t.total_tx;
-}
-
 extern "C" JNIEXPORT jint JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeGetRttMs(JNIEnv*, jclass) {
     ensure_init();
     FcaeTelemetry t = telemetry_snapshot();
     return (jint)t.rtt_ms;
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetPeer(JNIEnv* env, jclass) {
-    ensure_init();
-    FcaeTelemetry t = telemetry_snapshot();
-    return env->NewStringUTF(t.connected_peer[0] ? t.connected_peer : "");
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetLanIp(JNIEnv* env, jclass) {
-    char ip[64] = {};
-    if (fcae_detect_lan_ip(ip, sizeof(ip)) != FCAE_OK) return env->NewStringUTF("");
-    return env->NewStringUTF(ip);
-}
-
-// What the live proxy cores are listening on: `core|position|name|protocol|port|scope`
-// records separated by `;`. The app's settings name one port for a session
-// that may run several core instances, so the connection line reads this
-// instead of deciding for the cores.
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeLiveListeners(JNIEnv* env, jclass) {
-    ensure_init();
-    char text[4096] = {};
-    uint32_t needed = fcae_live_listeners(text, (uint32_t)sizeof(text));
-    if (needed >= sizeof(text)) return env->NewStringUTF("");
-    return env->NewStringUTF(text);
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetStatusMsg(JNIEnv* env, jclass) {
-    ensure_init();
-    FcaeTelemetry t = telemetry_snapshot();
-    return env->NewStringUTF(t.status_message[0] ? t.status_message : "");
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetLastError(JNIEnv* env, jclass) {
-    ensure_init();
-    FcaeTelemetry t = telemetry_snapshot();
-    return env->NewStringUTF(t.last_error[0] ? t.last_error : "");
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetLogs(JNIEnv* env, jclass) {
-    std::lock_guard<std::mutex> lock(g_log_mu);
-    std::string all;
-    all.reserve(g_logs.size() * 64);
-    for (const auto& l : g_logs) {
-        all += l;
-        all.push_back('\n');
-    }
-    return env->NewStringUTF(all.c_str());
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeClearLogs(JNIEnv*, jclass) {
-    std::lock_guard<std::mutex> lock(g_log_mu);
-    g_logs.clear();
-    g_log_bytes = 0;
-    if (!g_log_path.empty()) {
-        FILE* f = std::fopen(g_log_path.c_str(), "wb");
-        if (f) std::fclose(f);
-    }
 }
 
 // Host-side lines supplied by the Android Psiphon service.
@@ -1357,8 +1097,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeAppendLog(JNIEnv* env, jclass, jstring s)
         std::string one = nl ? std::string(p, (size_t)(nl - p)) : std::string(p);
         if (!one.empty() && one.back() == '\r') one.pop_back();
         // Host-side Psiphon notices retain their full text, including JSON.
-        // kMaxLogs still bounds history; the UI renders only its visible tail.
-        if (!one.empty()) push_log_line('I', one.c_str(), false);
+        if (!one.empty()) push_log_line('I', one.c_str());
         if (!nl) break;
         p = nl + 1;
     }
@@ -1393,206 +1132,6 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeGetTrafficStats(JNIEnv* env, jclass) {
     return out;
 }
 
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeCheckForUpdates(JNIEnv* env, jclass, jstring currentVersion, jboolean includePrereleases) {
-    ensure_init();
-    std::string ver = jstr(env, currentVersion);
-    fcae_check_update_async(ver.c_str(), includePrereleases == JNI_TRUE);
-    LOGI("Version check started (current=%s, prereleases=%s)", ver.c_str(),
-         includePrereleases == JNI_TRUE ? "on" : "off");
-}
-
-struct UpdateInfoFieldCache {
-    std::atomic<bool> initialized{false};
-    std::mutex init_mu;
-    jclass cls = nullptr;
-    jfieldID fid_available = nullptr;
-    jfieldID fid_inProgress = nullptr;
-    jfieldID fid_done = nullptr;
-    jfieldID fid_latest = nullptr;
-    jfieldID fid_notes = nullptr;
-    jfieldID fid_dl = nullptr;
-    jfieldID fid_status = nullptr;
-    jfieldID fid_isPre = nullptr;
-    jfieldID fid_date = nullptr;
-    jfieldID fid_errKind = nullptr;
-    jfieldID fid_raw = nullptr;
-
-    bool ensure(JNIEnv* env) {
-        if (initialized.load(std::memory_order_acquire)) return cls != nullptr;
-        std::lock_guard<std::mutex> lock(init_mu);
-        if (initialized.load(std::memory_order_relaxed)) return cls != nullptr;
-
-        jclass localCls = env->FindClass("com/fc/fcaevpn/FcaeUpdateInfo");
-        if (!localCls) {
-            initialized.store(true, std::memory_order_release);
-            return false;
-        }
-        cls = (jclass)env->NewGlobalRef(localCls);
-        env->DeleteLocalRef(localCls);
-
-        const auto getField = [env, this](const char* name, const char* signature) -> jfieldID {
-            return env->ExceptionCheck() ? nullptr : env->GetFieldID(cls, name, signature);
-        };
-        fid_available = getField("updateAvailable", "Z");
-        fid_inProgress = getField("checkInProgress", "Z");
-        fid_done = getField("checkDone", "Z");
-        fid_latest = getField("latestVersion", "Ljava/lang/String;");
-        fid_notes = getField("releaseNotes", "Ljava/lang/String;");
-        fid_dl = getField("downloadUrl", "Ljava/lang/String;");
-        fid_status = getField("statusMessage", "Ljava/lang/String;");
-        fid_isPre = getField("isPrerelease", "Z");
-        fid_date = getField("releaseDate", "Ljava/lang/String;");
-        fid_errKind = getField("errorKind", "I");
-        fid_raw = getField("rawBody", "Ljava/lang/String;");
-
-        initialized.store(true, std::memory_order_release);
-        return cls != nullptr;
-    }
-};
-
-static UpdateInfoFieldCache g_update_fields;
-
-struct SponsorInfoFieldCache {
-    std::atomic<bool> initialized{false};
-    std::mutex init_mu;
-    jclass cls = nullptr;
-    jfieldID fidAvailable = nullptr;
-    jfieldID fidId = nullptr;
-    jfieldID fidTitle = nullptr;
-    jfieldID fidMessage = nullptr;
-    jfieldID fidDestination = nullptr;
-    jfieldID fidWidth = nullptr;
-    jfieldID fidHeight = nullptr;
-    jfieldID fidCampaignCount = nullptr;
-    jfieldID fidAnimated = nullptr;
-    jfieldID fidBackgroundWidth = nullptr;
-    jfieldID fidBackgroundHeight = nullptr;
-    jfieldID fidTextColor = nullptr;
-    jfieldID fidCardColor = nullptr;
-    jfieldID fidTextX = nullptr;
-    jfieldID fidTextY = nullptr;
-    jfieldID fidImageFit = nullptr;
-    jfieldID fidTitleColor = nullptr;
-    jfieldID fidMessageColor = nullptr;
-    jfieldID fidTitleX = nullptr;
-    jfieldID fidTitleY = nullptr;
-    jfieldID fidMessageX = nullptr;
-    jfieldID fidMessageY = nullptr;
-    jfieldID fidIconScale = nullptr;
-    jfieldID fidBackgroundScale = nullptr;
-    jfieldID fidTitleScale = nullptr;
-    jfieldID fidMessageScale = nullptr;
-    jfieldID fidIconX = nullptr;
-    jfieldID fidIconY = nullptr;
-    jfieldID fidDurationSeconds = nullptr;
-    jfieldID fidIconOpacity = nullptr;
-    jfieldID fidBackgroundOpacity = nullptr;
-    jfieldID fidBackgroundColorOpacity = nullptr;
-    jfieldID fidTitleOpacity = nullptr;
-    jfieldID fidMessageOpacity = nullptr;
-    jfieldID fidGeneration = nullptr;
-    jfieldID fidRgba = nullptr;
-    jfieldID fidBackgroundRgba = nullptr;
-
-    bool ensure(JNIEnv* env) {
-        if (initialized.load(std::memory_order_acquire)) return cls != nullptr;
-        std::lock_guard<std::mutex> lock(init_mu);
-        if (initialized.load(std::memory_order_relaxed)) return cls != nullptr;
-
-        jclass localCls = env->FindClass("com/fc/fcaevpn/FcaeSponsorInfo");
-        if (!localCls) {
-            initialized.store(true, std::memory_order_release);
-            return false;
-        }
-        cls = (jclass)env->NewGlobalRef(localCls);
-        env->DeleteLocalRef(localCls);
-
-        const auto getField = [env, this](const char* name, const char* signature) -> jfieldID {
-            return env->ExceptionCheck() ? nullptr : env->GetFieldID(cls, name, signature);
-        };
-        fidAvailable = getField("available", "Z");
-        fidId = getField("id", "Ljava/lang/String;");
-        fidTitle = getField("title", "Ljava/lang/String;");
-        fidMessage = getField("message", "Ljava/lang/String;");
-        fidDestination = getField("destinationUrl", "Ljava/lang/String;");
-        fidWidth = getField("width", "I");
-        fidHeight = getField("height", "I");
-        fidCampaignCount = getField("campaignCount", "I");
-        fidAnimated = getField("animated", "Z");
-        fidBackgroundWidth = getField("backgroundWidth", "I");
-        fidBackgroundHeight = getField("backgroundHeight", "I");
-        fidTextColor = getField("textColor", "I");
-        fidCardColor = getField("cardColor", "I");
-        fidTextX = getField("textX", "I");
-        fidTextY = getField("textY", "I");
-        fidImageFit = getField("imageFit", "I");
-        fidTitleColor = getField("titleColor", "I");
-        fidMessageColor = getField("messageColor", "I");
-        fidTitleX = getField("titleX", "I");
-        fidTitleY = getField("titleY", "I");
-        fidMessageX = getField("messageX", "I");
-        fidMessageY = getField("messageY", "I");
-        fidIconScale = getField("iconScale", "I");
-        fidBackgroundScale = getField("backgroundScale", "I");
-        fidTitleScale = getField("titleScale", "I");
-        fidMessageScale = getField("messageScale", "I");
-        fidIconX = getField("iconX", "I");
-        fidIconY = getField("iconY", "I");
-        fidDurationSeconds = getField("durationSeconds", "I");
-        fidIconOpacity = getField("iconOpacity", "I");
-        fidBackgroundOpacity = getField("backgroundOpacity", "I");
-        fidBackgroundColorOpacity = getField("backgroundColorOpacity", "I");
-        fidTitleOpacity = getField("titleOpacity", "I");
-        fidMessageOpacity = getField("messageOpacity", "I");
-        fidGeneration = getField("generation", "J");
-        fidRgba = getField("rgba", "[B");
-        fidBackgroundRgba = getField("backgroundRgba", "[B");
-
-        initialized.store(true, std::memory_order_release);
-        return cls != nullptr;
-    }
-};
-
-static SponsorInfoFieldCache g_sponsor_fields;
-
-extern "C" JNIEXPORT jobject JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
-    ensure_init();
-
-    if (!g_update_fields.ensure(env)) return nullptr;
-
-    jobject obj = env->AllocObject(g_update_fields.cls);
-    if (!obj) return nullptr;
-
-    FcaeUpdateInfo info = {};
-    info.struct_size = sizeof(info);
-    info.abi_version = FCAE_ABI_VERSION;
-    fcae_poll_update(&info);
-
-    env->SetBooleanField(obj, g_update_fields.fid_available, info.update_available ? JNI_TRUE : JNI_FALSE);
-    env->SetBooleanField(obj, g_update_fields.fid_inProgress, info.check_in_progress ? JNI_TRUE : JNI_FALSE);
-    env->SetBooleanField(obj, g_update_fields.fid_done, info.check_done ? JNI_TRUE : JNI_FALSE);
-    env->SetObjectField(obj, g_update_fields.fid_latest, env->NewStringUTF(info.latest_version));
-    env->SetObjectField(obj, g_update_fields.fid_notes, env->NewStringUTF(info.release_notes));
-    env->SetObjectField(obj, g_update_fields.fid_dl, env->NewStringUTF(info.download_url));
-    env->SetObjectField(obj, g_update_fields.fid_status, env->NewStringUTF(info.status_message));
-    env->SetBooleanField(obj, g_update_fields.fid_isPre, info.is_prerelease ? JNI_TRUE : JNI_FALSE);
-    env->SetObjectField(obj, g_update_fields.fid_date, env->NewStringUTF(info.release_date));
-    env->SetIntField(obj, g_update_fields.fid_errKind, (jint)info.error_kind);
-    env->SetObjectField(obj, g_update_fields.fid_raw, env->NewStringUTF(info.raw_body));
-
-    return obj;
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorInit(JNIEnv* env, jclass, jstring cacheDir) {
-    ensure_init();
-    std::string path = jstr(env, cacheDir);
-    fcae_sponsor_set_cache_dir(path.c_str());
-}
-
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeSponsorInitAndroidContext(
         JNIEnv* env, jclass, jobject context) {
@@ -1620,229 +1159,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativeSponsorInitAndroidContext(
         // reference belongs to ndk-context.
         env->DeleteGlobalRef(global_context);
     }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetUiActive(JNIEnv*, jclass, jboolean active) {
-    ensure_init();
-    fcae_sponsor_set_ui_active(active == JNI_TRUE);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorReleaseMedia(JNIEnv*, jclass) {
-    ensure_init();
-    fcae_sponsor_release_media();
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetManifest(JNIEnv* env, jclass, jstring json) {
-    ensure_init();
-    std::string value = jstr(env, json);
-    return fcae_sponsor_set_manifest_json(value.c_str()) == FCAE_OK ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorManifestDue(JNIEnv*, jclass) {
-    ensure_init();
-    return fcae_sponsor_manifest_due() ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorManifestRefreshRemainingSecs(JNIEnv*, jclass) {
-    ensure_init();
-    return (jlong)fcae_sponsor_manifest_refresh_remaining_secs();
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorManifestCheckStarted(JNIEnv*, jclass) {
-    ensure_init();
-    fcae_sponsor_manifest_check_started();
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorRefreshManifestAsync(JNIEnv*, jclass) {
-    ensure_init();
-    fcae_sponsor_refresh_manifest_async();
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorRefreshManifestNowAsync(JNIEnv*, jclass) {
-    ensure_init();
-    fcae_sponsor_refresh_manifest_now_async();
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetConnected(JNIEnv*, jclass, jboolean connected) {
-    ensure_init();
-    fcae_sponsor_set_connected(connected == JNI_TRUE);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetAudioEnabled(JNIEnv*, jclass, jboolean enabled) {
-    ensure_init();
-    fcae_sponsor_set_audio_enabled(enabled == JNI_TRUE);
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorAudioEnabled(JNIEnv*, jclass) {
-    ensure_init();
-    return fcae_sponsor_audio_enabled() ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeSponsorNext(JNIEnv*, jclass) {
-    ensure_init();
-    fcae_sponsor_next();
-}
-
-extern "C" JNIEXPORT jobject JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong knownGeneration) {
-    ensure_init();
-    if (!g_sponsor_fields.ensure(env)) return nullptr;
-    jobject obj = env->AllocObject(g_sponsor_fields.cls);
-    if (!obj) return nullptr;
-
-    FcaeSponsorInfo info = {};
-    info.struct_size = sizeof(info);
-    info.abi_version = FCAE_ABI_VERSION;
-    const FcaeStatus pollStatus = fcae_sponsor_poll(&info);
-    if (pollStatus != FCAE_OK) {
-        LOGE("Sponsor poll failed: status=%d", (int)pollStatus);
-        env->DeleteLocalRef(obj);
-        return nullptr;
-    }
-    // Bits above the frame indices identify the card itself: keyed on those,
-    // an animated card logs once when it is published instead of writing a
-    // logcat line for every one of its frames.
-    const uint64_t sponsor_card = info.generation >> 24;
-    if (info.available && g_sponsor_logged_generation.exchange(sponsor_card) != sponsor_card) {
-        LOGI("Sponsor card available: id=%s card=%llu campaigns=%u rgba=%u",
-             info.id, (unsigned long long)sponsor_card, info.campaign_count, info.rgba_size);
-    }
-    const uint64_t previous_generation = static_cast<uint64_t>(knownGeneration);
-    const bool copyForeground = info.available
-        && sponsor_foreground_changed(info.generation, previous_generation);
-    const bool copyBackground = info.available
-        && sponsor_background_changed(info.generation, previous_generation);
-    jbyteArray rgba = env->NewByteArray(copyForeground ? (jsize)info.rgba_size : 0);
-    jbyteArray backgroundRgba = env->NewByteArray(
-        copyBackground ? (jsize)info.background_rgba_size : 0);
-    if (!rgba || !backgroundRgba) {
-        if (rgba) env->DeleteLocalRef(rgba);
-        if (backgroundRgba) env->DeleteLocalRef(backgroundRgba);
-        env->DeleteLocalRef(obj);
-        return nullptr;
-    }
-    if (copyForeground && info.rgba_size) {
-        jbyte* pixels = env->GetByteArrayElements(rgba, nullptr);
-        if (!pixels) {
-            env->DeleteLocalRef(rgba);
-            env->DeleteLocalRef(backgroundRgba);
-            env->DeleteLocalRef(obj);
-            return nullptr;
-        }
-        const FcaeStatus copied = fcae_sponsor_copy_rgba(
-            reinterpret_cast<uint8_t*>(pixels), info.rgba_size);
-        env->ReleaseByteArrayElements(rgba, pixels, copied == FCAE_OK ? 0 : JNI_ABORT);
-        if (copied != FCAE_OK) {
-            env->DeleteLocalRef(rgba);
-            env->DeleteLocalRef(backgroundRgba);
-            env->DeleteLocalRef(obj);
-            return nullptr;
-        }
-    }
-    if (copyBackground && info.background_rgba_size) {
-        jbyte* pixels = env->GetByteArrayElements(backgroundRgba, nullptr);
-        if (!pixels) {
-            env->DeleteLocalRef(rgba);
-            env->DeleteLocalRef(backgroundRgba);
-            env->DeleteLocalRef(obj);
-            return nullptr;
-        }
-        const FcaeStatus copied = fcae_sponsor_copy_background_rgba(
-            reinterpret_cast<uint8_t*>(pixels), info.background_rgba_size);
-        env->ReleaseByteArrayElements(backgroundRgba, pixels, copied == FCAE_OK ? 0 : JNI_ABORT);
-        if (copied != FCAE_OK) {
-            env->DeleteLocalRef(rgba);
-            env->DeleteLocalRef(backgroundRgba);
-            env->DeleteLocalRef(obj);
-            return nullptr;
-        }
-    }
-    const auto newString = [env](const char* value) -> jstring {
-        return (value && value[0]) ? env->NewStringUTF(value) : env->NewStringUTF("");
-    };
-    jstring id = newString(info.id);
-    jstring title = newString(info.title);
-    jstring message = newString(info.message);
-    jstring destination = newString(info.destination_url);
-    if (env->ExceptionCheck() || !id || !title || !message || !destination) {
-        if (id) env->DeleteLocalRef(id);
-        if (title) env->DeleteLocalRef(title);
-        if (message) env->DeleteLocalRef(message);
-        if (destination) env->DeleteLocalRef(destination);
-        env->DeleteLocalRef(rgba);
-        env->DeleteLocalRef(backgroundRgba);
-        env->DeleteLocalRef(obj);
-        return nullptr;
-    }
-    env->SetBooleanField(obj, g_sponsor_fields.fidAvailable, info.available ? JNI_TRUE : JNI_FALSE);
-    env->SetObjectField(obj, g_sponsor_fields.fidId, id);
-    env->SetObjectField(obj, g_sponsor_fields.fidTitle, title);
-    env->SetObjectField(obj, g_sponsor_fields.fidMessage, message);
-    env->SetObjectField(obj, g_sponsor_fields.fidDestination, destination);
-    env->SetIntField(obj, g_sponsor_fields.fidWidth, (jint)info.width);
-    env->SetIntField(obj, g_sponsor_fields.fidHeight, (jint)info.height);
-    env->SetIntField(obj, g_sponsor_fields.fidCampaignCount, (jint)info.campaign_count);
-    env->SetBooleanField(obj, g_sponsor_fields.fidAnimated, info.animated ? JNI_TRUE : JNI_FALSE);
-    env->SetIntField(obj, g_sponsor_fields.fidBackgroundWidth, (jint)info.background_width);
-    env->SetIntField(obj, g_sponsor_fields.fidBackgroundHeight, (jint)info.background_height);
-    env->SetIntField(obj, g_sponsor_fields.fidTextColor, (jint)info.text_color);
-    env->SetIntField(obj, g_sponsor_fields.fidCardColor, (jint)info.card_color);
-    env->SetIntField(obj, g_sponsor_fields.fidTextX, (jint)info.text_x);
-    env->SetIntField(obj, g_sponsor_fields.fidTextY, (jint)info.text_y);
-    env->SetIntField(obj, g_sponsor_fields.fidImageFit, (jint)info.image_fit);
-    env->SetIntField(obj, g_sponsor_fields.fidTitleColor, (jint)info.title_color);
-    env->SetIntField(obj, g_sponsor_fields.fidMessageColor, (jint)info.message_color);
-    env->SetIntField(obj, g_sponsor_fields.fidTitleX, (jint)info.title_x);
-    env->SetIntField(obj, g_sponsor_fields.fidTitleY, (jint)info.title_y);
-    env->SetIntField(obj, g_sponsor_fields.fidMessageX, (jint)info.message_x);
-    env->SetIntField(obj, g_sponsor_fields.fidMessageY, (jint)info.message_y);
-    env->SetIntField(obj, g_sponsor_fields.fidIconScale, (jint)info.icon_scale);
-    env->SetIntField(obj, g_sponsor_fields.fidBackgroundScale, (jint)info.background_scale);
-    env->SetIntField(obj, g_sponsor_fields.fidTitleScale, (jint)info.title_scale);
-    env->SetIntField(obj, g_sponsor_fields.fidMessageScale, (jint)info.message_scale);
-    env->SetIntField(obj, g_sponsor_fields.fidIconX, (jint)info.icon_x);
-    env->SetIntField(obj, g_sponsor_fields.fidIconY, (jint)info.icon_y);
-    env->SetIntField(obj, g_sponsor_fields.fidDurationSeconds,
-                     (jint)(info.duration_seconds > 0 ? info.duration_seconds : 10));
-    env->SetIntField(obj, g_sponsor_fields.fidIconOpacity, (jint)info.icon_opacity);
-    env->SetIntField(obj, g_sponsor_fields.fidBackgroundOpacity, (jint)info.background_opacity);
-    env->SetIntField(obj, g_sponsor_fields.fidBackgroundColorOpacity, (jint)info.background_color_opacity);
-    env->SetIntField(obj, g_sponsor_fields.fidTitleOpacity, (jint)info.title_opacity);
-    env->SetIntField(obj, g_sponsor_fields.fidMessageOpacity, (jint)info.message_opacity);
-    env->SetLongField(obj, g_sponsor_fields.fidGeneration, (jlong)info.generation);
-    env->SetObjectField(obj, g_sponsor_fields.fidRgba, rgba);
-    env->SetObjectField(obj, g_sponsor_fields.fidBackgroundRgba, backgroundRgba);
-    env->DeleteLocalRef(id);
-    env->DeleteLocalRef(title);
-    env->DeleteLocalRef(message);
-    env->DeleteLocalRef(destination);
-    env->DeleteLocalRef(rgba);
-    env->DeleteLocalRef(backgroundRgba);
-    return env->ExceptionCheck() ? nullptr : obj;
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpdateFromJson(JNIEnv* env, jclass, jstring currentVersion, jstring json, jboolean includePrereleases) {
-    ensure_init();
-    std::string ver = jstr(env, currentVersion);
-    std::string js = jstr(env, json);
-
-    bool ok = (fcae_check_update_from_json(ver.c_str(), js.c_str(), includePrereleases == JNI_TRUE) == FCAE_OK);
-
-    LOGI("Version check from JSON: %s", ok ? "OK" : "FAIL");
-    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 FcaeStatus android_ui_initialize_runtime() {

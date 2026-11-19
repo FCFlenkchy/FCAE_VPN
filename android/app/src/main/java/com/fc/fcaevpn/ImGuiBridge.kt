@@ -16,6 +16,9 @@ object ImGuiBridge {
     }
     @Volatile private var activity = WeakReference<MainActivity>(null)
     @Volatile private var application: Context? = null
+    @Volatile internal var viewGeneration = 0L
+        private set
+    internal fun invalidateView() { ++viewGeneration }
     private var lastSession = ""
     private val framePosted = AtomicBoolean(false)
 
@@ -35,8 +38,12 @@ object ImGuiBridge {
         if (activity.get() === owner) activity.clear()
     }
 
-    fun postNative(action: () -> Unit) {
-        main.post { activity.get()?.enqueueUiAction(action) }
+    fun postNative(generation: Long = viewGeneration, action: () -> Unit) {
+        main.post {
+            if (generation == viewGeneration) activity.get()?.enqueueUiAction {
+                if (generation == viewGeneration) action()
+            }
+        }
     }
 
     @JvmStatic fun foldAppQuery(value: String): String = appSearchKey(value)
@@ -122,6 +129,7 @@ object ImGuiBridge {
     @JvmStatic external fun nativeApps(packages: Array<String>, labels: Array<String>, search: Array<String>)
     @JvmStatic external fun nativeAppIcon(name: String, pixels: IntArray?)
     @JvmStatic external fun nativeSurface(directory: String, density: Float, touchSlop: Float)
+    @JvmStatic external fun nativeRelease()
     @JvmStatic external fun nativeResize(width: Int, height: Int)
     @JvmStatic external fun nativeFrame(): Int
     @JvmStatic external fun nativePointer(x: Float, y: Float, action: Int, timeMillis: Long, touch: Boolean)

@@ -19,9 +19,10 @@ internal object AndroidPlatformSettings {
     }
 
     fun dispatch(context: Context, action: String, payload: String) {
+        val generation = ImGuiBridge.viewGeneration
         when (action) {
             "androidLoad" -> ImGuiBridge.worker.execute {
-                publish(context, payload.toLongOrNull() ?: 0)
+                publish(context, payload.toLongOrNull() ?: 0, generation)
             }
             "androidSave" -> ImGuiBridge.worker.execute {
                 try {
@@ -39,7 +40,7 @@ internal object AndroidPlatformSettings {
                         } catch (error: RuntimeException) {
                             ImGuiBridge.reportError("Could not change Android controls: ${error.message}")
                         }
-                        publish(context, value.getLong("revision"))
+                        publish(context, value.getLong("revision"), generation)
                     }
                 } catch (error: Exception) {
                     ImGuiBridge.reportError("Could not save app routing: ${error.message}")
@@ -59,9 +60,9 @@ internal object AndroidPlatformSettings {
                     val names = apps.map { it.first }.toTypedArray()
                     val labels = apps.map { it.second }.toTypedArray()
                     val search = apps.map { "${it.third}\n${appSearchKey(it.first)}" }.toTypedArray()
-                    ImGuiBridge.postNative { ImGuiBridge.nativeApps(names, labels, search) }
+                    ImGuiBridge.postNative(generation) { ImGuiBridge.nativeApps(names, labels, search) }
                 } catch (error: Exception) {
-                    ImGuiBridge.postNative { ImGuiBridge.nativeApps(emptyArray(), emptyArray(), emptyArray()) }
+                    ImGuiBridge.postNative(generation) { ImGuiBridge.nativeApps(emptyArray(), emptyArray(), emptyArray()) }
                     ImGuiBridge.reportError("Could not list apps: ${error.message}")
                 }
             }
@@ -77,12 +78,12 @@ internal object AndroidPlatformSettings {
                         IntArray(48 * 48).also { bitmap.getPixels(it, 0, 48, 0, 0, 48, 48) }
                     } finally { bitmap.recycle() }
                 } catch (_: Exception) { null }
-                ImGuiBridge.postNative { ImGuiBridge.nativeAppIcon(payload, pixels) }
+                ImGuiBridge.postNative(generation) { ImGuiBridge.nativeAppIcon(payload, pixels) }
             }
         }
     }
 
-    private fun publish(context: Context, revision: Long) {
+    private fun publish(context: Context, revision: Long, generation: Long) {
         val prefs = context.getSharedPreferences("fcae_vpn", Context.MODE_PRIVATE)
         val mode = prefs.getInt("splitTunnelMode", 0).coerceIn(0, 2)
         val selected = prefs.getStringSet("splitTunnelApps", emptySet()).orEmpty().toTypedArray()
@@ -92,7 +93,7 @@ internal object AndroidPlatformSettings {
             // Keep the compact and original widget components in sync for old installations.
             try { ExternalControls.setEnabled(context, true, widgets) }
             catch (_: RuntimeException) { }
-            ImGuiBridge.postNative { ImGuiBridge.nativePlatformState(revision, mode, selected, tile, widgets) }
+            ImGuiBridge.postNative(generation) { ImGuiBridge.nativePlatformState(revision, mode, selected, tile, widgets) }
         }
     }
 }

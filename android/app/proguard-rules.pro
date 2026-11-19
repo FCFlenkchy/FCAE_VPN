@@ -15,17 +15,6 @@
     int establishTunNow();
 }
 
-# Constructed and populated directly by nativePollUpdate.
--keep,allowoptimization class com.fc.fcaevpn.FcaeUpdateInfo {
-    <fields>;
-}
-
-# Constructed and populated directly by nativePollSponsor. JNI resolves every
-# field by its source name, so R8 must not rename or remove this DTO.
--keep,allowoptimization class com.fc.fcaevpn.FcaeSponsorInfo {
-    <fields>;
-}
-
 # JNI calls these methods by name from Go-owned threads.
 -keep class com.fc.fcaevpn.PsiphonTunnel { *; }
 

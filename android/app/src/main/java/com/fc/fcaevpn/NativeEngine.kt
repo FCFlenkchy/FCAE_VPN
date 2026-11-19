@@ -164,33 +164,11 @@ object NativeEngine {
         // Xray and sing-box write a line per connection at info.
         coreLog: Int,
     ): Boolean
-    @JvmStatic external fun nativeFirefoxCaptchaPending(): Long
-    @JvmStatic external fun nativeFirefoxCaptchaImage(id: Long): String
-    @JvmStatic external fun nativeFirefoxCaptchaAnswer(id: Long, answer: String): Boolean
-    @JvmStatic external fun nativeFirefoxRelaySet(dataDir: String, url: String): Boolean
-    @JvmStatic external fun nativeFirefoxRelayGet(dataDir: String): String?
-    @JvmStatic external fun nativeFirefoxAccountSubmit(requestJson: String): Long
-    @JvmStatic external fun nativeFirefoxJobPoll(id: Long): String
-    @JvmStatic external fun nativeFirefoxJobRelease(id: Long)
-    /**
-     * Why [config] cannot be used for [backend] (3 = Xray, 4 = sing-box), or ""
-     * when it can. Lets the config editor refuse a bad paste before saving it.
-     */
-    @JvmStatic external fun nativeCheckCoreConfig(config: String, backend: Int): String
-    /**
-     * What [config] can serve for [backend] (bitwise: 1 = SOCKS5, 2 = HTTP) and
-     * the ports it pins for those listeners, as `[kinds, socksPort, httpPort]`.
-     * A zero port means the config names none — a share link never does, because
-     * the engine builds its listeners.
-     */
-    @JvmStatic external fun nativeCoreListeners(config: String, backend: Int): IntArray
 
     @JvmStatic external fun nativePsiphonAttachRequest(): String
     @JvmStatic external fun nativePsiphonAttachComplete(id: Long, socks: Int, http: Int)
-    @JvmStatic external fun nativeParseTcpBufferSize(text: String): Int
     /** Why [text] is not a usable upstream proxy, or "" when it is (or empty). */
     @JvmStatic external fun nativeCheckUpstreamProxy(text: String): String
-    @JvmStatic external fun nativeNormalizeUpstreamProxy(text: String): String?
     @JvmStatic external fun nativeStop()
 
     /**
@@ -208,31 +186,12 @@ object NativeEngine {
     /** True while a session is alive and its TUN data plane is paused. */
     @JvmStatic external fun nativeTunPaused(): Boolean
     @JvmStatic external fun nativeFree()
-    /// Psiphon egress regions as comma-separated ISO codes, or "" before the
-    /// first successful connect.
-    @JvmStatic external fun nativePsiphonRegions(): String
-    @JvmStatic external fun nativeGetLogs(): String
-    @JvmStatic external fun nativeClearLogs()
     /** Inject a host-side line from the Psiphon service. */
     @JvmStatic external fun nativeAppendLog(line: String)
     @JvmStatic private external fun nativeConfigureLogFile(path: String)
 
-    // No engine start required: availability is a compile-/platform-time
-    // property, queried by the UI while the engine is down.
-    @JvmStatic external fun nativeTunEngineCount(): Int
-    /** "display_name|unavailable_reason"; reason is "" when available. */
-    @JvmStatic external fun nativeTunEngineInfo(index: Int): String
-
     @JvmStatic external fun nativeGetState(): Int
-    @JvmStatic external fun nativeGetRxBps(): Long
-    @JvmStatic external fun nativeGetTxBps(): Long
-    @JvmStatic external fun nativeGetTotalRx(): Long
-    @JvmStatic external fun nativeGetTotalTx(): Long
     @JvmStatic external fun nativeGetRttMs(): Int
-    @JvmStatic external fun nativeGetPeer(): String
-    @JvmStatic external fun nativeGetLanIp(): String
-    @JvmStatic external fun nativeGetStatusMsg(): String
-    @JvmStatic external fun nativeGetLastError(): String
 
     /**
      * First protocol-list position that names a saved Xray/sing-box config (its
@@ -426,106 +385,6 @@ object NativeEngine {
         )
     }
 
-    @JvmStatic external fun nativeCheckForUpdates(currentVersion: String, includePrereleases: Boolean)
-    @JvmStatic external fun nativePollUpdate(): FcaeUpdateInfo
-    @JvmStatic external fun nativeCheckUpdateFromJson(currentVersion: String, json: String, includePrereleases: Boolean): Boolean
-
-    // Sponsor manifest and media are fetched by the native sponsor client
-    // through the connected session's local tunnel proxy.
-    @JvmStatic external fun nativeSponsorInit(cacheDir: String)
+    // Native sponsor audio needs the application Context, not an Activity.
     @JvmStatic external fun nativeSponsorInitAndroidContext(context: android.content.Context)
-    @JvmStatic external fun nativeSponsorSetManifest(json: String): Boolean
-    @JvmStatic external fun nativeSponsorManifestDue(): Boolean
-    @JvmStatic external fun nativeSponsorManifestRefreshRemainingSecs(): Long
-    @JvmStatic external fun nativeSponsorManifestCheckStarted()
-    @JvmStatic external fun nativeSponsorRefreshManifestAsync()
-    /**
-     * What the live proxy cores are listening on, as
-     * `core|position|name|protocol|port|scope` records separated by `;`.
-     *
-     * Asked of the cores rather than read from the settings: a saved config
-     * declares its own inbound ports and a chain runs one instance per hop, so
-     * the one port in the settings is not what the session is serving from.
-     * `position` counts across every core in the route -- the exit is 1, each
-     * hop above it the next number -- and `name` is the user's own name for the
-     * saved config the instance runs. `scope` is `any` only for an inbound bound
-     * beyond loopback.
-     */
-    @JvmStatic external fun nativeLiveListeners(): String
-
-    @JvmStatic external fun nativeSponsorRefreshManifestNowAsync()
-    @JvmStatic external fun nativeSponsorSetConnected(connected: Boolean)
-    @JvmStatic external fun nativeSponsorSetUiActive(active: Boolean)
-    @JvmStatic external fun nativeSponsorReleaseMedia()
-    @JvmStatic external fun nativeSponsorSetAudioEnabled(enabled: Boolean)
-    @JvmStatic external fun nativeSponsorAudioEnabled(): Boolean
-    @JvmStatic external fun nativeSponsorNext()
-    @JvmStatic external fun nativePollSponsor(knownGeneration: Long): FcaeSponsorInfo
-}
-
-class FcaeSponsorInfo(
-    @JvmField var available: Boolean = false,
-    @JvmField var id: String = "",
-    @JvmField var title: String = "",
-    @JvmField var message: String = "",
-    @JvmField var destinationUrl: String = "",
-    @JvmField var width: Int = 0,
-    @JvmField var height: Int = 0,
-    @JvmField var campaignCount: Int = 0,
-    @JvmField var animated: Boolean = false,
-    @JvmField var backgroundWidth: Int = 0,
-    @JvmField var backgroundHeight: Int = 0,
-    @JvmField var textColor: Int = 0,
-    @JvmField var cardColor: Int = 0,
-    @JvmField var textX: Int = 50,
-    @JvmField var textY: Int = 50,
-    @JvmField var imageFit: Int = 0,
-    @JvmField var titleColor: Int = 0,
-    @JvmField var messageColor: Int = 0,
-    @JvmField var titleX: Int = 50,
-    @JvmField var titleY: Int = 50,
-    @JvmField var messageX: Int = 50,
-    @JvmField var messageY: Int = 72,
-    @JvmField var iconScale: Int = 100,
-    @JvmField var backgroundScale: Int = 100,
-    @JvmField var titleScale: Int = 100,
-    @JvmField var messageScale: Int = 100,
-    @JvmField var iconX: Int = 50,
-    @JvmField var iconY: Int = 25,
-    @JvmField var durationSeconds: Int = 10,
-    @JvmField var iconOpacity: Int = 100,
-    @JvmField var backgroundOpacity: Int = 42,
-    @JvmField var backgroundColorOpacity: Int = 100,
-    @JvmField var titleOpacity: Int = 100,
-    @JvmField var messageOpacity: Int = 100,
-    @JvmField var generation: Long = 0,
-    @JvmField var rgba: ByteArray = byteArrayOf(),
-    @JvmField var backgroundRgba: ByteArray = byteArrayOf()
-)
-
-/**
- * Mirrors the C FcaeUpdateInfo struct in core/fcae-ffi/include/fcae.h.
- * Returned by [NativeEngine.nativePollUpdate].
- */
-data class FcaeUpdateInfo(
-    val updateAvailable: Boolean = false,
-    val checkInProgress: Boolean = false,
-    val checkDone: Boolean = false,
-    val latestVersion: String = "",
-    val releaseNotes: String = "",
-    val downloadUrl: String = "",
-    val statusMessage: String = "",
-    /** The offered version is a pre-release (shown as BETA in the UI). */
-    val isPrerelease: Boolean = false,
-    val releaseDate: String = "",
-    /** FCAE_UPDATE_ERROR_*: why the check failed, 0 after a successful one. */
-    val errorKind: Int = 0,
-    /** The server body when the manifest could not be decoded, else empty. */
-    val rawBody: String = ""
-) {
-    val decodeFailed: Boolean get() = errorKind == ERROR_DECODE
-
-    companion object {
-        const val ERROR_DECODE = 3
-    }
 }

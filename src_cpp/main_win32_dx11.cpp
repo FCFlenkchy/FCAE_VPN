@@ -7,6 +7,11 @@
 #include <dwmapi.h>
 #include <tchar.h>
 #include <chrono>
+#include <shellapi.h>
+#include <cwchar>
+#include <cerrno>
+#include <algorithm>
+#include <functional>
 
 #include "imgui.h"
 #if defined(FCAE_HAVE_FREETYPE)
@@ -22,12 +27,21 @@ static ID3D11DeviceContext*    g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*         g_pSwapChain       = nullptr;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 static bool g_has_presented_frame = false;
+static UINT g_resize_width = 0;
+static UINT g_resize_height = 0;
+static bool g_device_lost = false;
+static bool g_swapchain_occluded = false;
 static ID3D11Texture2D*        g_sponsor_textures[3] = {};
 static ID3D11ShaderResourceView* g_sponsor_views[3] = {};
 static uint64_t g_sponsor_loaded[3] = {};
 static int g_sponsor_texture_width[3] = {};
 static int g_sponsor_texture_height[3] = {};
 static bool g_imgui_win32_ready = false;
+static bool g_imgui_dx11_ready = false;
+static bool g_live_resize = false;
+static bool g_drawing_frame = false;
+static constexpr UINT_PTR kResizeTimer = 0xFCAE;
+static std::function<void()> g_draw_frame;
 // The size the window was created at, in physical pixels. Kept so the first
 // WM_DPICHANGED after creation cannot be mistaken for a user resize.
 static int g_created_width  = 0;
@@ -217,6 +231,23 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_PAINT:
             ui_request_redraw();
             break;
+        case WM_ENTERSIZEMOVE:
+            g_live_resize = true;
+            SetTimer(hWnd, kResizeTimer, 16, nullptr);
+            return 0;
+        case WM_EXITSIZEMOVE:
+            KillTimer(hWnd, kResizeTimer);
+            g_live_resize = false;
+            ui_request_redraw();
+            return 0;
+        case WM_TIMER:
+            if (wParam == kResizeTimer) {
+                // DefWindowProc runs a modal message loop while an edge is
+                // dragged. Paint here too, instead of stretching the old frame.
+                if (g_live_resize && g_draw_frame) g_draw_frame();
+                return 0;
+            }
+            break;
         case WM_DPICHANGED:
             // Windows hands over the rectangle this window should occupy at
             // the new scale. Taking it is what keeps the layout the same
@@ -255,26 +286,9 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             // A restored/maximized window must be painted even if the render
             // gate had nothing new to show.
             ui_request_redraw();
-            if (g_pd3dDevice != nullptr && g_pd3dDeviceContext != nullptr
-                    && g_pSwapChain != nullptr && wParam != SIZE_MINIMIZED) {
-                // The immediate context keeps its own reference to the bound
-                // target. Release that reference as well before ResizeBuffers.
-                g_pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-                if (g_mainRenderTargetView) {
-                    g_mainRenderTargetView->Release();
-                    g_mainRenderTargetView = nullptr;
-                }
-                const HRESULT resized = g_pSwapChain->ResizeBuffers(
-                    0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
-                if (SUCCEEDED(resized)) g_has_presented_frame = false;
-                // If resizing failed, keep rendering to the existing back
-                // buffer instead of leaving the window permanently blank.
-                ID3D11Texture2D* pBackBuffer = nullptr;
-                if (SUCCEEDED(g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
-                    g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
-                    pBackBuffer->Release();
-                }
-                if (FAILED(resized)) ui_request_redraw();
+            if (wParam != SIZE_MINIMIZED && LOWORD(lParam) && HIWORD(lParam)) {
+                g_resize_width = LOWORD(lParam);
+                g_resize_height = HIWORD(lParam);
             }
             return 0;
         case WM_SYSCOMMAND:
@@ -307,7 +321,7 @@ static bool CreateDeviceD3D(HWND hWnd) {
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.BufferDesc.RefreshRate.Numerator = 60;
     sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.Flags              = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.Flags              = 0;
     sd.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.OutputWindow       = hWnd;
     sd.SampleDesc.Count   = 1;
@@ -357,11 +371,74 @@ static bool CreateDeviceD3D(HWND hWnd) {
 }
 
 static void CleanupDeviceD3D() {
+    g_has_presented_frame = false;
     release_sponsor_textures();
     if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
     if (g_pSwapChain)  { g_pSwapChain->Release();  g_pSwapChain = nullptr; }
     if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
     if (g_pd3dDevice)  { g_pd3dDevice->Release();  g_pd3dDevice = nullptr; }
+}
+
+// All D3D resource changes stay outside WndProc and outside an ImGui frame.
+static bool resize_target() {
+    if (!g_resize_width || !g_resize_height) return true;
+    const UINT width = g_resize_width, height = g_resize_height;
+    g_pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+    const HRESULT resized = g_pSwapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(resized)) return false;
+    ID3D11Texture2D* buffer = nullptr;
+    const HRESULT fetched = g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&buffer));
+    if (FAILED(fetched) || !buffer) return false;
+    const HRESULT created = g_pd3dDevice->CreateRenderTargetView(buffer, nullptr, &g_mainRenderTargetView);
+    buffer->Release();
+    if (FAILED(created)) return false;
+    g_resize_width = g_resize_height = 0;
+    g_has_presented_frame = false;
+    ui_request_redraw();
+    return true;
+}
+
+struct ElevatedWindow {
+    HANDLE ready = nullptr;
+    RECT bounds = {};
+    int show = SW_SHOWNORMAL;
+    bool placed = false;
+    ~ElevatedWindow() { if (ready) CloseHandle(ready); }
+};
+
+static void read_elevated_window(ElevatedWindow& handoff) {
+    int count = 0;
+    LPWSTR* args = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!args) return;
+    if (count >= 3 && std::wcscmp(args[1], L"--fcae-wait-parent") == 0) {
+        wchar_t* end = nullptr;
+        errno = 0;
+        const unsigned long pid = std::wcstoul(args[2], &end, 10);
+        if (!errno && end != args[2] && *end == L'\0' && pid && pid != GetCurrentProcessId()) {
+            wchar_t name[96];
+            std::swprintf(name, 96, L"Local\\FCAE.UI.Ready.%lu", pid);
+            handoff.ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, name);
+        }
+        if (handoff.ready && count == 9 && std::wcscmp(args[3], L"--fcae-window") == 0) {
+            long values[5] = {};
+            bool valid = true;
+            for (int i = 0; i < 5; ++i) {
+                errno = 0;
+                values[i] = std::wcstol(args[4 + i], &end, 10);
+                valid &= !errno && end != args[4 + i] && *end == L'\0';
+            }
+            if (valid && values[0] >= -1000000 && values[0] <= 1000000
+                    && values[1] >= -1000000 && values[1] <= 1000000
+                    && values[2] >= 1 && values[2] <= 65535 && values[3] >= 1 && values[3] <= 65535
+                    && (values[4] == SW_SHOWNORMAL || values[4] == SW_SHOWMAXIMIZED)) {
+                handoff.bounds = RECT{values[0], values[1], values[0] + values[2], values[1] + values[3]};
+                handoff.show = (int)values[4];
+                handoff.placed = true;
+            }
+        }
+    }
+    LocalFree(args);
 }
 
 // Must match IDI_ICON1 in icon.rc (resource id 101 is conventional for first ICON).
@@ -373,6 +450,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Kick the runtime/config initializer off first: it does not touch ImGui
     // or the window, so engine setup overlaps window and D3D creation
     // instead of serializing behind it.
+    ElevatedWindow handoff;
+    read_elevated_window(handoff);
     ui_init();
 
     HINSTANCE inst = hInst ? hInst : GetModuleHandleW(nullptr);
@@ -414,6 +493,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     int window_x = CW_USEDEFAULT;
     int window_y = CW_USEDEFAULT;
     place_window(window_x, window_y, window_w, window_h);
+    if (handoff.placed) {
+        MONITORINFO monitor = {};
+        monitor.cbSize = sizeof(monitor);
+        if (GetMonitorInfoW(MonitorFromRect(&handoff.bounds, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            window_w = (std::min)((int)(handoff.bounds.right - handoff.bounds.left), (int)(monitor.rcWork.right - monitor.rcWork.left));
+            window_h = (std::min)((int)(handoff.bounds.bottom - handoff.bounds.top), (int)(monitor.rcWork.bottom - monitor.rcWork.top));
+            window_x = std::clamp((int)handoff.bounds.left, (int)monitor.rcWork.left, (int)monitor.rcWork.right - window_w);
+            window_y = std::clamp((int)handoff.bounds.top, (int)monitor.rcWork.top, (int)monitor.rcWork.bottom - window_h);
+        }
+    }
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
         kWindowStyle,
         window_x, window_y, window_w, window_h,
@@ -481,12 +570,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return 1;
     }
+    g_imgui_dx11_ready = true;
     g_imgui_win32_ready = true;
-    ShowWindow(hWnd, SW_SHOWDEFAULT);
+    ShowWindow(hWnd, handoff.placed ? handoff.show : SW_SHOWDEFAULT);
     UpdateWindow(hWnd);
 
     // Paint only for input, changed UI content, or an explicit redraw request.
     // Block on the message queue while idle instead of repainting unconditionally.
+    auto next_device_retry = std::chrono::steady_clock::now();
     bool done = false;
     bool sponsor_window_visible = false;
     constexpr auto min_frame_interval = std::chrono::milliseconds(16);
@@ -495,6 +586,82 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     POINT last_mouse_pos = {};
     bool have_mouse_pos = false;
     constexpr auto interaction_tail   = std::chrono::milliseconds(700);
+
+    g_draw_frame = [&] {
+        if (g_drawing_frame || !g_app.running.load() || !IsWindow(hWnd)
+                || IsIconic(hWnd) || !IsWindowVisible(hWnd)) return;
+        struct FrameGuard {
+            FrameGuard() { g_drawing_frame = true; }
+            ~FrameGuard() { g_drawing_frame = false; }
+        } guard;
+        const auto frame_now = std::chrono::steady_clock::now();
+        if (g_device_lost) {
+            if (frame_now < next_device_retry) return;
+            next_device_retry = frame_now + std::chrono::seconds(1);
+            if (g_imgui_dx11_ready) {
+                ImGui_ImplDX11_Shutdown();
+                g_imgui_dx11_ready = false;
+            }
+            CleanupDeviceD3D();
+            if (!CreateDeviceD3D(hWnd)) { CleanupDeviceD3D(); return; }
+            if (!ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext)) return;
+            g_imgui_dx11_ready = true;
+            g_device_lost = false;
+            g_swapchain_occluded = false;
+            g_resize_width = g_resize_height = 0;
+            ui_request_redraw();
+        }
+        if (g_swapchain_occluded) {
+            const HRESULT test = g_pSwapChain->Present(0, DXGI_PRESENT_TEST);
+            if (test == DXGI_STATUS_OCCLUDED) return;
+            if (FAILED(test)) { g_device_lost = true; return; }
+            g_swapchain_occluded = false;
+            ui_request_redraw();
+        }
+        if (!resize_target()) { g_device_lost = true; return; }
+        if (frame_now - last_frame_time < min_frame_interval) return;
+        const bool active = g_live_resize || (frame_now - last_input_time) < interaction_tail;
+        if (!ui_should_render(active)) return;
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        ui_frame();
+        if (!g_app.running.load() || !IsWindow(hWnd) || !IsWindowVisible(hWnd)) {
+            ImGui::EndFrame();
+            return;
+        }
+
+        ImGui::Render();
+
+        if (!g_mainRenderTargetView) return;
+
+        const ImVec4 background = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+        const float clear_color[4] = { background.x, background.y, background.z, background.w };
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+        const HRESULT presented = g_pSwapChain->Present(1, 0);
+        if (presented == S_OK) {
+            g_has_presented_frame = true;
+            if (handoff.ready) {
+                SetEvent(handoff.ready);
+                CloseHandle(handoff.ready);
+                handoff.ready = nullptr;
+                SetForegroundWindow(hWnd);
+            }
+        } else if (presented == DXGI_STATUS_OCCLUDED) {
+            g_swapchain_occluded = true;
+        } else if (FAILED(presented)) {
+            g_device_lost = true;
+            g_has_presented_frame = false;
+            g_app.add_log(FCAE_LOG_ERROR, "[ui] Direct3D presentation failed; rebuilding the renderer");
+            ui_request_redraw();
+        }
+        last_frame_time = std::chrono::steady_clock::now();
+    };
 
     while (!done && g_app.running.load()) {
         const auto loop_now = std::chrono::steady_clock::now();
@@ -505,6 +672,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         DWORD timeout;
         if (!paintable)         timeout = 1000;
+        else if (g_swapchain_occluded || g_device_lost) timeout = 100;
         else if (interacting) {
             const auto next_frame = last_frame_time + min_frame_interval;
             const auto remaining = next_frame - loop_now;
@@ -568,53 +736,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         }
         ui_set_window_focused(GetForegroundWindow() == hWnd);
 
-        const auto frame_now = std::chrono::steady_clock::now();
-        if (frame_now - last_frame_time < min_frame_interval) continue;
-
-        const bool active = got_input || (frame_now - last_input_time) < interaction_tail;
-        if (!ui_should_render(active)) continue;
-
-        // A lost D3D device cannot render; normal shutdown still owns teardown.
-        if (!g_pd3dDevice || !g_pd3dDeviceContext || !g_pSwapChain || !g_mainRenderTargetView)
-            continue;
-
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-
-        ui_frame();
-        if (!g_app.running.load() || !IsWindow(hWnd) || !IsWindowVisible(hWnd)) {
-            ImGui::EndFrame();
-            continue;
-        }
-
-        ImGui::Render();
-
-        // ImGui has a frame open from NewFrame() until Render(), and its
-        // assertion against a second NewFrame() is compiled out in Release.
-        // Any `continue` between the two therefore corrupted the next frame --
-        // which is exactly what a WM_SIZE arriving mid-frame can cause, because
-        // it can take the render target away here. Abandoning the frame costs
-        // one unlock, and the next NewFrame() opens a clean one.
-        ImGui::EndFrame();
-        if (!g_mainRenderTargetView) continue;
-
-        const ImVec4 background = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
-        const float clear_color[4] = { background.x, background.y, background.z, background.w };
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-        // Ignore Present failure; the next frame sees the device guard.
-        if (g_pSwapChain->Present(1, 0) == S_OK) g_has_presented_frame = true;
-        last_frame_time = std::chrono::steady_clock::now();
+        g_draw_frame();
     }
 
+    KillTimer(hWnd, kResizeTimer);
+    g_live_resize = false;
+    g_draw_frame = {};
     ui_set_window_handle(nullptr);
     ui_shutdown();
 
     g_imgui_win32_ready = false;
-    ImGui_ImplDX11_Shutdown();
+    if (g_imgui_dx11_ready) ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
     CleanupDeviceD3D();

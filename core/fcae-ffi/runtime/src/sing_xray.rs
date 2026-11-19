@@ -680,27 +680,83 @@ pub enum CoreProfile {
     Native(Value),
 }
 
+fn native_json(text: &str) -> Result<Value, String> {
+    if let Ok(value) = serde_json::from_str(text) {
+        return Ok(value);
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    let mut i = 0;
+    let mut quoted = false;
+    while i < bytes.len() {
+        if quoted {
+            match bytes[i] {
+                b'\\' => {
+                    i += 2;
+                    continue;
+                }
+                b'"' => quoted = false,
+                _ => {}
+            }
+        } else if bytes[i] == b'"' {
+            quoted = true;
+        } else if bytes[i] == b'#' || (bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/')) {
+            while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                bytes[i] = b' ';
+                i += 1;
+            }
+            continue;
+        } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            bytes[i] = b' ';
+            bytes[i + 1] = b' ';
+            i += 2;
+            loop {
+                if i + 1 >= bytes.len() {
+                    return Err("unterminated JSON block comment".into());
+                }
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    bytes[i] = b' ';
+                    bytes[i + 1] = b' ';
+                    i += 2;
+                    break;
+                }
+                if bytes[i] != b'\n' && bytes[i] != b'\r' {
+                    bytes[i] = b' ';
+                }
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("native config is not valid JSON: {error}"))
+}
+
 impl CoreProfile {
     /// Parse and validate `core.profile`.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let text = text.trim();
+        let text = text.trim().trim_start_matches('\u{feff}').trim_start();
         if text.is_empty() {
             return Err("no profile: set a share link or a native config JSON".into());
         }
         if text.starts_with('{') {
-            let value: Value = serde_json::from_str(text)
-                .map_err(|error| format!("native config is not valid JSON: {error}"))?;
+            let value = native_json(text)?;
             if !value.is_object() {
                 return Err("native config must be a JSON object".into());
             }
             return Ok(CoreProfile::Native(value));
         }
-        if !text.lines().next().unwrap_or_default().contains("://") {
-            if let Ok(value) = serde_yaml_ng::from_str::<Value>(text) {
-                if value.is_object() && crate::mihomo::is_native(&value) {
-                    return Ok(CoreProfile::Native(value));
-                }
+        if let Ok(value) = serde_yaml_ng::from_str::<Value>(text) {
+            if value.is_object() && crate::mihomo::is_native(&value) {
+                return Ok(CoreProfile::Native(value));
             }
+        }
+        if text.starts_with("//") || text.starts_with("/*") || text.starts_with('#') {
+            let value = native_json(text)?;
+            if !value.is_object() {
+                return Err("native config must be a JSON object".into());
+            }
+            return Ok(CoreProfile::Native(value));
         }
         let Some((scheme, rest)) = text.split_once("://") else {
             return Err(format!(
@@ -709,6 +765,9 @@ impl CoreProfile {
             ));
         };
         let scheme = scheme.trim().to_ascii_lowercase();
+        if matches!(scheme.as_str(), "ssr" | "ssh") {
+            return parse_mihomo_link(&scheme, rest).map(CoreProfile::Native);
+        }
         let outbound = match scheme.as_str() {
             "vless" => parse_vless(rest)?,
             "vmess" => parse_vmess(rest)?,
@@ -721,11 +780,11 @@ impl CoreProfile {
             "hysteria2" | "hy2" => parse_hysteria2(rest)?,
             "tuic" => parse_tuic(rest)?,
             "anytls" => parse_anytls(rest)?,
-            "hysteria" => parse_hysteria(rest)?,
+            "hysteria" | "hy" => parse_hysteria(rest)?,
             "naive" | "naive+https" => parse_naive(rest, false)?,
             "naive+quic" => parse_naive(rest, true)?,
             // Both cores run this one, each in its own shape.
-            "wireguard" => parse_wireguard(rest)?,
+            "wireguard" | "wg" => parse_wireguard(rest)?,
             other => {
                 return Err(format!(
                     "unsupported scheme {other:?} (vless, vmess, trojan, ss, socks5, http, \
@@ -745,6 +804,85 @@ impl CoreProfile {
     }
 }
 
+fn parse_mihomo_link(scheme: &str, rest: &str) -> Result<Value, String> {
+    let mut proxy = serde_json::json!({"name":"FCAE-PROXY","type":scheme});
+    if scheme == "ssr" {
+        let decoded =
+            b64_decode(rest.trim_end_matches('/')).ok_or("SSR payload is not base64 UTF-8")?;
+        let (body, params) = decoded.split_once("/?").unwrap_or((&decoded, ""));
+        let fields: Vec<_> = body.rsplitn(6, ':').collect();
+        if fields.len() != 6 {
+            return Err("SSR needs server:port:protocol:cipher:obfs:password".into());
+        }
+        proxy["server"] = serde_json::json!(checked_host(
+            fields[5].trim_start_matches('[').trim_end_matches(']')
+        )?);
+        proxy["port"] = serde_json::json!(parse_port(fields[4])?);
+        proxy["protocol"] = serde_json::json!(fields[3]);
+        proxy["cipher"] = serde_json::json!(fields[2]);
+        proxy["obfs"] = serde_json::json!(fields[1]);
+        proxy["password"] = serde_json::json!(if fields[0].is_empty() {
+            String::new()
+        } else {
+            b64_decode(fields[0]).ok_or("invalid SSR password encoding")?
+        });
+        proxy["udp"] = serde_json::json!(true);
+        let query = Query::parse(params);
+        for (key, value) in &query.0 {
+            let target = match key.as_str() {
+                "protoparam" => "protocol-param",
+                "obfsparam" => "obfs-param",
+                "remarks" | "group" => continue,
+                _ => {
+                    return Err(format!(
+                        "unsupported SSR parameter {key:?}; use a native Mihomo config"
+                    ))
+                }
+            };
+            proxy[target] = serde_json::json!(if value.is_empty() {
+                String::new()
+            } else {
+                b64_decode(value).ok_or_else(|| format!("invalid SSR {key} encoding"))?
+            });
+        }
+    } else {
+        let (body, _) = split_fragment(rest);
+        let (authority, params) = split_query(body);
+        let (credentials, target) = authority
+            .rsplit_once('@')
+            .ok_or("SSH needs username@server")?;
+        let (user, password) = credentials
+            .split_once(':')
+            .map_or((credentials, None), |(u, p)| (u, Some(p)));
+        let user = percent_decode(user);
+        if user.is_empty() {
+            return Err("SSH username is empty".into());
+        }
+        let (server, port) = split_host_port(trim_trailing_path(target), Some(22))?;
+        proxy["server"] = serde_json::json!(server);
+        proxy["port"] = serde_json::json!(port);
+        proxy["username"] = serde_json::json!(user);
+        if let Some(password) = password {
+            proxy["password"] = serde_json::json!(percent_decode(password));
+        }
+        let query = Query::parse(params);
+        for (key, value) in &query.0 {
+            match key.as_str() {
+                "private-key" | "private-key-passphrase" => proxy[key] = serde_json::json!(value),
+                "host-key" | "host-key-algorithms" => {
+                    proxy[key] = serde_json::json!(split_list(Some(value)))
+                }
+                _ => {
+                    return Err(format!(
+                        "unsupported SSH parameter {key:?}; use a native Mihomo config"
+                    ))
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({"mode":"rule","proxies":[proxy],"rules":["MATCH,FCAE-PROXY"]}))
+}
+
 /// The dial-layer settings a link can name on top of its scheme's own grammar,
 /// read once for every scheme and checked against the protocol that will hold
 /// them: a setting no config of the core can carry is refused by name.
@@ -754,8 +892,10 @@ fn with_dial_options(rest: &str, mut outbound: Outbound) -> Result<Outbound, Str
     let query = Query::parse(params);
     outbound.dial = DialOptions::parse(&query)?;
     let name = outbound.protocol.name();
-    if outbound.dial.uot.is_some() && !matches!(outbound.protocol, Protocol::Socks { .. }) {
-        return Err(format!("uot is a socks5 setting; a {name} link has no field for it"));
+    if outbound.dial.uot.is_some()
+        && !matches!(outbound.protocol, Protocol::Socks { .. } | Protocol::Shadowsocks { .. })
+    {
+        return Err(format!("uot requires socks5 or shadowsocks; a {name} link has no field for it"));
     }
     if outbound.dial.packet_encoding.is_some()
         && !matches!(
@@ -784,7 +924,12 @@ fn with_dial_options(rest: &str, mut outbound: Outbound) -> Result<Outbound, Str
 /// type the same way. A config with neither section, an empty one, or one
 /// naming both dialects answers `None`.
 pub fn native_dialect(text: &str) -> Option<FcaeBackend> {
-    let value: Value = serde_json::from_str(text).ok().or_else(|| serde_yaml_ng::from_str(text).ok())?;
+    let text = text.trim().trim_start_matches('\u{feff}').trim_start();
+    let value: Value = native_json(text).ok().or_else(|| serde_yaml_ng::from_str(text).ok())?;
+    native_dialect_value(&value)
+}
+
+pub(crate) fn native_dialect_value(value: &Value) -> Option<FcaeBackend> {
     if crate::mihomo::is_native(&value) { return Some(FcaeBackend::Mihomo); }
     let (mut xray, mut sing_box) = (false, false);
     let mut declared = false;
@@ -2871,6 +3016,8 @@ fn log_gate(level: Level) -> c_int {
     }
 }
 
+pub const CORE_LOG_TARGET: &str = "fcae::core";
+
 /// Hand one core log line to the app's logger.
 ///
 /// The shims call this from their own goroutines with a NUL-terminated line
@@ -2888,14 +3035,14 @@ pub fn forward_log(core: &str, level: c_int, message: *const c_char) {
     };
     // The gate drops most of what a core emits, so check before building the
     // line, not after.
-    if !log::log_enabled!(level) {
+    if !log::log_enabled!(target: CORE_LOG_TARGET, level) {
         return;
     }
     let _ = std::panic::catch_unwind(|| {
         // SAFETY: the pointer is valid for the duration of the call, as the
         // shims pass a `C.CString` they free immediately afterwards.
         let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-        log::log!(level, "[{core}] {text}");
+        log::log!(target: CORE_LOG_TARGET, level, "[{core}] {text}");
     });
 }
 

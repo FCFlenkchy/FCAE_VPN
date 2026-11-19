@@ -26,7 +26,9 @@ struct FcaeLogger;
 impl log::Log for FcaeLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         let max = MAX_LEVEL.load(Ordering::Relaxed);
-        (level_to_u8(metadata.level())) <= max
+        // Core shims already apply the separately selected route-core gate.
+        metadata.target() == fcae_runtime::sing_xray::CORE_LOG_TARGET
+            || level_to_u8(metadata.level()) <= max
     }
 
     fn log(&self, record: &log::Record) {
@@ -102,12 +104,8 @@ pub fn install(cb: fcae_abi::FcaeLogCallback, user_data: *mut c_void, max_level:
     // `set_logger` can only succeed once per process; ignore a second
     // attempt (e.g. init → shutdown → init).
     let _ = log::set_logger(&LOGGER);
-    log::set_max_level(match max_level {
-        fcae_abi::FcaeLogLevel::Error => log::LevelFilter::Error,
-        fcae_abi::FcaeLogLevel::Warn => log::LevelFilter::Warn,
-        fcae_abi::FcaeLogLevel::Info => log::LevelFilter::Info,
-        fcae_abi::FcaeLogLevel::Debug => log::LevelFilter::Debug,
-    });
+    // Keep core Debug records reachable; enabled() still filters general logs.
+    log::set_max_level(log::LevelFilter::Debug);
 }
 
 /// Detach the host callback and wait for in-flight callbacks. Desktop

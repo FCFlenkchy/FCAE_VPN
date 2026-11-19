@@ -49,12 +49,12 @@ FCAE VPN 是一款适用于 Windows、Linux、macOS 和 Android 的审查绕过�
 
 ## 支持平台
 
-| 平台 | 后端 | UI |
+| 平台 | 渲染宿主 | UI |
 |----------|---------|----|
 | Windows | DirectX 11 | ImGui |
 | Linux | GLFW + OpenGL | ImGui |
 | macOS | AppKit + Metal | ImGui |
-| Android | Kotlin Material VpnService + JNI 桥接 | Kotlin Material UI |
+| Android | GLSurfaceView + OpenGL ES 3 + JNI | ImGui |
 
 ### 界面截图
 
@@ -97,7 +97,7 @@ cmake --build build --config Release
 
 - **Firefox IP Protection** — 使用 Rust 实现。请参阅 [Firefox IP Protection 源代码](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/)（参考了 [Arman VPN](https://github.com/armanlife/arman-vpn-client) 和 [FoxyVPN](https://github.com/Vauth/FoxyVPN)）。
 - **[Aether](https://github.com/CluvexStudio/aether)** — 由 CluvexStudio 开发的核心审查绕过引擎。提供 MASQUE、WireGuard、WARP-in-WARP 和 WARP-in-MASQUE 协议。
-- **[Dear ImGui](https://github.com/ocornut/imgui)** — 即时模式 GUI 库，用于所有原生桌面渲染。
+- **[Dear ImGui](https://github.com/ocornut/imgui)** — 即时模式 GUI 库，用于桌面与 Android 的共享界面。
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C 语言 SOCKS5 隧道引擎，进程内运行。
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon 隧道核心库。
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare 的 HTTP/3 和 QUIC 实现。作为 MASQUE 协议支持的 QUIC 传输后端。

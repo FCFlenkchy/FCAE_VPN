@@ -28,7 +28,7 @@ use fcae_abi::FcaeBackend;
 use serde_json::Value;
 
 use crate::config::backend_label;
-use crate::sing_xray::{native_dialect, CoreProfile};
+use crate::sing_xray::{native_dialect_value, CoreProfile};
 
 /// Upper bound on saved configs, and the only place a count is checked: the
 /// UIs neither show nor enforce it, because a library is the user's own list.
@@ -189,13 +189,15 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
     }
     // A native config names its own dialect; storing one under the other tag is
     // a mistake the core could only report as a parse failure at start.
-    if let Some(dialect) = native_dialect(text) {
-        if dialect != backend {
-            return Err(format!(
-                "the config has {} outbounds but is tagged {}",
-                backend_label(dialect),
-                backend_label(backend)
-            ));
+    if let CoreProfile::Native(value) = &profile {
+        if let Some(dialect) = native_dialect_value(value) {
+            if dialect != backend {
+                return Err(format!(
+                    "the config has {} outbounds but is tagged {}",
+                    backend_label(dialect),
+                    backend_label(backend)
+                ));
+            }
         }
     }
     // A scheme only one core implements is refused for the other here, where

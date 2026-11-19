@@ -1,66 +1,16 @@
 <resources>
-    <!-- Keep native platform dialogs and system bars dark alongside ImGui. -->
-    <style name="Theme.FCAEVPN" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <!-- AppCompat hosts system dialogs and back navigation, not the ImGui UI. -->
+    <style name="Theme.FCAEVPN" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="colorPrimary">#FF1A3A5C</item>
-        <item name="colorPrimaryVariant">#FF0D2137</item>
-        <item name="colorOnPrimary">#FFFFFFFF</item>
+        <item name="colorPrimaryDark">#FF0D2137</item>
+        <item name="colorAccent">#FF60A5FA</item>
         <item name="android:windowBackground">#FF14141F</item>
         <item name="android:statusBarColor">#FF14141F</item>
         <item name="android:navigationBarColor">#FF14141F</item>
+        <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
         <item name="android:textColorPrimary">#FFE8ECF4</item>
         <item name="android:textColorSecondary">#FFB0B8C8</item>
-        <!-- EditText text/placeholder (attributes exist since API 14/21;
-             minSdk is 29). -->
-        <item name="android:editTextColor">#FFE8ECF4</item>
-        <item name="android:textColorHint">#FF6B7280</item>
-        <!-- Active controls (switch thumb/track, checkboxes): app accent
-             blue instead of the theme default. -->
-        <item name="android:colorControlActivated">#FF60A5FA</item>
-        <!-- Links inside dialog message text (LinkMovementMethod). -->
         <item name="android:textColorLink">#FF60A5FA</item>
-        <!-- System bars stay dark with light icons (API 23+, minSdk 29). -->
-        <item name="android:windowLightStatusBar">false</item>
-    </style>
-
-    <style name="Widget.FCAEVPN.DialogActionButton" parent="Widget.MaterialComponents.Button.TextButton">
-        <item name="android:textColor">#FF00FFFF</item>
-        <item name="android:textAllCaps">false</item>
-        <item name="android:minHeight">44dp</item>
-        <item name="android:insetTop">0dp</item>
-        <item name="android:insetBottom">0dp</item>
-        <item name="backgroundTint">@android:color/transparent</item>
-    </style>
-
-    <style name="Widget.FCAEVPN.SettingsButton" parent="Widget.MaterialComponents.Button.OutlinedButton">
-        <item name="android:textColor">#FFE0E4EE</item>
-        <item name="android:textAllCaps">false</item>
-        <item name="android:minHeight">44dp</item>
-        <item name="android:insetTop">0dp</item>
-        <item name="android:insetBottom">0dp</item>
-        <item name="backgroundTint">#FF1E1E2C</item>
-        <item name="strokeColor">#FF334155</item>
-        <item name="strokeWidth">1dp</item>
-        <item name="cornerRadius">8dp</item>
-    </style>
-
-    <!-- Round icon button shared by About, sponsor refresh and sponsor audio;
-         mirrors the desktop round_icon_button (20px circle, #334155 fill). -->
-    <style name="Widget.FCAEVPN.IconButton" parent="Widget.MaterialComponents.Button.UnelevatedButton">
-        <item name="android:layout_width">28dp</item>
-        <item name="android:layout_height">28dp</item>
-        <item name="android:insetLeft">0dp</item>
-        <item name="android:insetTop">0dp</item>
-        <item name="android:insetRight">0dp</item>
-        <item name="android:insetBottom">0dp</item>
-        <item name="android:minWidth">0dp</item>
-        <item name="android:minHeight">0dp</item>
-        <item name="android:padding">0dp</item>
-        <item name="cornerRadius">14dp</item>
-        <item name="backgroundTint">#FF334155</item>
-        <item name="iconGravity">textStart</item>
-        <item name="iconPadding">0dp</item>
-        <item name="iconSize">28dp</item>
-        <item name="iconTint">@null</item>
     </style>
 </resources>

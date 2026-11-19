@@ -15,6 +15,8 @@
 #include <locale>
 #include <memory>
 
+namespace UiText { void reset_android_view(); }
+
 namespace {
 JavaVM* vm = nullptr;
 jclass bridge = nullptr;
@@ -24,12 +26,13 @@ jmethodID wake_method = nullptr;
 jmethodID fold_method = nullptr;
 std::unique_ptr<AndroidSettingsUi> settings;
 std::atomic<bool> wake_ready{false};
-AndroidImGuiInput input;
+std::unique_ptr<AndroidImGuiInput> input;
 double interaction_until = 0.0;
 std::string files_dir;
 std::string last_error;
 std::string clipboard;
 bool initialized = false;
+bool runtime_started = false;
 bool renderer_initialized = false;
 bool paused = false;
 float density = 1.0f;
@@ -361,11 +364,14 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeSurface(JNIEnv* env, jclass type, jstring directory, jfloat scale, jfloat touch_slop) {
     if (!initialized) {
         env->GetJavaVM(&vm);
-        bridge = static_cast<jclass>(env->NewGlobalRef(type));
-        dispatch_method = env->GetStaticMethodID(bridge, "dispatch", "(Ljava/lang/String;Ljava/lang/String;)V");
-        snapshot_method = env->GetStaticMethodID(bridge, "snapshot", "()[J");
-        wake_method = env->GetStaticMethodID(bridge, "requestFrame", "()V");
-        fold_method = env->GetStaticMethodID(bridge, "foldAppQuery", "(Ljava/lang/String;)Ljava/lang/String;");
+        if (!bridge) {
+            bridge = static_cast<jclass>(env->NewGlobalRef(type));
+            dispatch_method = env->GetStaticMethodID(bridge, "dispatch", "(Ljava/lang/String;Ljava/lang/String;)V");
+            snapshot_method = env->GetStaticMethodID(bridge, "snapshot", "()[J");
+            wake_method = env->GetStaticMethodID(bridge, "requestFrame", "()V");
+            fold_method = env->GetStaticMethodID(bridge, "foldAppQuery", "(Ljava/lang/String;)Ljava/lang/String;");
+        }
+        input = std::make_unique<AndroidImGuiInput>();
         settings = std::make_unique<AndroidSettingsUi>(
             [](const char* action, const std::string& payload) { android_ui_command(action, payload); },
             fold_query, app_icon);
@@ -394,11 +400,15 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeSurface(JNIEnv* env, jclass type, jstring 
         platform.Platform_GetClipboardTextFn = [](ImGuiContext*) { return clipboard.c_str(); };
         initialized = true;
         wake_ready.store(true, std::memory_order_release);
-        ui_init();
+        if (!runtime_started) {
+            runtime_started = true;
+            ui_init();
+        }
+        if (settings) settings->refresh();
     }
     density = std::max(0.5f, scale);
-    input.reset();
-    input.set_touch_slop(touch_slop / density);
+    input->reset();
+    input->set_touch_slop(touch_slop / density);
     if (renderer_initialized) ImGui_ImplOpenGL3_Shutdown();
     for (Texture& texture : textures) texture = {};
     for (auto it = app_icons.begin(); it != app_icons.end();) {
@@ -412,12 +422,43 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeSurface(JNIEnv* env, jclass type, jstring 
     ui_set_window_focused(true);
 }
 extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_ImGuiBridge_nativeRelease(JNIEnv*, jclass) {
+    if (!initialized) {
+        std::string{}.swap(clipboard);
+        std::string{}.swap(last_error);
+        return;
+    }
+    wake_ready.store(false, std::memory_order_release);
+    ui_set_window_visible(false);
+    ui_set_window_focused(false);
+    input->reset();
+    input.reset();
+    UiText::reset_android_view();
+    settings.reset();
+    for (auto& entry : app_icons) {
+        if (entry.second.texture) glDeleteTextures(1, &entry.second.texture);
+    }
+    decltype(app_icons){}.swap(app_icons);
+    for (Texture& texture : textures) {
+        if (texture.id) glDeleteTextures(1, &texture.id);
+        texture = {};
+    }
+    if (renderer_initialized) ImGui_ImplOpenGL3_Shutdown();
+    renderer_initialized = false;
+    ImGui::DestroyContext();
+    initialized = false;
+    std::string{}.swap(clipboard);
+    std::string{}.swap(last_error);
+    interaction_until = last_frame = 0.0;
+    ui_release_view();
+}
+extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeResize(JNIEnv*, jclass, jint width, jint height) {
     surface_width = std::max(1, width); surface_height = std::max(1, height);
     ui_request_redraw();
 }
-void android_ui_horizontal_drag_item() { input.horizontal_drag_item(); }
-bool android_ui_is_scrolling() { return input.scrolling_window(ImGui::GetCurrentWindow()->ID); }
+void android_ui_horizontal_drag_item() { if (input) input->horizontal_drag_item(); }
+bool android_ui_is_scrolling() { return input && input->scrolling_window(ImGui::GetCurrentWindow()->ID); }
 
 namespace UiText {
 namespace {
@@ -427,6 +468,12 @@ ImGuiID restore_id = 0;
 int selection_start = 0, selection_end = 0;
 ImGuiKey edit_key = ImGuiKey_None;
 int restore_frame = 0;
+}
+void reset_android_view() {
+    select_on_activate = restore_id = 0;
+    select_frame = restore_frame = 0;
+    selection_start = selection_end = 0;
+    edit_key = ImGuiKey_None;
 }
 void prepare(const char* label) {
     if (restore_id && GImGui->FrameCount > restore_frame + 6) {
@@ -440,7 +487,7 @@ void finish(ImGuiInputTextFlags flags) {
         (GImGui->LastItemData.ItemFlags & ImGuiItemFlags_Disabled)) return;
     ImGuiID id = ImGui::GetItemID();
     ImGuiInputTextState* state = ImGui::GetInputTextState(id);
-    if (input.text_hold(id, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()))) {
+    if (input->text_hold(id, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()))) {
         android_ui_command("clipboardRead");
         select_on_activate = id;
         select_frame = GImGui->FrameCount;
@@ -463,7 +510,7 @@ void finish(ImGuiInputTextFlags flags) {
         edit_key = ImGuiKey_None;
     }
     ImGui::PushID(static_cast<int>(id));
-    if (input.text_menu(id) && state) {
+    if (input->text_menu(id) && state) {
         selection_start = state->GetSelectionStart();
         selection_end = state->GetSelectionEnd();
         ImGui::OpenPopup("Text actions");
@@ -498,8 +545,8 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     io.DisplayFramebufferScale = ImVec2(density, density);
     io.DeltaTime = last_frame > 0 ? static_cast<float>(std::clamp(now - last_frame, 0.001, 0.25)) : 1.0f / 60.0f;
     last_frame = now;
-    input.new_frame(io.DeltaTime);
-    const bool interacting = input.active() || now < interaction_until || io.MouseDown[0]
+    input->new_frame(io.DeltaTime);
+    const bool interacting = input->active() || now < interaction_until || io.MouseDown[0]
         || GImGui->InputEventsQueue.Size != 0;
     ui_should_render(interacting || io.WantTextInput);
     ImGui_ImplOpenGL3_NewFrame();
@@ -513,7 +560,7 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     // ImGui trickles press/release across frames. Never let the release of a
     // quick tap, a held slider, or an inertial scroll wait for an idle poll.
-    const bool immediate = interacting || input.active() || GImGui->InputEventsQueue.Size != 0;
+    const bool immediate = interacting || input->active() || GImGui->InputEventsQueue.Size != 0;
     const unsigned delay = immediate ? 0u : std::min(ui_sleep_ms(), io.WantTextInput ? 33u : 250u);
     return static_cast<jint>(delay) | (io.WantTextInput ? 0x10000 : 0)
         | (GImGui->OpenPopupStack.Size ? 0x20000 : 0);
@@ -521,7 +568,7 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativePointer(JNIEnv*, jclass, jfloat x, jfloat y, jint action, jlong time_ms, jboolean touch) {
     if (!initialized) return;
-    input.pointer(x / density, y / density, action, time_ms / 1000.0, touch);
+    input->pointer(x / density, y / density, action, time_ms / 1000.0, touch);
     interaction_until = ui_now_seconds() + 0.25;
 }
 extern "C" JNIEXPORT void JNICALL
@@ -559,7 +606,7 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeVisibility(JNIEnv*, jclass, jboolean visib
     if (visible && settings) settings->refresh();
     last_frame = 0.0;
     if (!visible) {
-        input.reset();
+        input->reset();
         interaction_until = 0.0;
         android_ui_flush_settings();
     }
@@ -619,7 +666,7 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeAppIcon(JNIEnv* env, jclass, jstring name,
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeBack(JNIEnv*, jclass) {
     if (!initialized) return;
-    input.reset();
+    input->reset();
     if (GImGui->OpenPopupStack.Size)
         ImGui::ClosePopupToLevel(GImGui->OpenPopupStack.Size - 1, true);
     interaction_until = ui_now_seconds() + 0.25;

@@ -49,12 +49,12 @@ FCAE VPN یک ابزار دور زدن سانسور برای ویندوز، لی
 
 ## پلتفرم‌ها
 
-| پلتفرم | بک‌اند | رابط کاربری |
+| پلتفرم | میزبان رندر | رابط کاربری |
 |----------|---------|----|
 | ویندوز | DirectX 11 | ImGui |
 | لینوکس | GLFW + OpenGL | ImGui |
-| مک | GLFW + OpenGL | ImGui |
-| اندروید | Kotlin Material VpnService + پل JNI | Kotlin Material UI |
+| مک | AppKit + Metal | ImGui |
+| اندروید | GLSurfaceView + OpenGL ES 3 + JNI | ImGui |
 
 ### تصاویر
 
@@ -97,7 +97,7 @@ cmake --build build --config Release
 
 - **Firefox IP Protection** — پیاده‌سازی‌شده با Rust. [کد منبع Firefox IP Protection](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/) را ببینید (با استفاده از [Arman VPN](https://github.com/armanlife/arman-vpn-client) و [FoxyVPN](https://github.com/Vauth/FoxyVPN) به‌عنوان مرجع).
 - **[Aether](https://github.com/CluvexStudio/aether)** — موتور اصلی دور زدن سانسور توسط CluvexStudio. پروتکل‌های MASQUE، WireGuard، WARP-in-WARP و WARP-in-MASQUE را فراهم می‌کند.
-- **[Dear ImGui](https://github.com/ocornut/imgui)** — کتابخانه رابط گرافیکی حالت فوری. برای تمام رندرهای بومی دسکتاپ استفاده می‌شود.
+- **[Dear ImGui](https://github.com/ocornut/imgui)** — کتابخانه رابط گرافیکی حالت فوری. برای رابط مشترک دسکتاپ و اندروید استفاده می‌شود.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — موتور تونل SOCKS5 به زبان C، داخل فرایند اجرا می‌شود.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — کتابخانه هسته تونل سایفون.
 - **[Quiche](https://github.com/cloudflare/quiche)** — پیاده‌سازی HTTP/3 و QUIC کلادفلر. به‌عنوان بک‌اند حمل‌ونقل QUIC برای پشتیبانی از پروتکل MASQUE استفاده می‌شود.

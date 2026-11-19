@@ -1,0 +1,30 @@
+[1mdiff --git a/.gitmodules b/.gitmodules[m
+[1mindex 085afb9..cb6922b 100644[m
+[1m--- a/.gitmodules[m
+[1m+++ b/.gitmodules[m
+[36m@@ -1,19 +1,19 @@[m
+[31m-[submodule "tun2socks"][m
+[32m+[m[32m[submodule "core/tun2socks"][m
+ 	path = core/tun2socks[m
+ 	url = https://github.com/xjasonlyu/tun2socks.git[m
+[31m-[submodule "psiphon"][m
+[32m+[m[32m[submodule "core/psiphon"][m
+ 	path = core/psiphon[m
+ 	url = https://github.com/Psiphon-Labs/psiphon-tunnel-core.git[m
+[31m-[submodule "zeptun"][m
+[32m+[m[32m[submodule "core/zeptun"][m
+ 	path = core/zeptun[m
+ 	url = https://github.com/Noisemux/zeptun.git[m
+[31m-[submodule "hev-socks5-tunnel"][m
+[32m+[m[32m[submodule "core/hev-socks5-tunnel"][m
+ 	path = core/hev-socks5-tunnel[m
+ 	url = https://github.com/heiher/hev-socks5-tunnel.git[m
+[31m-[submodule "imgui"][m
+[32m+[m[32m[submodule "src_cpp/imgui"][m
+ 	path = src_cpp/imgui[m
+ 	url = https://github.com/ocornut/imgui.git[m
+[31m-[submodule "aether"][m
+[32m+[m[32m[submodule "core/aether"][m
+ 	path = core/aether[m
+ 	url = https://github.com/CluvexStudio/aether.git[m
+ [submodule "core/xray"][m

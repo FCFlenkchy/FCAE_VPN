@@ -24,6 +24,9 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     private val main = Handler(Looper.getMainLooper())
     private val choreographer = Choreographer.getInstance()
     private val pending = ArrayDeque<() -> Unit>()
+    @Volatile private var acceptingEvents = false
+    private var nativeReady = false // GL-thread owned
+    private var renderingResumed = false
     private var keyboard = false
     private var popupOpen = false
     private var backHandled = false
@@ -43,7 +46,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
 
     init {
         setEGLContextClientVersion(3)
-        preserveEGLContextOnPause = true
+        preserveEGLContextOnPause = false
         setRenderer(this)
         renderMode = RENDERMODE_WHEN_DIRTY
         isFocusable = true
@@ -54,11 +57,18 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     fun requestFrame() { frames.request() }
 
     fun enqueue(action: () -> Unit) {
-        synchronized(pending) { pending.addLast(action) }
+        synchronized(pending) {
+            if (!acceptingEvents) return
+            pending.addLast(action)
+        }
         frames.request()
     }
 
     fun resumeRendering() {
+        if (renderingResumed) return
+        renderingResumed = true
+        ImGuiBridge.invalidateView()
+        acceptingEvents = true
         onResume()
         frames.start()
         val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -70,13 +80,21 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     }
 
     fun pauseRendering() {
+        if (!renderingResumed) return
+        renderingResumed = false
+        ImGuiBridge.invalidateView()
+        acceptingEvents = false
         frames.stop()
         activePointer = MotionEvent.INVALID_POINTER_ID
         val events = synchronized(pending) { pending.toList().also { pending.clear() } }
         queueEvent {
             events.forEach { it() }
             ImGuiBridge.nativeVisibility(false)
+            ImGuiBridge.nativeRelease()
+            nativeReady = false
         }
+        // GLSurfaceView drains queued events before acknowledging pause.
+        // Release native view state on its owner thread, then discard EGL too.
         onPause()
         keyboard = false
         (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
@@ -84,19 +102,31 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     }
 
     fun stopRendering() {
+        pauseRendering()
+        acceptingEvents = false
         frames.stop()
         synchronized(pending) { pending.clear() }
         main.removeCallbacksAndMessages(null)
     }
 
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+    private fun ensureNative() {
+        if (nativeReady) return
         ImGuiBridge.nativeSurface(context.filesDir.absolutePath, resources.displayMetrics.density,
             ViewConfiguration.get(context).scaledTouchSlop.toFloat())
+        ImGuiBridge.nativeResize(width.coerceAtLeast(1), height.coerceAtLeast(1))
+        nativeReady = true
+    }
+
+    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        nativeReady = false
+        ensureNative()
     }
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         ImGuiBridge.nativeResize(width, height)
     }
     override fun onDrawFrame(gl: GL10?) {
+        if (!acceptingEvents) return
+        ensureNative()
         val epoch = frames.generation
         val events = synchronized(pending) { pending.toList().also { pending.clear() } }
         events.forEach { it() }
