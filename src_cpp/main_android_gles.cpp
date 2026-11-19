@@ -417,10 +417,35 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeSurface(JNIEnv* env, jclass type, jstring 
     }
     ImGui_ImplOpenGL3_Init("#version 300 es");
     renderer_initialized = true;
+    wake_ready.store(true, std::memory_order_release);
     last_frame = 0.0;
     ui_set_window_visible(true);
     ui_set_window_focused(true);
 }
+static void release_view_gpu() {
+    for (auto& entry : app_icons) {
+        if (entry.second.texture) glDeleteTextures(1, &entry.second.texture);
+        entry.second.texture = 0;
+    }
+    for (Texture& texture : textures) {
+        if (texture.id) glDeleteTextures(1, &texture.id);
+        texture = {};
+    }
+    if (renderer_initialized) ImGui_ImplOpenGL3_Shutdown();
+    renderer_initialized = false;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_ImGuiBridge_nativeSuspend(JNIEnv*, jclass) {
+    if (!initialized) return;
+    // Called on the GL thread before GLSurfaceView discards its EGL context.
+    // Keep ImGui and editor state alive until the Activity is destroyed.
+    wake_ready.store(false, std::memory_order_release);
+    input->reset();
+    release_view_gpu();
+    interaction_until = last_frame = 0.0;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeRelease(JNIEnv*, jclass) {
     if (!initialized) {
@@ -435,16 +460,8 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeRelease(JNIEnv*, jclass) {
     input.reset();
     UiText::reset_android_view();
     settings.reset();
-    for (auto& entry : app_icons) {
-        if (entry.second.texture) glDeleteTextures(1, &entry.second.texture);
-    }
+    release_view_gpu();
     decltype(app_icons){}.swap(app_icons);
-    for (Texture& texture : textures) {
-        if (texture.id) glDeleteTextures(1, &texture.id);
-        texture = {};
-    }
-    if (renderer_initialized) ImGui_ImplOpenGL3_Shutdown();
-    renderer_initialized = false;
     ImGui::DestroyContext();
     initialized = false;
     std::string{}.swap(clipboard);

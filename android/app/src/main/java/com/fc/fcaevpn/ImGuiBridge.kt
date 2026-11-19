@@ -129,6 +129,7 @@ object ImGuiBridge {
     @JvmStatic external fun nativeApps(packages: Array<String>, labels: Array<String>, search: Array<String>)
     @JvmStatic external fun nativeAppIcon(name: String, pixels: IntArray?)
     @JvmStatic external fun nativeSurface(directory: String, density: Float, touchSlop: Float)
+    @JvmStatic external fun nativeSuspend()
     @JvmStatic external fun nativeRelease()
     @JvmStatic external fun nativeResize(width: Int, height: Int)
     @JvmStatic external fun nativeFrame(): Int

@@ -90,11 +90,11 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
         queueEvent {
             events.forEach { it() }
             ImGuiBridge.nativeVisibility(false)
-            ImGuiBridge.nativeRelease()
+            ImGuiBridge.nativeSuspend()
             nativeReady = false
         }
         // GLSurfaceView drains queued events before acknowledging pause.
-        // Release native view state on its owner thread, then discard EGL too.
+        // Release GPU resources before EGL is discarded, retaining UI state.
         onPause()
         keyboard = false
         (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
@@ -103,6 +103,10 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
 
     fun stopRendering() {
         pauseRendering()
+        queueEvent {
+            ImGuiBridge.nativeRelease()
+            nativeReady = false
+        }
         acceptingEvents = false
         frames.stop()
         synchronized(pending) { pending.clear() }
