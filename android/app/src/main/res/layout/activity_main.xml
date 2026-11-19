@@ -1853,20 +1853,27 @@
                     android:paddingEnd="4dp">
 
                     <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:minWidth="64dp"
+                        android:layout_width="0dp"
+                        android:layout_height="32dp"
+                        android:layout_weight="1"
+                        android:gravity="center_vertical|start"
                         android:letterSpacing="0.12"
+                        android:maxLines="1"
+                        android:scrollHorizontally="false"
                         android:text="SPONSORS"
                         android:textColor="#FF8DB8FF"
-                        android:textSize="10sp"
-                        android:textStyle="bold" />
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:autoSizeTextType="uniform"
+                        android:autoSizeMinTextSize="9sp"
+                        android:autoSizeMaxTextSize="14sp"
+                        android:autoSizeStepGranularity="1sp" />
 
                     <TextView
                         android:id="@+id/sponsorPolicyLink"
                         android:layout_width="0dp"
                         android:layout_height="32dp"
-                        android:layout_weight="1"
+                        android:layout_weight="2"
                         android:ellipsize="end"
                         android:gravity="center"
                         android:maxLines="1"
