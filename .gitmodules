@@ -1,19 +1,19 @@
-[submodule "tun2socks"]
+[submodule "core/tun2socks"]
 	path = core/tun2socks
 	url = https://github.com/xjasonlyu/tun2socks.git
-[submodule "psiphon"]
+[submodule "core/psiphon"]
 	path = core/psiphon
 	url = https://github.com/Psiphon-Labs/psiphon-tunnel-core.git
-[submodule "zeptun"]
+[submodule "core/zeptun"]
 	path = core/zeptun
 	url = https://github.com/Noisemux/zeptun.git
-[submodule "hev-socks5-tunnel"]
+[submodule "core/hev-socks5-tunnel"]
 	path = core/hev-socks5-tunnel
 	url = https://github.com/heiher/hev-socks5-tunnel.git
-[submodule "imgui"]
+[submodule "src_cpp/imgui"]
 	path = src_cpp/imgui
 	url = https://github.com/ocornut/imgui.git
-[submodule "aether"]
+[submodule "core/aether"]
 	path = core/aether
 	url = https://github.com/CluvexStudio/aether.git
 [submodule "core/xray"]
