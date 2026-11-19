@@ -233,13 +233,13 @@ static id g_eventMonitor = nil;
     // function declares `style` too, and a window mask and an ImGuiStyle&
     // cannot share a scope.
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-                                | NSWindowStyleMaskMiniaturizable;
+                                | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
     self.window = [[NSWindow alloc] initWithContentRect:frame
                                              styleMask:styleMask
                                                backing:NSBackingStoreBuffered
                                                  defer:NO];
     self.window.title = @"FCAE VPN";
-    // No zoom or resize bits: the GLFW host pinned the window size the same way.
+    self.window.contentMinSize = NSMakeSize(480.0, 360.0);
     self.window.delegate = self;
     [self.window center];
 
@@ -430,6 +430,7 @@ static id g_eventMonitor = nil;
 - (void)mtkView:(MTKView*)view drawableSizeWillChange:(CGSize)size {
     (void)view;
     (void)size;
+    ui_request_redraw();
 }
 
 - (void)drawInMTKView:(MTKView*)view {

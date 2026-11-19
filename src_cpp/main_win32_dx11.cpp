@@ -130,6 +130,7 @@ static float window_dpi_scale(HWND hwnd) { return (float)window_dpi(hwnd) / 96.0
 // window grew 1.5x and the text inside it 1.5x again, so the layout overflowed.
 // One factor owns the scaling, and it is the user's ui_scale_percent, which
 // grows the text without moving the frame.
+static constexpr DWORD kWindowStyle = WS_OVERLAPPEDWINDOW;
 static constexpr int kWindowWidth  = 1280;
 static constexpr int kWindowHeight = 800;
 
@@ -166,7 +167,7 @@ static void place_window(int& x, int& y, int& width, int& height) {
     // Room for the frame: measured rather than guessed, because the caption and
     // border thicknesses change with the Windows version and the user's theme.
     RECT frame = {0, 0, width, height};
-    AdjustWindowRectEx(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+    AdjustWindowRectEx(&frame, kWindowStyle, FALSE, 0);
     const int frame_w = frame.right - frame.left;
     const int frame_h = frame.bottom - frame.top;
 
@@ -176,7 +177,7 @@ static void place_window(int& x, int& y, int& width, int& height) {
     if (height < 360) height = 360;
 
     frame = RECT{0, 0, width, height};
-    AdjustWindowRectEx(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+    AdjustWindowRectEx(&frame, kWindowStyle, FALSE, 0);
     const int size_w = frame.right - frame.left;
     const int size_h = frame.bottom - frame.top;
 
@@ -242,6 +243,14 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_SHOWWINDOW:
             ui_request_redraw();
             break;
+        case WM_GETMINMAXINFO: {
+            RECT minimum = {0, 0, 480, 360};
+            AdjustWindowRectEx(&minimum, kWindowStyle, FALSE, 0);
+            auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+            limits->ptMinTrackSize.x = minimum.right - minimum.left;
+            limits->ptMinTrackSize.y = minimum.bottom - minimum.top;
+            return 0;
+        }
         case WM_SIZE:
             // A restored/maximized window must be painted even if the render
             // gate had nothing new to show.
@@ -406,7 +415,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     int window_y = CW_USEDEFAULT;
     place_window(window_x, window_y, window_w, window_h);
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        kWindowStyle,
         window_x, window_y, window_w, window_h,
         nullptr, nullptr, inst, nullptr);
     if (!hWnd) {

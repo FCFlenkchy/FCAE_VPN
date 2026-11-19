@@ -170,6 +170,7 @@ private:
                 (GImGui->ActiveId == ImGui::GetWindowScrollbarID(GImGui->ActiveIdWindow, ImGuiAxis_X) ||
                  GImGui->ActiveId == ImGui::GetWindowScrollbarID(GImGui->ActiveIdWindow, ImGuiAxis_Y));
             const bool horizontal_control = direction == ImGuiAxis_X && GImGui->ActiveId &&
+                (!GImGui->ActiveIdWindow || GImGui->ActiveId != GImGui->ActiveIdWindow->MoveId) &&
                 (GImGui->ActiveIdUsingNavDirMask & ((1 << ImGuiDir_Left) | (1 << ImGuiDir_Right)));
             if (!scrolling_ && !scrollbar && !horizontal_control && std::max(std::abs(dx), std::abs(dy)) > slop_) {
                 axis_ = direction;

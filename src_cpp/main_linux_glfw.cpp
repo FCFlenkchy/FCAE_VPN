@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
     // Request dark window decorations (GNOME/KDE Wayland & X11 dark title bar)
 #ifdef GLFW_WAYLAND_APP_ID
@@ -130,6 +130,8 @@ int main(int argc, char** argv) {
         glfwTerminate();
         return 1;
     }
+    glfwSetWindowSizeLimits(window, 480, 360, GLFW_DONT_CARE, GLFW_DONT_CARE);
+    glfwSetFramebufferSizeCallback(window, [](GLFWwindow*, int, int) { ui_request_redraw(); });
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 

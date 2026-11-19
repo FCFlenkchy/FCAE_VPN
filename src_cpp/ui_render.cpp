@@ -1,4 +1,7 @@
 #include "ui_render.h"
+#if !defined(ANDROID) && !defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
+#include "imgui_horizontal_drag.h"
+#endif
 #if defined(ANDROID)
 #include "android_ui.h"
 #include "imgui_internal.h"
@@ -6187,4 +6190,8 @@ void render_ui() {
 
     ImGui::PopStyleVar(2);
     ImGui::End();
+#if !defined(ANDROID) && !defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
+    static ImGuiHorizontalDrag horizontal_drag;
+    if (horizontal_drag.update()) ui_request_redraw();
+#endif
 }
