@@ -178,6 +178,11 @@ class MainActivity : AppCompatActivity() {
                 require(uri.scheme == "https" && (uri.host in setOf("github.com", "t.me") || payload == "https://accounts.firefox.com/signup"))
                 startActivity(Intent(Intent.ACTION_VIEW, uri))
             } catch (_: Exception) { showError("Could not open the link.") }
+            "clipboardRead" -> {
+                val manager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val value = manager.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+                surface?.enqueue { ImGuiBridge.nativeClipboard(value) }
+            }
             "clipboard" -> (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                 .setPrimaryClip(ClipData.newPlainText("FCAE VPN", payload))
             "importRoutes" -> {

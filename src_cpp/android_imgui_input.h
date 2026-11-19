@@ -22,6 +22,22 @@ public:
         if (!rect.IsInverted()) drag_items_.push_back({window->ID, rect, GImGui->FrameCount});
     }
 
+    bool text_hold(ImGuiID id, const ImRect& rect) {
+        if (down_ && !forwarding_ && !scrolling_ && !suppress_tap_ &&
+            held_ >= 0.5f && rect.Contains(origin_) && tap_id_ == id) {
+            press();
+            text_selection_ = id;
+            return true;
+        }
+        return false;
+    }
+
+    bool text_menu(ImGuiID id) {
+        if (text_selection_ != id || down_) return false;
+        text_selection_ = 0;
+        return true;
+    }
+
     bool scrolling_window(ImGuiID id) const {
         return (down_ && touch_window_ == id) ||
             (window_id_ == id && (scrolling_ || std::abs(velocity_) > 1.0f));
@@ -63,6 +79,7 @@ public:
 
     void reset() {
         events_.clear();
+        text_selection_ = 0;
         if (GImGui) cancel_press();
         down_ = scrolling_ = forwarding_ = horizontal_owner_ = false;
         window_id_ = tab_bar_ = touch_window_ = 0;
@@ -72,6 +89,7 @@ public:
     }
 
     void new_frame(float dt) {
+        if (down_) held_ += dt;
         if (down_ && !forwarding_ && !scrolling_) {
             if (GImGui->FrameCount == capture_frame_) tap_id_ = GImGui->HoveredId;
             else if (GImGui->FrameCount > capture_frame_ && GImGui->HoveredId != tap_id_)
@@ -113,6 +131,8 @@ private:
     ImVec2 origin_{}, previous_{};
     ImVec2 raw_origin_{}, raw_previous_{}, raw_intent_{}, raw_velocity_{};
     double raw_time_ = 0.0;
+    ImGuiID text_selection_ = 0;
+    float held_ = 0.0f;
     float slop_ = 8.0f, velocity_ = 0.0f, scroll_position_ = 0.0f;
     int press_frame_ = -1, capture_frame_ = -1;
     bool down_ = false, scrolling_ = false, forwarding_ = false;
@@ -198,6 +218,8 @@ private:
             return;
         }
         if (event.action == Down) {
+            held_ = 0.0f;
+            text_selection_ = 0;
             origin_ = previous_ = event.pos;
             io.AddMousePosEvent(origin_.x, origin_.y);
             capture_frame_ = GImGui->FrameCount + 1;
@@ -228,6 +250,7 @@ private:
             return;
         }
         if (event.action == Cancel || (down_ && !valid_touch_window())) {
+            text_selection_ = 0;
             cancel_press();
             down_ = scrolling_ = forwarding_ = false;
             window_id_ = tab_bar_ = 0;

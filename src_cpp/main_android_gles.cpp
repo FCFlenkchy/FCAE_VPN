@@ -1,4 +1,5 @@
 #include "ui_render.h"
+#include "ui_text_input.h"
 #include "android_ui.h"
 #include "imgui_impl_opengl3.h"
 #include "android_imgui_input.h"
@@ -418,6 +419,76 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeResize(JNIEnv*, jclass, jint width, jint h
 }
 void android_ui_horizontal_drag_item() { input.horizontal_drag_item(); }
 bool android_ui_is_scrolling() { return input.scrolling_window(ImGui::GetCurrentWindow()->ID); }
+
+namespace UiText {
+namespace {
+ImGuiID select_on_activate = 0;
+int select_frame = 0;
+ImGuiID restore_id = 0;
+int selection_start = 0, selection_end = 0;
+ImGuiKey edit_key = ImGuiKey_None;
+int restore_frame = 0;
+}
+void prepare(const char* label) {
+    if (restore_id && GImGui->FrameCount > restore_frame + 6) {
+        restore_id = 0;
+        edit_key = ImGuiKey_None;
+    }
+    if (restore_id == ImGui::GetID(label)) ImGui::SetKeyboardFocusHere();
+}
+void finish(ImGuiInputTextFlags flags) {
+    if ((flags & ImGuiInputTextFlags_ReadOnly) ||
+        (GImGui->LastItemData.ItemFlags & ImGuiItemFlags_Disabled)) return;
+    ImGuiID id = ImGui::GetItemID();
+    ImGuiInputTextState* state = ImGui::GetInputTextState(id);
+    if (input.text_hold(id, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()))) {
+        android_ui_command("clipboardRead");
+        select_on_activate = id;
+        select_frame = GImGui->FrameCount;
+    }
+    if (select_on_activate == id && state && GImGui->ActiveId == id && GImGui->FrameCount > select_frame) {
+        state->SelectAll();
+        select_on_activate = 0;
+    }
+    if (restore_id == id && state && GImGui->ActiveId == id &&
+        GImGui->ActiveIdPreviousFrame == id && GImGui->FrameCount > restore_frame) {
+        state->SetSelection(selection_start, selection_end);
+        if (edit_key != ImGuiKey_None) {
+            ImGuiIO& io = ImGui::GetIO();
+            io.AddKeyEvent(ImGuiMod_Ctrl, true);
+            io.AddKeyEvent(edit_key, true);
+            io.AddKeyEvent(edit_key, false);
+            io.AddKeyEvent(ImGuiMod_Ctrl, false);
+        }
+        restore_id = 0;
+        edit_key = ImGuiKey_None;
+    }
+    ImGui::PushID(static_cast<int>(id));
+    if (input.text_menu(id) && state) {
+        selection_start = state->GetSelectionStart();
+        selection_end = state->GetSelectionEnd();
+        ImGui::OpenPopup("Text actions");
+    }
+    if (ImGui::BeginPopup("Text actions")) {
+        const bool password = (flags & ImGuiInputTextFlags_Password) != 0;
+        const bool selected = selection_start != selection_end;
+        ImGuiKey action = ImGuiKey_None;
+        bool select_all = ImGui::MenuItem("Select all");
+        if (ImGui::MenuItem("Copy", nullptr, false, selected && !password)) action = ImGuiKey_C;
+        if (ImGui::MenuItem("Cut", nullptr, false, selected && !password)) action = ImGuiKey_X;
+        const char* clipboard_text = ImGui::GetClipboardText();
+        if (ImGui::MenuItem("Paste", nullptr, false, clipboard_text && *clipboard_text)) action = ImGuiKey_V;
+        if (select_all || action != ImGuiKey_None) {
+            if (select_all && state) { selection_start = 0; selection_end = state->TextLen; }
+            restore_id = id;
+            restore_frame = GImGui->FrameCount;
+            edit_key = action;
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+}
+}
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {

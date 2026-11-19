@@ -1,3 +1,4 @@
+#include "ui_text_input.h"
 #include "ui_render.h"
 #if !defined(ANDROID) && !defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
 #include "imgui_horizontal_drag.h"
@@ -3331,7 +3332,7 @@ static void render_firefox_captcha_content() {
     } else {
         ImGui::TextWrapped("The CAPTCHA image is unavailable or uses an unsupported format.");
     }
-    ImGui::InputText("CAPTCHA answer", g_app.firefox_captcha_answer, sizeof(g_app.firefox_captcha_answer));
+    UiText::InputText("CAPTCHA answer", g_app.firefox_captcha_answer, sizeof(g_app.firefox_captcha_answer));
     if (ImGui::Button("Submit CAPTCHA answer")) {
         if (fcae_firefox_captcha_answer(g_app.firefox_captcha_id, g_app.firefox_captcha_answer)) {
             g_app.firefox_captcha_answer[0] = 0;
@@ -3789,7 +3790,7 @@ static void render_core_editor() {
     ImGui::TextDisabled("Name");
     ImGui::PushItemWidth(-FLT_MIN);
     // The engine's limit plus the terminator: typing past it does nothing.
-    changed |= ImGui::InputTextWithHint("##core_name", "a name for this config",
+    changed |= UiText::InputTextWithHint("##core_name", "a name for this config",
                                         s_core_name_buf, kMaxCoreConfigName + 1);
     ImGui::PopItemWidth();
     // Two cores, so both stay on screen: radio circles like Outbound IP version,
@@ -3815,8 +3816,8 @@ static void render_core_editor() {
     float text_height = ImGui::GetContentRegionAvail().y
         - ImGui::GetTextLineHeightWithSpacing() - ImGui::GetFrameHeightWithSpacing() - 8.0f;
     if (text_height < 160.0f) text_height = 160.0f;
-    changed |= ImGui::InputTextMultiline("##core_text", s_core_text_buf.data(),
-                                         s_core_text_buf.size(), ImVec2(-FLT_MIN, text_height));
+    changed |= UiText::InputTextMultiline("##core_text", s_core_text_buf.data(),
+                                         s_core_text_buf.size(), ImVec2(-FLT_MIN, text_height), ImGuiInputTextFlags_WordWrap);
     if (changed) core_config_check(s_core_editor_row);
     ImGui::TextColored(s_core_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
                                            : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
@@ -4051,7 +4052,7 @@ static void render_firefox_settings() {
     const std::string root = firefox_json_escape(data_dir().c_str());
     firefox_location_combo();
     ImGui::Spacing();
-    ImGui::InputTextWithHint("Firefox relay URL", "Optional HTTP or HTTPS URL", s_firefox_relay_url,
+    UiText::InputTextWithHint("Firefox relay URL", "Optional HTTP or HTTPS URL", s_firefox_relay_url,
         sizeof(s_firefox_relay_url));
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         s_firefox_relay_error = !fcae_firefox_relay_set(data_dir().c_str(), s_firefox_relay_url);
@@ -4065,7 +4066,7 @@ static void render_firefox_settings() {
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     listener_row("Firefox SOCKS5", &g_app.firefox_socks_enabled, &g_app.firefox_socks_port, 1, 65535);
     listener_row("Firefox HTTP", &g_app.firefox_http_enabled, &g_app.firefox_http_port, 1, 65535);
-    ImGui::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
+    UiText::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
     static const char* const firefox_transports[] = {"Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"};
     ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
     ImGui::EndChild();
@@ -4099,8 +4100,8 @@ static void render_firefox_add_account() {
     }
     s_firefox_captcha_embedded = true;
     render_firefox_captcha_content();
-    ImGui::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
-    ImGui::InputText("Password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
+    UiText::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
+    UiText::InputText("Password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
     ImGui::BeginDisabled(g_app.firefox_job != 0 || !g_app.firefox_email[0] || !g_app.firefox_password[0]);
     if (ImGui::Button("Sign in")) {
         const std::string root = firefox_json_escape(data_dir().c_str());
@@ -4156,7 +4157,7 @@ static void render_firefox_code_prompt() {
         ImGui::TextWrapped("Mozilla blocked this direct sign-in as unusual and sent an unblock code to %s.", g_app.firefox_email);
     }
     if (!email_link) {
-        ImGui::InputText(verification ? "Verification code" : "Unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
+        UiText::InputText(verification ? "Verification code" : "Unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
     }
     if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
     ImGui::BeginDisabled(g_app.firefox_job != 0 || (!email_link && !g_app.firefox_code[0]));
@@ -4360,7 +4361,7 @@ void render_ui() {
                 ImGui::Spacing();
                 ImGui::Text("Raw response:");
                 if (s_update_raw_body[0]) {
-                    ImGui::InputTextMultiline("##update_raw_body", s_update_raw_body,
+                    UiText::InputTextMultiline("##update_raw_body", s_update_raw_body,
                         sizeof(s_update_raw_body), ImVec2(540, 220), ImGuiInputTextFlags_ReadOnly);
                 } else {
                     ImGui::TextDisabled("(empty body)");
@@ -5642,7 +5643,7 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Upstream Proxy");
             ImGui::PushItemWidth(-FLT_MIN);
-            ImGui::InputTextWithHint("##upstream_proxy", "socks5://host:port or http://host:port",
+            UiText::InputTextWithHint("##upstream_proxy", "socks5://host:port or http://host:port",
                                      g_app.upstream_proxy, sizeof(g_app.upstream_proxy));
             ImGui::PopItemWidth();
             {
@@ -5697,7 +5698,7 @@ void render_ui() {
                     ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), "%s", tei[te_sel].unavailable_reason);
                 ImGui::Spacing();
                 ImGui::PushItemWidth(160);
-                ImGui::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
+                UiText::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
                 ImGui::PopItemWidth();
                 ImGui::Checkbox("Exclude private IPs", &g_app.tun_exclude_private);
 #if defined(ANDROID)
@@ -5714,15 +5715,15 @@ void render_ui() {
                 ImGui::Spacing();
                 ImGui::Text("TUN DNS (comma-separated IP addresses)");
                 ImGui::PushItemWidth(-1);
-                ImGui::InputTextWithHint("##tun_dns4", "IPv4 DNS — e.g. 1.1.1.1,1.0.0.1", g_app.tun_dns4, sizeof(g_app.tun_dns4));
-                ImGui::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111", g_app.tun_dns6, sizeof(g_app.tun_dns6));
+                UiText::InputTextWithHint("##tun_dns4", "IPv4 DNS — e.g. 1.1.1.1,1.0.0.1", g_app.tun_dns4, sizeof(g_app.tun_dns4));
+                UiText::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111", g_app.tun_dns6, sizeof(g_app.tun_dns6));
                 ImGui::PopItemWidth();
                 if (g_app.tun_engine == 0) {
                     ImGui::Spacing();
                     ImGui::Text("tun2socks TCP settings");
                     ImGui::PushItemWidth(160);
-                    ImGui::InputText("TCP send buffer (bytes)", g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf));
-                    ImGui::InputText("TCP receive buffer (bytes)", g_app.tun_tcp_rcvbuf, sizeof(g_app.tun_tcp_rcvbuf));
+                    UiText::InputText("TCP send buffer (bytes)", g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf));
+                    UiText::InputText("TCP receive buffer (bytes)", g_app.tun_tcp_rcvbuf, sizeof(g_app.tun_tcp_rcvbuf));
                     ImGui::PopItemWidth();
                     ImGui::Checkbox("TCP auto-tuning", &g_app.tun_tcp_auto_tuning);
                     if (!fcae_parse_tcp_buffer_size(g_app.tun_tcp_sndbuf) || !fcae_parse_tcp_buffer_size(g_app.tun_tcp_rcvbuf))
@@ -5738,9 +5739,9 @@ void render_ui() {
             ImGui::Checkbox("ECH", &g_app.ech_enabled);
             if (g_app.ech_enabled) {
                 ImGui::PushItemWidth(260);
-                ImGui::InputTextWithHint("ECH resolver", "udp://1.1.1.1 | tcp:// | https:// DoH",
+                UiText::InputTextWithHint("ECH resolver", "udp://1.1.1.1 | tcp:// | https:// DoH",
                                          g_app.ech_dns, sizeof(g_app.ech_dns));
-                ImGui::InputTextWithHint("ECH domain", "cloudflare-ech.com",
+                UiText::InputTextWithHint("ECH domain", "cloudflare-ech.com",
                                          g_app.ech_domain, sizeof(g_app.ech_domain));
                 ImGui::PopItemWidth();
                 ImGui::TextDisabled("Without a usable ECH key the tunnel does not start.");
@@ -5748,12 +5749,12 @@ void render_ui() {
             ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
             if (g_app.protocol == 6) {
                 ImGui::PushItemWidth(260);
-                ImGui::InputTextWithHint("Inner WireGuard endpoint", "auto (ip:port)",
+                UiText::InputTextWithHint("Inner WireGuard endpoint", "auto (ip:port)",
                                          g_app.gool_inner, sizeof(g_app.gool_inner));
                 ImGui::PopItemWidth();
             }
             ImGui::Spacing();
-            ImGui::InputTextWithHint("Force peer (optional)", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
+            UiText::InputTextWithHint("Force peer (optional)", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
             ImGui::Combo("Performance profile", &g_app.sys_profile, sysprofiles, 4);
@@ -5926,7 +5927,7 @@ void render_ui() {
             ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);
             // Writable even with "No bridges": pasted lines override the
             // built-in set once a bridge family is picked; empty = "auto".
-            ImGui::InputTextMultiline("##tor_bridge_lines", g_app.tor_bridge_lines,
+            UiText::InputTextMultiline("##tor_bridge_lines", g_app.tor_bridge_lines,
                                       sizeof(g_app.tor_bridge_lines), ImVec2(0, 60));
             ImGui::EndChild();
             ImGui::EndTabItem();
@@ -5936,20 +5937,20 @@ void render_ui() {
             ImGui::BeginChild("##zt_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Cloudflare Zero Trust (Teams)");
-            ImGui::InputTextWithHint("##team_name", "team-name", g_app.team_name, sizeof(g_app.team_name));
+            UiText::InputTextWithHint("##team_name", "team-name", g_app.team_name, sizeof(g_app.team_name));
             ImGui::SameLine();
             ImGui::Text("Team");
             ImGui::Spacing();
             ImGui::Text("Authentication (choose one):");
-            ImGui::InputTextWithHint("##access_token", "JWT token from enrolment page", g_app.access_token, sizeof(g_app.access_token));
+            UiText::InputTextWithHint("##access_token", "JWT token from enrolment page", g_app.access_token, sizeof(g_app.access_token));
             ImGui::TextDisabled("Access Token (copy token=... from login page)");
             ImGui::Spacing();
             ImGui::Text("--- or Service Token ---");
-            ImGui::InputTextWithHint("##access_client_id", "Client ID", g_app.access_client_id, sizeof(g_app.access_client_id));
-            ImGui::InputTextWithHint("##access_client_secret", "Client Secret", g_app.access_client_secret, sizeof(g_app.access_client_secret));
+            UiText::InputTextWithHint("##access_client_id", "Client ID", g_app.access_client_id, sizeof(g_app.access_client_id));
+            UiText::InputTextWithHint("##access_client_secret", "Client Secret", g_app.access_client_secret, sizeof(g_app.access_client_secret));
             ImGui::Spacing();
             ImGui::Text("--- or Email OTP ---");
-            ImGui::InputTextWithHint("##access_email", "user@example.com", g_app.access_email, sizeof(g_app.access_email));
+            UiText::InputTextWithHint("##access_email", "user@example.com", g_app.access_email, sizeof(g_app.access_email));
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
@@ -5958,7 +5959,7 @@ void render_ui() {
             ImGui::BeginChild("##routes_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Routing Rules File (Aether only)");
-            ImGui::InputTextWithHint("##routes_file", "path/to/routes.txt", g_app.routes_file, sizeof(g_app.routes_file));
+            UiText::InputTextWithHint("##routes_file", "path/to/routes.txt", g_app.routes_file, sizeof(g_app.routes_file));
 #if defined(ANDROID)
             if (ImGui::Button("Choose routing rules file")) android_ui_command("importRoutes");
 #endif
@@ -5968,7 +5969,7 @@ void render_ui() {
             ImGui::Spacing();
             ImGui::Text("Inline Routing Rules (Aether only; comma-separated)");
             ImGui::PushItemWidth(-1);
-            ImGui::InputTextMultiline("##routes_inline", g_app.routes_inline, sizeof(g_app.routes_inline),
+            UiText::InputTextMultiline("##routes_inline", g_app.routes_inline, sizeof(g_app.routes_inline),
                 ImVec2(0, 100), ImGuiInputTextFlags_AllowTabInput);
             ImGui::PopItemWidth();
             ImGui::TextDisabled("Format: [direct]ip:190.9.2.4,192.33.45.6:400,domain.com [block]gazo.com,10.0.0.0/8,...");
@@ -6024,16 +6025,16 @@ void render_ui() {
             ImGui::Checkbox("Disable session tickets", &g_app.disable_session_ticket);
             ImGui::Checkbox("Disable extension permutation", &g_app.disable_extension_permutation);
             ImGui::PushItemWidth(-1);
-            ImGui::InputTextWithHint("##tls_ciphers", "TLS 1.2 ciphers (default: Chrome's)",
+            UiText::InputTextWithHint("##tls_ciphers", "TLS 1.2 ciphers (default: Chrome's)",
                                      g_app.tls_ciphers, sizeof(g_app.tls_ciphers));
-            ImGui::InputTextWithHint("##tls13_ciphers", "TLS 1.3 ciphers", g_app.tls13_ciphers, sizeof(g_app.tls13_ciphers));
-            ImGui::InputTextWithHint("##tls_groups", "TLS groups", g_app.tls_groups, sizeof(g_app.tls_groups));
-            ImGui::InputTextWithHint("##tls_key_shares", "TLS key-share groups", g_app.tls_key_shares, sizeof(g_app.tls_key_shares));
-            ImGui::InputTextWithHint("##tls_sigalgs", "TLS signature algorithms", g_app.tls_sigalgs, sizeof(g_app.tls_sigalgs));
-            ImGui::InputTextWithHint("##tls_cert_compression", "Certificate compression (zlib:brotli:zstd)", g_app.tls_cert_compression, sizeof(g_app.tls_cert_compression));
-            ImGui::InputTextWithHint("##tls_alps", "ALPS mode (new or old)", g_app.tls_alps, sizeof(g_app.tls_alps));
-            ImGui::InputTextWithHint("##tls_trust_anchors", "Trust-anchor OIDs", g_app.tls_trust_anchors, sizeof(g_app.tls_trust_anchors));
-            ImGui::InputTextWithHint("##tls_server_padding", "Server padding (0-65535)", g_app.tls_server_padding, sizeof(g_app.tls_server_padding));
+            UiText::InputTextWithHint("##tls13_ciphers", "TLS 1.3 ciphers", g_app.tls13_ciphers, sizeof(g_app.tls13_ciphers));
+            UiText::InputTextWithHint("##tls_groups", "TLS groups", g_app.tls_groups, sizeof(g_app.tls_groups));
+            UiText::InputTextWithHint("##tls_key_shares", "TLS key-share groups", g_app.tls_key_shares, sizeof(g_app.tls_key_shares));
+            UiText::InputTextWithHint("##tls_sigalgs", "TLS signature algorithms", g_app.tls_sigalgs, sizeof(g_app.tls_sigalgs));
+            UiText::InputTextWithHint("##tls_cert_compression", "Certificate compression (zlib:brotli:zstd)", g_app.tls_cert_compression, sizeof(g_app.tls_cert_compression));
+            UiText::InputTextWithHint("##tls_alps", "ALPS mode (new or old)", g_app.tls_alps, sizeof(g_app.tls_alps));
+            UiText::InputTextWithHint("##tls_trust_anchors", "Trust-anchor OIDs", g_app.tls_trust_anchors, sizeof(g_app.tls_trust_anchors));
+            UiText::InputTextWithHint("##tls_server_padding", "Server padding (0-65535)", g_app.tls_server_padding, sizeof(g_app.tls_server_padding));
             ImGui::PopItemWidth();
             ImGui::EndChild();
             ImGui::EndTabItem();
@@ -6047,18 +6048,18 @@ void render_ui() {
             ImGui::Combo("Scan mode", &g_app.scan_mode, modes, 5);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("MASQUE SNI");
-            ImGui::InputText("##sni", g_app.sni, sizeof(g_app.sni));
+            UiText::InputText("##sni", g_app.sni, sizeof(g_app.sni));
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("WARP API");
-            ImGui::InputTextWithHint("##api_address", "Address (default: built-in)",
+            UiText::InputTextWithHint("##api_address", "Address (default: built-in)",
                                      g_app.api_address, sizeof(g_app.api_address));
-            ImGui::InputTextWithHint("##api_host", "HTTP host (optional)",
+            UiText::InputTextWithHint("##api_host", "HTTP host (optional)",
                                      g_app.api_host, sizeof(g_app.api_host));
-            ImGui::InputTextWithHint("##api_sni", "TLS SNI (optional)",
+            UiText::InputTextWithHint("##api_sni", "TLS SNI (optional)",
                                      g_app.api_sni, sizeof(g_app.api_sni));
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Exit Countries");
-            ImGui::InputTextWithHint("##exit_loc", "any (DE,SE accepts / !IR,RU refuses)",
+            UiText::InputTextWithHint("##exit_loc", "any (DE,SE accepts / !IR,RU refuses)",
                                      g_app.exit_loc, sizeof(g_app.exit_loc));
             ImGui::EndChild();
             ImGui::EndTabItem();

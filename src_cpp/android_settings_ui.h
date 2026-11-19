@@ -1,4 +1,5 @@
 #pragma once
+#include "ui_text_input.h"
 
 #include "ui_render.h"
 #include "imgui_internal.h"
@@ -80,7 +81,7 @@ public:
         bool opened = true;
         if (!ImGui::BeginPopupModal(title, &opened, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) return;
         ImGui::SetNextItemWidth(-FLT_MIN);
-        if (ImGui::InputTextWithHint("##app_search", "Search by app or package name", query_, sizeof(query_))) {
+        if (UiText::InputTextWithHint("##app_search", "Search by app or package name", query_, sizeof(query_))) {
             folded_query_ = fold_(query_);
             filter_dirty_ = true;
             reset_scroll_ = true;
