@@ -77,25 +77,13 @@ static std::vector<int> parse_chain_transports(const std::string& value) {
 AppState g_app;
 static uint64_t s_save_status_revision = 0;
 static uint64_t s_save_status_painted_revision = 0;
-static bool s_save_status_error = false;
-
-static void set_save_status_v(bool error, const char* format, va_list args) {
-    vsnprintf(g_app.save_status, sizeof(g_app.save_status), format, args);
-    s_save_status_error = error;
-    ++s_save_status_revision;
-    ui_request_redraw();
-}
-static void set_save_status(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    set_save_status_v(false, format, args);
-    va_end(args);
-}
 static void set_save_status_error(const char* format, ...) {
     va_list args;
     va_start(args, format);
-    set_save_status_v(true, format, args);
+    vsnprintf(g_app.save_status, sizeof(g_app.save_status), format, args);
     va_end(args);
+    ++s_save_status_revision;
+    ui_request_redraw();
 }
 static bool s_loaded_chain_transports = false;
 static bool s_loaded_socks_port = false;
@@ -694,7 +682,6 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.routes_file);
     h = fnv_cstr(h, g_app.routes_inline);
     h = fnv_cstr(h, g_app.save_status);
-    h = fnv_value(h, s_save_status_error);
     h = fnv_cstr(h, g_app.copy_status);
     h = fnv_value(h, g_app.start_busy.load());
 
@@ -858,7 +845,6 @@ static void expire_save_status(double now) {
     }
     if (deadline && now >= deadline) {
         g_app.save_status[0] = 0;
-        s_save_status_error = false;
         deadline = 0.0;
     }
 }
@@ -1634,7 +1620,6 @@ static bool save_config(bool quiet = false) {
     }
     s_config_needs_retry = false;
     if (!quiet) {
-        set_save_status("Config saved!");
         g_app.add_log(4, ("[ui] config saved: " + path).c_str());
     }
     return true;
@@ -2097,7 +2082,6 @@ void ui_init() {
                 // Android). AppState defaults mode = 1, so a fresh install starts in
                 // TUN (full-system) mode on every desktop platform; a saved config
                 // keeps whatever the user last chose.
-                set_save_status("Created FCAE_VPN.cfg");
                 g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
             }
         }
@@ -4489,7 +4473,6 @@ void render_ui() {
                     save_config();
                     wchar_t exe_path[MAX_PATH] = {};
                     GetModuleFileNameW(NULL, exe_path, MAX_PATH);
-                    set_save_status("Waiting for administrator consent…");
                     fcae_ui_diagnostic(2, 0);
                     // The decision to exit is published here and acted on by
                     // the window thread: PostQuitMessage only affects the thread
@@ -4517,7 +4500,6 @@ void render_ui() {
                                 "This copy will exit in ~1s.",
                                 static_cast<unsigned long>(child_pid));
                             g_app.add_log(FCAE_LOG_INFO, msg);
-                            set_save_status("Restarting elevated -- this copy will close");
                             // Hand-off window: the elevated copy waits for this
                             // process to exit (--fcae-wait-parent), so the delay
                             // only needs to let UAC dismiss and the new instance
@@ -4800,9 +4782,7 @@ void render_ui() {
             ImGui::SetCursorPosY(status_y + (kActionRowHeight - ImGui::GetFrameHeight()) * 0.5f);
             ImGui::BeginGroup();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(s_save_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
-                                                   : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
-                               "%s", g_app.save_status);
+            ImGui::TextColored(ImVec4(0.95f, 0.38f, 0.38f, 1.0f), "%s", g_app.save_status);
             ImGui::EndGroup();
             s_save_status_painted_revision = s_save_status_revision;
         }
