@@ -32,10 +32,10 @@ pub struct TunUndo {
 
 /// Apply addresses, routes and DNS for a freshly created device.
 pub fn configure(cfg: &SessionConfig, peer_ip: Option<&str>) -> Result<TunUndo> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let _ = (cfg, peer_ip);
-        log::info!("[tun2socks] Android: VpnService owns routing/DNS; nothing to configure natively");
+        log::info!("[tun2socks] system VPN provider owns routing/DNS; nothing to configure natively");
         Ok(TunUndo::default())
     }
     #[cfg(windows)]
@@ -57,7 +57,7 @@ pub fn configure(cfg: &SessionConfig, peer_ip: Option<&str>) -> Result<TunUndo> 
             .ok_or_else(|| CoreError::Internal("tun2socks created no utun device".into()))?;
         Ok(TunUndo { _unix: Some(fcae_runtime::unix_tun::TunGuard::configure(cfg, &name, peer_ip, true)?) })
     }
-    #[cfg(not(any(target_os = "android", windows, target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = (cfg, peer_ip);
         Ok(TunUndo::default())

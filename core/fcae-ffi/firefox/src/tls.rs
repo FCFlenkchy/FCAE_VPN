@@ -80,7 +80,7 @@ fn configuration(alpn: &[u8], host: &str) -> Result<ConnectConfiguration> {
     fingerprint
         .apply(&mut builder, alpn)
         .map_err(|error| FirefoxError::Protocol(format!("configuring Firefox TLS fingerprint: {error}")))?;
-    if cfg!(any(target_os = "windows", target_os = "macos")) || is_fastly_proxy(host) || is_mozilla_service(host) {
+    if cfg!(any(target_os = "windows", target_os = "macos", target_os = "ios")) || is_fastly_proxy(host) || is_mozilla_service(host) {
         // BoringSSL default paths do not load native Windows or macOS stores.
         // Use Mozilla roots for its services and retain certificate and hostname checks.
         builder.set_cert_store_ref(mozilla_roots()?);
@@ -145,7 +145,7 @@ pub fn firefox_user_agent() -> String {
 pub(crate) fn firefox_user_agent_for_major(major: u16) -> String {
     let platform = if cfg!(target_os = "windows") || cfg!(target_os = "android") {
         "Windows NT 10.0; Win64; x64"
-    } else if cfg!(target_os = "macos") {
+    } else if cfg!(any(target_os = "macos", target_os = "ios")) {
         "Macintosh; Intel Mac OS X 10.15"
     } else if cfg!(target_arch = "aarch64") {
         "X11; Linux aarch64"

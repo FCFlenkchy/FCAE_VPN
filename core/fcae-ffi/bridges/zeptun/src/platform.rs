@@ -5,9 +5,9 @@
 //! owns the device. The admin/root probe lives in [`fcae_runtime::privilege`];
 //! the Wintun DLL loader lives in [`fcae_runtime::windows_dll`].
 
-/// True when building for the mobile preset (Android: VpnService-created fd).
-pub const fn is_android() -> bool {
-    cfg!(target_os = "android")
+/// Mobile hosts own interface creation, addresses, routing and DNS.
+pub const fn is_mobile() -> bool {
+    cfg!(any(target_os = "android", target_os = "ios"))
 }
 
 /// Close the device-fd dup after a failed `zeptun_create`: the engine never

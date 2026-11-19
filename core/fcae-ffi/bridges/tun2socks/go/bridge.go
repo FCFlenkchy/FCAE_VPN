@@ -1197,8 +1197,14 @@ func init() {
 
 func applyHeapPolicy() {
 	heapOnce.Do(func() {
-		debug.SetGCPercent(heapGCPercent)
-		debug.SetMemoryLimit(heapSoftLimit)
+		if runtime.GOOS == "ios" {
+			// Network Extensions have a much smaller process budget than app hosts.
+			debug.SetGCPercent(20)
+			debug.SetMemoryLimit(32 << 20)
+		} else {
+			debug.SetGCPercent(heapGCPercent)
+			debug.SetMemoryLimit(heapSoftLimit)
+		}
 	})
 }
 

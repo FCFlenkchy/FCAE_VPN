@@ -50,7 +50,7 @@ pub struct HevStats {
 /// `tunnel.ipv4`/`tunnel.ipv6` take bare addresses: the engine derives the
 /// netmask itself (`inet_pton` plus a fixed /32 and /128), so a CIDR from the
 /// session config is reduced to its address.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) fn bare_address(cidr: &str) -> &str {
     cidr.split('/').next().unwrap_or(cidr)
 }
@@ -194,7 +194,7 @@ pub(crate) fn relay_engine_log(t2s_log_level: u8) -> Option<LogRelay> {
 }
 
 pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: std::net::SocketAddr) -> fcae_runtime::error::Result<(std::net::SocketAddr, String)> {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if cfg.tun.name.is_empty() || cfg.tun.name.len() > 63 || cfg.tun.name.chars().any(char::is_control) {
         return Err(fcae_runtime::error::CoreError::InvalidConfig(
             "HEV TUN name must be 1–63 UTF-8 bytes without control characters".into(),
@@ -207,7 +207,7 @@ pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: 
     yaml.push_str(&format!("  guid: {}\n", crate::WINTUN_ADAPTER_GUID));
     yaml.push_str(&format!("  mtu: {}\n", cfg.tun.mtu));
     yaml.push_str("  multi-queue: false\n");
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         yaml.push_str(&format!("  ipv4: {}\n", bare_address(&cfg.tun.ipv4)));
         if let Some(ipv6) = &cfg.tun.ipv6 {

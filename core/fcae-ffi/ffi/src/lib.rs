@@ -178,9 +178,9 @@ impl TunEngines {
             // registered means the service is not attached to the engine any
             // more, which a reconnect fixes -- so it is not the same failure as
             // the system refusing, and it must not read like a dead end.
-            return if cfg!(target_os = "android") {
+            return if cfg!(any(target_os = "android", target_os = "ios")) {
                 Err(CoreError::StartFailed(
-                    "the VPN service is not attached to the engine; reconnect".into(),
+                    "the system VPN provider is not attached to the engine; reconnect".into(),
                 ))
             } else {
                 Ok(None)
@@ -898,7 +898,10 @@ pub unsafe extern "C" fn fcae_get_telemetry(out: *mut FcaeTelemetry) -> FcaeStat
     })
 }
 
-/// Supply the Android VpnService file descriptor.
+/// Supply a host-owned VPN data-plane descriptor.
+///
+/// On iOS this must come from a public packet-flow adapter; do not extract a
+/// private descriptor from NEPacketTunnelFlow. The host owns routes and DNS.
 ///
 /// The library **dups** this descriptor and closes only its own copy, so the
 /// JVM's `ParcelFileDescriptor` remains the sole owner — this is what removes

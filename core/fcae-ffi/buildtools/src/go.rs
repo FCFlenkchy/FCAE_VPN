@@ -31,7 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::target::{Os, Target};
+use crate::target::{Arch, Os, Target};
 
 /// A Go c-archive build request.
 pub struct CArchive<'a> {
@@ -125,9 +125,13 @@ impl<'a> CArchive<'a> {
     fn go_bin() -> Result<String, GoError> {
         for candidate in [
             std::env::var("GO_BIN").ok(),
-            std::env::var("GOROOT")
-                .ok()
-                .map(|r| PathBuf::from(r).join("bin").join("go").display().to_string()),
+            std::env::var("GOROOT").ok().map(|r| {
+                PathBuf::from(r)
+                    .join("bin")
+                    .join("go")
+                    .display()
+                    .to_string()
+            }),
             Some("go".to_string()),
         ]
         .into_iter()
@@ -144,6 +148,7 @@ impl<'a> CArchive<'a> {
 
     /// Resolve the C compiler cgo should use for this target.
     pub fn cc_for(target: Target, android_api: u32) -> Result<String, GoError> {
+        validate_ios_target(target)?;
         // An explicit override always wins.
         if let Ok(cc) = std::env::var("CGO_CC") {
             return Ok(cc);
@@ -181,6 +186,7 @@ impl<'a> CArchive<'a> {
                 }
                 Ok(cc.display().to_string())
             }
+            Os::Ios => ios_compiler(),
             Os::Windows if !cfg!(target_os = "windows") => {
                 // Cross-compiling to Windows: MinGW, the x86_64-pc-windows-gnu toolchain.
                 Ok("x86_64-w64-mingw32-gcc".into())
@@ -191,12 +197,7 @@ impl<'a> CArchive<'a> {
 
     /// Run an auxiliary `go` subcommand (module resolution, etc.) in
     /// `module_dir`, surfacing its stderr verbatim when it fails.
-    fn run_go_step(
-        go: &str,
-        module_dir: &Path,
-        args: &[&str],
-        what: &str,
-    ) -> Result<(), GoError> {
+    fn run_go_step(go: &str, module_dir: &Path, args: &[&str], what: &str) -> Result<(), GoError> {
         crate::note(format!("{what}..."));
         let output = Command::new(go)
             .current_dir(module_dir)
@@ -273,9 +274,7 @@ impl<'a> CArchive<'a> {
                 &["mod", "tidy"],
                 "resolve Go dependencies (go mod tidy)",
             )?;
-            crate::note(
-                "go.sum refreshed -- commit it so the build is reproducible",
-            );
+            crate::note("go.sum refreshed -- commit it so the build is reproducible");
         } else {
             crate::note("using the committed go.sum (set FCAE_GO_TIDY=1 to refresh)");
         }
@@ -292,9 +291,7 @@ impl<'a> CArchive<'a> {
             // Android ONLY: `-z max-page-size` is an ELF concept. Passing it
             // on Windows reaches mingw's ld, which rejects `-z` outright
             // ("unrecognized option '-z'") and fails the link.
-            ldflags.push(
-                "-extldflags=-Wl,-z,max-page-size=16384,-z,common-page-size=16384".into(),
-            );
+            ldflags.push("-extldflags=-Wl,-z,max-page-size=16384,-z,common-page-size=16384".into());
         }
 
         let mut cmd = Command::new(&go);
@@ -317,6 +314,10 @@ impl<'a> CArchive<'a> {
             .env("GOOS", self.target.goos())
             .env("GOARCH", self.target.goarch())
             .env("CC", &cc);
+
+        if self.target.os == Os::Ios && Path::new(&cc).is_file() {
+            cmd.env("CC", format!("'{}'", cc.replace('\'', "'\\''")));
+        }
 
         // Build against the committed graph. Without this an incomplete
         // go.sum would be silently amended mid-build, which is the
@@ -344,7 +345,10 @@ impl<'a> CArchive<'a> {
                 format!("-Wl,-z,max-page-size=16384 -Wl,-soname,{soname}"),
             );
         }
-        if self.target.is_apple() {
+        if self.target.os == Os::Ios {
+            configure_ios_cgo(&mut cmd)?;
+        }
+        if self.target.os == Os::MacOS {
             if let Ok(v) = std::env::var("MACOSX_DEPLOYMENT_TARGET") {
                 cmd.env("MACOSX_DEPLOYMENT_TARGET", v);
             }
@@ -403,9 +407,7 @@ impl Built {
                 target.goarch()
             ))
         })?;
-        let dest_dir = repo_root
-            .join("android/app/src/main/jniLibs")
-            .join(abi);
+        let dest_dir = repo_root.join("android/app/src/main/jniLibs").join(abi);
         std::fs::create_dir_all(&dest_dir)
             .map_err(|e| GoError::Build(format!("could not create {}: {e}", dest_dir.display())))?;
 
@@ -458,9 +460,9 @@ impl Built {
                     // Go runtime.
                     "ws2_32", "winmm", "ntdll", "userenv", "iphlpapi", "bcrypt",
                     // Core Win32 used across the dependency tree.
-                    "advapi32", "kernel32", "psapi", "crypt32", "secur32",
-                    "mswsock", "shell32", "user32", "dnsapi", "wintrust",
-                    "version", "netapi32", "wtsapi32", "setupapi", "cfgmgr32",
+                    "advapi32", "kernel32", "psapi", "crypt32", "secur32", "mswsock", "shell32",
+                    "user32", "dnsapi", "wintrust", "version", "netapi32", "wtsapi32", "setupapi",
+                    "cfgmgr32",
                     // COM / OLE (go-ole).
                     //
                     // combase is deliberately absent: mingw-w64 ships no
@@ -468,8 +470,7 @@ impl Built {
                     // "cannot find -lcombase". Everything go-ole actually
                     // resolves at link time lives in ole32/oleaut32; the rest
                     // it loads lazily through LoadLibrary at runtime.
-                    "ole32", "oleaut32",
-                    // Performance counters (gopsutil).
+                    "ole32", "oleaut32", // Performance counters (gopsutil).
                     "pdh",
                 ] {
                     println!("cargo:rustc-link-lib=dylib={l}");
@@ -508,7 +509,10 @@ pub fn track_sources(dir: &Path) {
                 if !matches!(name, ".git" | "testdata" | "vendor") {
                     walk(&p, depth + 1);
                 }
-            } else if p.extension().and_then(|s| s.to_str()).is_some_and(|e| e == "go")
+            } else if p
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|e| e == "go")
                 || p.file_name()
                     .and_then(|s| s.to_str())
                     .is_some_and(|n| n == "go.mod" || n == "go.sum")
@@ -518,4 +522,77 @@ pub fn track_sources(dir: &Path) {
         }
     }
     walk(dir, 0);
+}
+
+fn validate_ios_target(target: Target) -> Result<(), GoError> {
+    if target.os == Os::Ios
+        && (target.arch != Arch::Aarch64
+            || std::env::var("TARGET").is_ok_and(|value| value != "aarch64-apple-ios"))
+    {
+        return Err(GoError::Build(
+            "the iOS core build supports arm64 physical devices only (aarch64-apple-ios)".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn iphoneos_xcrun(arguments: &[&str]) -> Result<String, GoError> {
+    let output = Command::new("xcrun")
+        .arg("--sdk")
+        .arg("iphoneos")
+        .args(arguments)
+        .output()
+        .map_err(|error| {
+            GoError::CcMissing(format!(
+                "iOS builds require Xcode and its iPhoneOS SDK: {error}"
+            ))
+        })?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || value.is_empty() {
+        return Err(GoError::CcMissing(format!(
+            "xcrun iphoneos failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(value)
+}
+
+fn ios_compiler() -> Result<String, GoError> {
+    iphoneos_xcrun(&["--find", "clang"])
+}
+
+fn configure_ios_cgo(command: &mut Command) -> Result<(), GoError> {
+    let sdk = iphoneos_xcrun(&["--show-sdk-path"])?;
+    if !PathBuf::from(&sdk).is_dir() {
+        return Err(GoError::CcMissing(format!(
+            "iPhoneOS SDK does not exist: {sdk}"
+        )));
+    }
+    let minimum = std::env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "15.0".into());
+    let parts: Vec<_> = minimum.split('.').collect();
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+        || parts[0].parse::<u32>().map_or(true, |major| major < 15)
+    {
+        return Err(GoError::Build(
+            "IPHONEOS_DEPLOYMENT_TARGET must be a numeric version >= 15.0".into(),
+        ));
+    }
+    let quoted_sdk = format!("'{}'", sdk.replace('\'', "'\\''"));
+    let flags = format!("-target arm64-apple-ios{minimum} -isysroot {quoted_sdk}");
+    for key in ["CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS"] {
+        let existing = std::env::var(key).unwrap_or_default();
+        command.env(key, format!("{existing} {flags}"));
+    }
+    command
+        .env("SDKROOT", sdk)
+        .env("IPHONEOS_DEPLOYMENT_TARGET", minimum)
+        .env(
+            "CXX",
+            format!("\"{}\"", iphoneos_xcrun(&["--find", "clang++"])?),
+        );
+    command.env_remove("MACOSX_DEPLOYMENT_TARGET");
+    Ok(())
 }

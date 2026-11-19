@@ -405,6 +405,11 @@ impl Tun2SocksBridge {
             return Ok((format!("fd://{dup}"), Some(dup)));
         }
 
+        #[cfg(target_os = "ios")]
+        return Err(CoreError::PermissionDenied(
+            "iOS requires a data-plane descriptor supplied by the Network Extension host".into(),
+        ));
+
         // Desktop: tun2socks creates the device itself.
         #[cfg(windows)]
         {
@@ -416,7 +421,7 @@ impl Tun2SocksBridge {
                 None,
             ))
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "ios")))]
         {
             Ok((format!("tun://{}", cfg.tun.name), None))
         }

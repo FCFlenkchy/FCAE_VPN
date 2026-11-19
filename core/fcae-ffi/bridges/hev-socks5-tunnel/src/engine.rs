@@ -518,6 +518,12 @@ impl HevSocks5TunnelBridge {
         // engine's UDP gateway instead.
         let (psiphon_adapter, socks) = fcae_runtime::exit_adapter::psiphon_socks5p(cfg, endpoints, "hev")?;
         let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);
+        #[cfg(target_os = "ios")]
+        if fd < 0 {
+            return Err(CoreError::PermissionDenied(
+                "HEV on iOS requires a data-plane descriptor from the Network Extension host".into(),
+            ));
+        }
         #[cfg(windows)]
         // HEV can only create its adapter (it always passes the shared requested
         // GUID); Wintun keeps one persistent device identity for that GUID, so

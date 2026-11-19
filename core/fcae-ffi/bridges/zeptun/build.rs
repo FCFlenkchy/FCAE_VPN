@@ -177,6 +177,8 @@ fn locate_lib_dir(submodule: &Path, target: Target) -> PathBuf {
         submodule
             .join("zig-out/android/prebuilt")
             .join(android_abi_dir(target.arch))
+    } else if target.os == Os::Ios {
+        submodule.join("zig-out/ios/ios-arm64")
     } else {
         submodule.join("zig-out/lib")
     }

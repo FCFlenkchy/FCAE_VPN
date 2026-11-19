@@ -157,7 +157,7 @@ impl Dialer {
         let socket = Socket::new(Domain::for_address(address), Type::STREAM, Some(Protocol::TCP)).map_err(io)?;
         socket.set_nonblocking(true).map_err(io)?;
         let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(15));
-        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "windows"))]
         let keepalive = keepalive.with_interval(Duration::from_secs(15)).with_retries(9);
         if let Err(error) = socket.set_tcp_keepalive(&keepalive) {
             let fallback = socket.set_keepalive(true);

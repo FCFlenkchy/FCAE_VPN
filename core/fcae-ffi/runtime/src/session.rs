@@ -324,9 +324,14 @@ impl Supervisor {
             // bridge, before fcae_start() is ever called. Only consulting
             // config.tun.fd made Android always look unprivileged, so every
             // TUN start failed with "requires administrator/root privileges".
-            let android_fd =
+            let external_fd =
                 config.tun.fd.is_some() || self.cfg.tun_bridge.preauthorised_fd().is_some();
-            if !android_fd && !(self.cfg.is_privileged)() {
+            if cfg!(target_os = "ios") && !external_fd {
+                return Err(CoreError::PermissionDenied(
+                    "iOS TUN mode requires a Network Extension packet-flow adapter".into(),
+                ));
+            }
+            if !external_fd && !(self.cfg.is_privileged)() {
                 return Err(CoreError::PermissionDenied(
                     "TUN mode requires administrator/root privileges. \
                      On Windows: run as Administrator. On Linux/macOS: use sudo."
@@ -395,7 +400,7 @@ impl Supervisor {
             .name("fcae-session".into())
             .spawn(move || {
                 log::info!("[session] worker entered; initializing async runtime");
-                let workers = if cfg!(target_os = "android") { 2 } else { 4 };
+                let workers = if cfg!(any(target_os = "android", target_os = "ios")) { 2 } else { 4 };
                 let rt = match tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .worker_threads(workers)
@@ -822,7 +827,7 @@ async fn run_session(
             continue;
         }
 
-        if config.is_tun() && cfg!(not(target_os = "android")) {
+        if config.is_tun() && cfg!(not(any(target_os = "android", target_os = "ios"))) {
             if let Some(proxy) = &config.upstream_proxy {
                 let bypass = tokio::select! {
                     biased;

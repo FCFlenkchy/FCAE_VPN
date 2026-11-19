@@ -477,7 +477,7 @@ impl ZeptunBridge {
 
         // config_init must run first: it zeroes the struct, stamps
         // struct_size for the ABI check, and fills preset-secure defaults.
-        let preset = if platform::is_android() {
+        let preset = if platform::is_mobile() {
             ZEPTUN_PRESET_MOBILE
         } else {
             ZEPTUN_PRESET_DESKTOP
@@ -497,9 +497,9 @@ impl ZeptunBridge {
             (f >= 0).then_some(f)
         });
 
-        if platform::is_android() && fd.is_none() {
+        if platform::is_mobile() && fd.is_none() {
             return Err(CoreError::Internal(
-                "zeptun on Android requires a TUN descriptor from VpnService".into(),
+                "zeptun on mobile requires a data-plane descriptor from the system VPN host".into(),
             ));
         }
 

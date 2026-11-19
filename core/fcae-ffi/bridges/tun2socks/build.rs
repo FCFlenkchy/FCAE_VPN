@@ -33,6 +33,9 @@ fn main() {
     fcae_build::rerun_if_env_changed("ANDROID_NDK_HOME");
     fcae_build::rerun_if_env_changed("CGO_CC");
     fcae_build::rerun_if_env_changed("GO_BIN");
+    for key in ["SDKROOT", "DEVELOPER_DIR", "IPHONEOS_DEPLOYMENT_TARGET", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS"] {
+        fcae_build::rerun_if_env_changed(key);
+    }
     // `go.rs` reads this to decide whether to refresh the module graph.
     fcae_build::rerun_if_env_changed("FCAE_GO_TIDY");
 
@@ -96,52 +99,67 @@ fn main() {
     }
     if singbox {
         archive.tags.push("fcae_singbox".into());
-        // The full upstream feature set: every protocol, transport, endpoint and
-        // service an official sing-box binary carries, so a native config is
-        // accepted here exactly as the `sing-box` CLI accepts it. These are the
-        // tags from sing-box's own library build (`cmd/internal/build_libbox`),
-        // plus the ones only its CLI build sets.
-        archive.tags.extend(
-            [
-                "with_gvisor",
-                "with_quic",
-                "with_dhcp",
-                "with_wireguard",
-                "with_utls",
-                "with_naive_outbound",
-                "with_acme",
-                "with_clash_api",
-                "with_cloudflared",
-                "with_ccm",
-                "with_ocm",
-                "with_usbip",
-                "with_openvpn",
-                "with_openconnect",
-                // Tailscale, trimmed to what an embedded core can use: no SSH,
-                // drive, web UI, log uploader or cloud integrations.
-                "with_tailscale",
-                "ts_omit_logtail",
-                "ts_omit_ssh",
-                "ts_omit_drive",
-                "ts_omit_taildrop",
-                "ts_omit_webclient",
-                "ts_omit_doctor",
-                "ts_omit_capture",
-                "ts_omit_kube",
-                "ts_omit_aws",
-                "ts_omit_synology",
-                "ts_omit_bird",
-                // An embedded core needs no gRPC tracing; this also drops
-                // `golang.org/x/net/trace` from the archive.
-                "grpcnotrace",
-                // kTLS, the oom-killer's cache cleanup and HTTP/2 force-close
-                // reach into stdlib internals with `go:linkname`; upstream ships
-                // both tags, and both need the linker check disabled below.
-                "badlinkname",
-                "tfogo_checklinkname0",
-            ]
-            .map(str::to_string),
-        );
+        // Existing platforms retain the full upstream feature set; iOS uses
+        // a static mobile profile without desktop services or runtime dylibs.
+        if target.os == fcae_build::target::Os::Ios {
+            archive.tags.extend(
+                [
+                    "with_gvisor",
+                    "with_quic",
+                    "with_wireguard",
+                    "with_utls",
+                    "with_clash_api",
+                    "with_low_memory",
+                    "grpcnotrace",
+                    "badlinkname",
+                    "tfogo_checklinkname0",
+                ]
+                .map(str::to_string),
+            );
+            fcae_build::note("iOS sing-box: mobile protocol set; desktop services and dynamically loaded Naive/Cronet are excluded");
+        } else {
+            archive.tags.extend(
+                [
+                    "with_gvisor",
+                    "with_quic",
+                    "with_dhcp",
+                    "with_wireguard",
+                    "with_utls",
+                    "with_naive_outbound",
+                    "with_acme",
+                    "with_clash_api",
+                    "with_cloudflared",
+                    "with_ccm",
+                    "with_ocm",
+                    "with_usbip",
+                    "with_openvpn",
+                    "with_openconnect",
+                    // Tailscale, trimmed to what an embedded core can use: no SSH,
+                    // drive, web UI, log uploader or cloud integrations.
+                    "with_tailscale",
+                    "ts_omit_logtail",
+                    "ts_omit_ssh",
+                    "ts_omit_drive",
+                    "ts_omit_taildrop",
+                    "ts_omit_webclient",
+                    "ts_omit_doctor",
+                    "ts_omit_capture",
+                    "ts_omit_kube",
+                    "ts_omit_aws",
+                    "ts_omit_synology",
+                    "ts_omit_bird",
+                    // An embedded core needs no gRPC tracing; this also drops
+                    // `golang.org/x/net/trace` from the archive.
+                    "grpcnotrace",
+                    // kTLS, the oom-killer's cache cleanup and HTTP/2 force-close
+                    // reach into stdlib internals with `go:linkname`; upstream ships
+                    // both tags, and both need the linker check disabled below.
+                    "badlinkname",
+                    "tfogo_checklinkname0",
+                ]
+                .map(str::to_string),
+            );
+        }
         // `with_purego` is what makes cronet-go call cronet through its C ABI at
         // run time instead of linking it: its cgo files then contribute no
         // LDFLAGS, so Chromium's objects stay out of libfcae_ffi.a and out of
@@ -152,7 +170,7 @@ fn main() {
         // routine does not fit a Mach-O image. Linux wants cronet in the one
         // file it ships, so there it stays linked, as does Android, whose Go
         // archive is a c-shared library that already carries cgo.
-        if target.is_windows() || target.is_apple() {
+        if target.is_windows() || target.os == fcae_build::target::Os::MacOS {
             archive.tags.push("with_purego".into());
         }
     }
