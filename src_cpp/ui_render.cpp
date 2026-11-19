@@ -3775,7 +3775,7 @@ static void render_core_editor() {
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(modal_size(680.0f, 620.0f), ImGuiCond_Always);
-    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize)) return;
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
 
     ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f),
                        s_core_editor_row < 0 ? "Add config" : "Edit config");
@@ -3820,16 +3820,24 @@ static void render_core_editor() {
         ImGui::PopStyleColor();
     }
     ImGui::Spacing();
-    ImGui::TextDisabled("Config (share link, JSON or Mihomo YAML)");
+    UiText::TextColoredWrapped(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+                              "Config (share link, JSON or Mihomo YAML)");
+    const float status_width = std::max(1.0f, ImGui::GetContentRegionAvail().x
+        - ImGui::GetStyle().WindowPadding.x * 2.0f - ImGui::GetStyle().ScrollbarSize);
+    const float status_height = std::clamp(ImGui::CalcTextSize(s_core_status, nullptr, false, status_width).y,
+        ImGui::GetTextLineHeight(), ImGui::GetTextLineHeightWithSpacing() * 5.0f);
     float text_height = ImGui::GetContentRegionAvail().y
-        - ImGui::GetTextLineHeightWithSpacing() - ImGui::GetFrameHeightWithSpacing() - 8.0f;
+        - status_height - ImGui::GetFrameHeightWithSpacing()
+        - ImGui::GetStyle().ItemSpacing.y * 3.0f;
     if (text_height < 160.0f) text_height = 160.0f;
     changed |= UiText::InputTextMultiline("##core_text", s_core_text_buf.data(),
                                          s_core_text_buf.size(), ImVec2(-FLT_MIN, text_height), ImGuiInputTextFlags_WordWrap);
     if (changed) core_config_check(s_core_editor_row);
-    ImGui::TextColored(s_core_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
+    ImGui::BeginChild("##core_validation", ImVec2(0, status_height));
+    UiText::TextColoredWrapped(s_core_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
                                            : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
                        "%s", s_core_status);
+    ImGui::EndChild();
     ImGui::Spacing();
     // Save only commits a config that validated, so the library never holds one
     // the engine would refuse -- that rejection takes the whole session with it.
@@ -3858,7 +3866,7 @@ static void render_core_configs() {
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(modal_size(760.0f, 720.0f), ImGuiCond_Always);
-    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize)) return;
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
 
     // The library first: one list of configs, because that is what both cores
     // run. A row is the name the user gave the config, the core that runs it and
@@ -3878,7 +3886,8 @@ static void render_core_configs() {
                              + ImGui::GetStyle().ItemSpacing.y * 4.0f
                              + 40.0f;
     const float list_height = (std::max)(146.0f, ImGui::GetContentRegionAvail().y - list_reserve);
-    ImGui::BeginChild("##core_list", ImVec2(0, list_height), ImGuiChildFlags_Borders);
+    ImGui::BeginChild("##core_list", ImVec2(0, list_height), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar);
     int edit_row = -1;
     int remove_row = -1;
     // The same on every row, so it is measured once.
@@ -3892,8 +3901,9 @@ static void render_core_configs() {
         // row less the buttons and the tag beside it, so the tag and the buttons
         // sit in the same place on every row and a long name cannot reach them.
         const float row_x = ImGui::GetCursorPosX();
-        const float row_avail = ImGui::GetContentRegionAvail().x;
         const float tag_width = tag ? ImGui::CalcTextSize(tag).x + kCoreTagGap : 0.0f;
+        const float row_avail = std::max(ImGui::GetContentRegionAvail().x,
+            buttons_width + tag_width + style.ItemSpacing.x * 2.0f + ImGui::CalcTextSize("...").x);
         const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
         const float name_width = std::max(0.0f, row_avail - buttons_width
             - 2.0f * style.ItemSpacing.x - tag_width);
@@ -3969,7 +3979,7 @@ static void render_protocol_editor() {
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(modal_size(600.0f, 650.0f), ImGuiCond_Always);
-    if (!ImGui::BeginPopupModal("##protocol-editor", nullptr, ImGuiWindowFlags_NoResize)) return;
+    if (!ImGui::BeginPopupModal("##protocol-editor", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
 
     bool changed = false;
     const float footer_width = ImGui::CalcTextSize("+ Add exit").x + ImGui::CalcTextSize("Close").x
@@ -4857,7 +4867,7 @@ void render_ui() {
         if (startup) {
             ImGui::TextUnformatted("INITIALIZING...");
         } else if (errored && telem.last_error[0] && s_error_detail_visible) {
-            ImGui::Text("ERROR: %s", telem.last_error);
+            UiText::TextColoredWrapped(sc, "ERROR: %s", telem.last_error);
         } else {
             ImGui::Text("%s", state_label(cur));
         }
@@ -4874,11 +4884,8 @@ void render_ui() {
         }
 
         if (g_app.save_status[0]) {
-            ImGui::SameLine(0, 8);
-            ImGui::SetCursorPosY(status_y + (kActionRowHeight - ImGui::GetFrameHeight()) * 0.5f);
             ImGui::BeginGroup();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(ImVec4(0.95f, 0.38f, 0.38f, 1.0f), "%s", g_app.save_status);
+            UiText::TextColoredWrapped(ImVec4(0.95f, 0.38f, 0.38f, 1.0f), "%s", g_app.save_status);
             ImGui::EndGroup();
             s_save_status_painted_revision = s_save_status_revision;
         }
@@ -5703,7 +5710,7 @@ void render_ui() {
                     memcpy(checked, g_app.upstream_proxy, sizeof(checked));
                 }
                 if (proxy_err[0])
-                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", proxy_err);
+                    UiText::TextColoredWrapped(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", proxy_err);
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -5736,7 +5743,7 @@ void render_ui() {
                 }
                 ImGui::PopItemWidth();
                 if (te_sel < (int)te_n && !tei[te_sel].available)
-                    ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), "%s", tei[te_sel].unavailable_reason);
+                    UiText::TextColoredWrapped(ImVec4(1, 0.6f, 0.2f, 1), "%s", tei[te_sel].unavailable_reason);
                 ImGui::Spacing();
                 ImGui::PushItemWidth(160);
                 UiText::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
@@ -5746,7 +5753,7 @@ void render_ui() {
                 android_ui_render_routing();
 #endif
                 if (g_app.parsed_tun_mtu() == 0xffffffffu)
-                    ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
+                    UiText::TextColoredWrapped(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
                 const char* t2s_logs[] = { "Silent", "Error", "Warn", "Info", "Debug" };
                 int t2s_pos = g_app.t2s_log > 0 ? g_app.t2s_log - 1 : 0;
                 if (t2s_pos > 4) t2s_pos = 4;
@@ -5768,7 +5775,7 @@ void render_ui() {
                     ImGui::PopItemWidth();
                     ImGui::Checkbox("TCP auto-tuning", &g_app.tun_tcp_auto_tuning);
                     if (!fcae_parse_tcp_buffer_size(g_app.tun_tcp_sndbuf) || !fcae_parse_tcp_buffer_size(g_app.tun_tcp_rcvbuf))
-                        ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: 4096..4194304 bytes.");
+                        UiText::TextColoredWrapped(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: 4096..4194304 bytes.");
                 }
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();

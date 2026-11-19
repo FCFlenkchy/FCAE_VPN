@@ -482,15 +482,61 @@ namespace {
 ImGuiID select_on_activate = 0;
 int select_frame = 0;
 ImGuiID restore_id = 0;
+ImGuiID menu_id = 0;
+int menu_frame = 0;
 int selection_start = 0, selection_end = 0;
 ImGuiKey edit_key = ImGuiKey_None;
 int restore_frame = 0;
 }
 void reset_android_view() {
-    select_on_activate = restore_id = 0;
-    select_frame = restore_frame = 0;
+    select_on_activate = restore_id = menu_id = 0;
+    select_frame = restore_frame = menu_frame = 0;
     selection_start = selection_end = 0;
     edit_key = ImGuiKey_None;
+}
+// InputText cursor/selection offsets are UTF-8 byte positions.
+static int previous_character(const char* text, int offset) {
+    if (offset <= 0) return 0;
+    --offset;
+    while (offset > 0 && (static_cast<unsigned char>(text[offset]) & 0xC0) == 0x80) --offset;
+    return offset;
+}
+static int word_class(const char* text) {
+    unsigned int c = 0;
+    ImTextCharFromUtf8(&c, text, nullptr);
+    if (c <= 32 || ImCharIsBlankW(c)) return 0;
+    if (c < 128 && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9') || c == '_')) return 1;
+    return 2;
+}
+static void select_word(ImGuiInputTextState& state) {
+    const char* text = state.GetText();
+    int start = std::clamp(state.GetCursorPos(), 0, state.TextLen);
+    if (start == state.TextLen && start > 0) start = previous_character(text, start);
+    if (start == state.TextLen) return;
+    const int kind = word_class(text + start);
+    int end = start;
+    while (start > 0) {
+        const int prev = previous_character(text, start);
+        if (word_class(text + prev) != kind) break;
+        start = prev;
+    }
+    do {
+        unsigned int c;
+        const int length = ImTextCharFromUtf8(&c, text + end, text + state.TextLen);
+        if (length <= 0) break;
+        end += length;
+    } while (end < state.TextLen && word_class(text + end) == kind);
+    state.SetSelection(start, end);
+    state.SelectedAllMouseLock = true;
+}
+bool wants_keyboard() {
+    if (menu_id && GImGui->FrameCount > menu_frame + 1) menu_id = 0;
+    if (restore_id && GImGui->FrameCount > restore_frame + 6) {
+        restore_id = 0;
+        edit_key = ImGuiKey_None;
+    }
+    return menu_id != 0 || restore_id != 0;
 }
 void prepare(const char* label) {
     if (restore_id && GImGui->FrameCount > restore_frame + 6) {
@@ -510,7 +556,7 @@ void finish(ImGuiInputTextFlags flags) {
         select_frame = GImGui->FrameCount;
     }
     if (select_on_activate == id && state && GImGui->ActiveId == id && GImGui->FrameCount > select_frame) {
-        state->SelectAll();
+        select_word(*state);
         select_on_activate = 0;
     }
     if (restore_id == id && state && GImGui->ActiveId == id &&
@@ -530,8 +576,10 @@ void finish(ImGuiInputTextFlags flags) {
     if (input->text_menu(id) && state) {
         selection_start = state->GetSelectionStart();
         selection_end = state->GetSelectionEnd();
+        menu_id = id;
         ImGui::OpenPopup("Text actions");
     }
+    if (menu_id == id) menu_frame = GImGui->FrameCount;
     if (ImGui::BeginPopup("Text actions")) {
         const bool password = (flags & ImGuiInputTextFlags_Password) != 0;
         const bool selected = selection_start != selection_end;
@@ -548,6 +596,13 @@ void finish(ImGuiInputTextFlags flags) {
             edit_key = action;
         }
         ImGui::EndPopup();
+    }
+    if (menu_id == id && !ImGui::IsPopupOpen("Text actions")) {
+        menu_id = 0;
+        if (!restore_id && (!GImGui->ActiveId || GImGui->ActiveId == id)) {
+            restore_id = id;
+            restore_frame = GImGui->FrameCount;
+        }
     }
     ImGui::PopID();
 }
@@ -578,8 +633,10 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     // ImGui trickles press/release across frames. Never let the release of a
     // quick tap, a held slider, or an inertial scroll wait for an idle poll.
     const bool immediate = interacting || input->active() || GImGui->InputEventsQueue.Size != 0;
-    const unsigned delay = immediate ? 0u : std::min(ui_sleep_ms(), io.WantTextInput ? 33u : 250u);
-    return static_cast<jint>(delay) | (io.WantTextInput ? 0x10000 : 0)
+    // A text-action popup temporarily owns ImGui focus, not the Android IME.
+    const bool keyboard = io.WantTextInput || UiText::wants_keyboard();
+    const unsigned delay = immediate ? 0u : std::min(ui_sleep_ms(), keyboard ? 33u : 250u);
+    return static_cast<jint>(delay) | (keyboard ? 0x10000 : 0)
         | (GImGui->OpenPopupStack.Size ? 0x20000 : 0);
 }
 extern "C" JNIEXPORT void JNICALL

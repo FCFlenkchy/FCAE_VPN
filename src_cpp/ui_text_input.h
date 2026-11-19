@@ -1,8 +1,20 @@
 #pragma once
 #include "imgui.h"
 #include "imgui_internal.h"
+#include <cstdarg>
 
 namespace UiText {
+inline void TextColoredWrapped(const ImVec4& color, const char* format, ...) {
+    ImGui::PushStyleColor(ImGuiCol_Text, color);
+    ImGui::PushTextWrapPos(0.0f);
+    va_list args;
+    va_start(args, format);
+    ImGui::TextV(format, args);
+    va_end(args);
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+}
+
 #if defined(ANDROID)
 void prepare(const char* label);
 void finish(ImGuiInputTextFlags flags);
