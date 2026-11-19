@@ -180,16 +180,9 @@ android {
 
     packaging {
         jniLibs {
-            // Replaces android:extractNativeLibs in the manifest (AGP warns if
-            // that attribute is set there).
-            //
-            // `false` = load the .so straight from the APK without unpacking to
-            // disk, which is smaller and faster. The old build needed the
-            // legacy behaviour because it EXECUTED a packaged tun2socks binary,
-            // which requires a real file on disk. tun2socks now runs in-process
-            // as libfcae_go_bridge.so, loaded by the dynamic linker, so the
-            // extraction is no longer needed.
-            useLegacyPackaging = false
+            // Mihomo is a PIE executable packaged as a native library. It must
+            // exist on disk so each chain hop can execute its own instance.
+            useLegacyPackaging = true
             // Both our own CMake output and the staged Go bridge land in
             // jniLibs/<abi>/; keep the first of any duplicate.
             pickFirsts += listOf(
@@ -223,3 +216,11 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
 }
+
+val stageMihomoNotices by tasks.registering(Copy::class) {
+    from("../../core/mihomo/LICENSE") { rename { "mihomo-LICENSE.txt" } }
+    from("../../build/mihomo-source.json") { rename { "mihomo-source.json" } }
+    into(layout.buildDirectory.dir("generated/mihomoAssets"))
+}
+android.sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/mihomoAssets"))
+tasks.named("preBuild").configure { dependsOn(stageMihomoNotices) }

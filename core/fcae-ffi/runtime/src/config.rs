@@ -32,6 +32,7 @@ pub fn backend_label(backend: FcaeBackend) -> &'static str {
         FcaeBackend::Firefox => "Firefox",
         FcaeBackend::Xray => "Xray",
         FcaeBackend::SingBox => "sing-box",
+        FcaeBackend::Mihomo => "mihomo",
     }
 }
 
@@ -419,7 +420,9 @@ pub struct ListenerPolicy {
     pub xray_socks: bool,
     pub xray_http: bool,
     pub singbox_socks: bool,
+    pub mihomo_socks: bool,
     pub singbox_http: bool,
+    pub mihomo_http: bool,
     pub aether_socks_port: u16,
     pub aether_http_port: u16,
     pub firefox_socks_port: u16,
@@ -427,7 +430,9 @@ pub struct ListenerPolicy {
     pub xray_socks_port: u16,
     pub xray_http_port: u16,
     pub singbox_socks_port: u16,
+    pub mihomo_socks_port: u16,
     pub singbox_http_port: u16,
+    pub mihomo_http_port: u16,
 }
 
 impl Default for ListenerPolicy {
@@ -445,7 +450,9 @@ impl Default for ListenerPolicy {
             xray_socks: true,
             xray_http: false,
             singbox_socks: true,
+            mihomo_socks: true,
             singbox_http: false,
+            mihomo_http: false,
             aether_socks_port: 0,
             aether_http_port: 0,
             firefox_socks_port: 0,
@@ -453,7 +460,9 @@ impl Default for ListenerPolicy {
             xray_socks_port: 0,
             xray_http_port: 0,
             singbox_socks_port: 0,
+            mihomo_socks_port: 0,
             singbox_http_port: 0,
+            mihomo_http_port: 0,
         }
     }
 }
@@ -468,6 +477,7 @@ impl ListenerPolicy {
             FcaeBackend::Firefox => (self.firefox_socks_port, self.firefox_http_port),
             FcaeBackend::Xray => (self.xray_socks_port, self.xray_http_port),
             FcaeBackend::SingBox => (self.singbox_socks_port, self.singbox_http_port),
+            FcaeBackend::Mihomo => (self.mihomo_socks_port, self.mihomo_http_port),
             FcaeBackend::Psiphon => (0, 0),
         }
     }
@@ -708,9 +718,9 @@ pub const PSIPHON_START_TIMEOUT: Duration = Duration::from_secs(150);
 /// successful SOCKS5 handshake on its inbound.
 pub const CORE_START_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Whether `backend` is one of the built-in proxy cores (Xray-core, sing-box).
+/// Whether `backend` is one of the configurable proxy cores.
 pub const fn is_core_backend(backend: FcaeBackend) -> bool {
-    matches!(backend, FcaeBackend::Xray | FcaeBackend::SingBox)
+    matches!(backend, FcaeBackend::Xray | FcaeBackend::SingBox | FcaeBackend::Mihomo)
 }
 pub const DEFAULT_PSIPHON_HTTP_PORT: u16 = 1824;
 
@@ -973,13 +983,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     if cfg.mode == FcaeMode::Tun && raw._reserved[0] & FCAE_CONFIG_TUN_HTTP == 0 {
         cfg.http_port = 0;
     }
-    if cfg.protocol != FcaeProtocol::Tor && raw.tor.mode != FcaeTorMode::Only
-        && cfg.http_port != 0 && cfg.http_port == cfg.socks_port {
-        return Err(CoreError::InvalidConfig(format!(
-            "socks_port and http_port are both {}; they must differ",
-            cfg.socks_port
-        )));
-    }
+
 
     // UDP buffer
     // Out-of-range values used to be dropped silently; say so instead.
@@ -1099,7 +1103,9 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
                 xray_socks: flag("xraySocks", defaults.xray_socks),
                 xray_http: flag("xrayHttp", defaults.xray_http),
                 singbox_socks: flag("singboxSocks", defaults.singbox_socks),
+                mihomo_socks: flag("mihomoSocks", defaults.mihomo_socks),
                 singbox_http: flag("singboxHttp", defaults.singbox_http),
+                mihomo_http: flag("mihomoHttp", defaults.mihomo_http),
                 aether_socks_port: port("aetherSocksPort"),
                 aether_http_port: port("aetherHttpPort"),
                 firefox_socks_port: port("firefoxSocksPort"),
@@ -1107,7 +1113,9 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
                 xray_socks_port: port("xraySocksPort"),
                 xray_http_port: port("xrayHttpPort"),
                 singbox_socks_port: port("singboxSocksPort"),
+                mihomo_socks_port: port("mihomoSocksPort"),
                 singbox_http_port: port("singboxHttpPort"),
+                mihomo_http_port: port("mihomoHttpPort"),
             })
         });
 
@@ -1193,8 +1201,15 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         cfg.chain.push(ChainHop::new(FcaeBackend::Psiphon, cfg.protocol, cfg.obfuscation.h2_enabled));
     }
     cfg.psiphon.through_tunnel = cfg.chain.len() == 1 && cfg.chain[0].backend == FcaeBackend::Psiphon;
+    if cfg.exit_backend() != FcaeBackend::Mihomo && cfg.protocol != FcaeProtocol::Tor && raw.tor.mode != FcaeTorMode::Only
+        && cfg.http_port != 0 && cfg.http_port == cfg.socks_port {
+        return Err(CoreError::InvalidConfig(format!(
+            "socks_port and http_port are both {}; they must differ",
+            cfg.socks_port
+        )));
+    }
     // A Tor carrier can have an Aether/Firefox exit with its own listeners.
-    if cfg.chain.last().is_some_and(|hop| {
+    if cfg.exit_backend() != FcaeBackend::Mihomo && cfg.chain.last().is_some_and(|hop| {
         hop.backend == FcaeBackend::Firefox
             || is_core_backend(hop.backend)
             || (hop.backend == FcaeBackend::Aether && hop.protocol != FcaeProtocol::Tor)
@@ -1738,7 +1753,7 @@ fn hop_carries_udp(hop: &SessionConfig) -> bool {
         }
         FcaeBackend::Psiphon => false,
         // A generated SOCKS5 inbound always offers UDP ASSOCIATE.
-        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox => true,
+        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox | FcaeBackend::Mihomo => true,
     }
 }
 

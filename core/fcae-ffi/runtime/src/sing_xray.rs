@@ -552,6 +552,9 @@ impl Outbound {
     /// that can: a link is either carried whole or refused with a reason, never
     /// silently trimmed to what one core happens to understand.
     fn blocker(&self, backend: FcaeBackend) -> Option<String> {
+        if backend == FcaeBackend::Mihomo {
+            return crate::mihomo::proxy(self).err();
+        }
         use FcaeBackend::{SingBox, Xray};
         let label = crate::config::backend_label(backend);
         let other = match backend {
@@ -692,6 +695,13 @@ impl CoreProfile {
             }
             return Ok(CoreProfile::Native(value));
         }
+        if !text.lines().next().unwrap_or_default().contains("://") {
+            if let Ok(value) = serde_yaml_ng::from_str::<Value>(text) {
+                if value.is_object() && crate::mihomo::is_native(&value) {
+                    return Ok(CoreProfile::Native(value));
+                }
+            }
+        }
         let Some((scheme, rest)) = text.split_once("://") else {
             return Err(format!(
                 "expected a share link (scheme://…) or a JSON object, got {:?}",
@@ -774,7 +784,8 @@ fn with_dial_options(rest: &str, mut outbound: Outbound) -> Result<Outbound, Str
 /// type the same way. A config with neither section, an empty one, or one
 /// naming both dialects answers `None`.
 pub fn native_dialect(text: &str) -> Option<FcaeBackend> {
-    let value: Value = serde_json::from_str(text).ok()?;
+    let value: Value = serde_json::from_str(text).ok().or_else(|| serde_yaml_ng::from_str(text).ok())?;
+    if crate::mihomo::is_native(&value) { return Some(FcaeBackend::Mihomo); }
     let (mut xray, mut sing_box) = (false, false);
     let mut declared = false;
     for section in ["outbounds", "endpoints"] {
@@ -2805,14 +2816,14 @@ static LIVE: Mutex<Vec<LiveInstance>> = Mutex::new(Vec::new());
 
 /// Publish an instance the moment its handle owns the core, and until it is
 /// stopped it is what the connection info lists.
-fn publish_live(backend: FcaeBackend, handle: u64, name: String) {
+pub(crate) fn publish_live(backend: FcaeBackend, handle: u64, name: String) {
     let mut live = LIVE.lock();
     live.retain(|instance| instance.backend != backend || instance.handle != handle);
     live.push(LiveInstance { backend, handle, name });
 }
 
 /// Forget one instance once its core is closed. Idempotent.
-fn retire_live(backend: FcaeBackend, handle: u64) {
+pub(crate) fn retire_live(backend: FcaeBackend, handle: u64) {
     LIVE.lock()
         .retain(|instance| instance.backend != backend || instance.handle != handle);
 }
@@ -3333,7 +3344,7 @@ impl Running {
 }
 
 /// Measure the session's latency until one lands, then stop.
-fn measure_until_known(probe: &RttProbe, rtt_ms: &AtomicU32, stop: &AtomicBool) {
+pub(crate) fn measure_until_known(probe: &RttProbe, rtt_ms: &AtomicU32, stop: &AtomicBool) {
     let mut failed: u32 = 0;
     loop {
         if stop.load(Ordering::Acquire) || rtt_ms.load(Ordering::Acquire) != 0 {
@@ -3481,7 +3492,7 @@ enum RttSample {
 
 /// How a session measures its latency, decided once when it starts.
 #[derive(Clone)]
-struct RttProbe {
+pub(crate) struct RttProbe {
     /// What the published number is.
     sample: RttSample,
     /// What has to answer through the tunnel before that number is published.
@@ -3498,7 +3509,7 @@ struct RttProbe {
 impl RttProbe {
     /// The plan for this session, or `None` when there is nothing honest to
     /// measure.
-    fn plan(
+    pub(crate) fn plan(
         profile: &CoreProfile,
         upstream: Option<UpstreamProxy>,
         endpoints: &Endpoints,

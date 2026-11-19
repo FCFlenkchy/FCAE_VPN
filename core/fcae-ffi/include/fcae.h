@@ -89,7 +89,8 @@ typedef enum {
     FCAE_BACKEND_PSIPHON = 1,
     FCAE_BACKEND_FIREFOX = 2,
     FCAE_BACKEND_XRAY    = 3,  /* Xray-core, built in                   */
-    FCAE_BACKEND_SINGBOX = 4   /* sing-box, built in                    */
+    FCAE_BACKEND_SINGBOX = 4,  /* sing-box, built in                    */
+    FCAE_BACKEND_MIHOMO  = 5   /* isolated Mihomo process               */
 } FcaeBackend;
 
 /* What a backend supports, so the UI can describe it rather than hardcoding
@@ -788,4 +789,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x21d7b0a78192d81f */
+/* fcae-abi-fingerprint: 0xc2e451571264d469 */

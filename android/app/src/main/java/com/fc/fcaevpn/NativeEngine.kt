@@ -372,7 +372,7 @@ object NativeEngine {
             // session recorded against a removed config keeps its route and falls
             // back to the default transport.
             backend = session.getIntExtra("backend", 0)
-                .takeUnless { coreConfigId.isEmpty() && (it == 3 || it == 4) } ?: 0,
+                .takeUnless { coreConfigId.isEmpty() && (it == 3 || it == 4 || it == 5) } ?: 0,
             torSocksPort = session.getIntExtra("torSocksPort", 0),
             torHttpPort = session.getIntExtra("torHttpPort", 0),
             psiphonThroughTunnel = session.getBooleanExtra("psiphonThroughTunnel", false),

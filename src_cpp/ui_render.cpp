@@ -498,7 +498,9 @@ static uint64_t config_signature() {
     h = fnv_value(h, g_app.xray_socks_port);
     h = fnv_value(h, g_app.xray_http_port);
     h = fnv_value(h, g_app.singbox_socks_port);
+    h = fnv_value(h, g_app.mihomo_socks_port);
     h = fnv_value(h, g_app.singbox_http_port);
+    h = fnv_value(h, g_app.mihomo_http_port);
     h = fnv_value(h, g_app.tor_http_port);
     h = fnv_value(h, g_app.tor_http_enabled);
     h = fnv_value(h, g_app.socks_enabled);
@@ -508,7 +510,9 @@ static uint64_t config_signature() {
     h = fnv_value(h, g_app.xray_socks_enabled);
     h = fnv_value(h, g_app.xray_http_enabled);
     h = fnv_value(h, g_app.singbox_socks_enabled);
+    h = fnv_value(h, g_app.mihomo_socks_enabled);
     h = fnv_value(h, g_app.singbox_http_enabled);
+    h = fnv_value(h, g_app.mihomo_http_enabled);
     h = fnv_value(h, g_app.psiphon_socks_enabled);
     h = fnv_value(h, g_app.psiphon_http_enabled);
     h = fnv_value(h, g_app.tor_socks_enabled);
@@ -625,7 +629,9 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.xray_socks_enabled);
     h = fnv_value(h, g_app.xray_http_enabled);
     h = fnv_value(h, g_app.singbox_socks_enabled);
+    h = fnv_value(h, g_app.mihomo_socks_enabled);
     h = fnv_value(h, g_app.singbox_http_enabled);
+    h = fnv_value(h, g_app.mihomo_http_enabled);
     h = fnv_value(h, g_app.psiphon_socks_enabled);
     h = fnv_value(h, g_app.psiphon_http_enabled);
     h = fnv_value(h, g_app.tor_socks_enabled);
@@ -638,7 +644,9 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.xray_socks_port);
     h = fnv_value(h, g_app.xray_http_port);
     h = fnv_value(h, g_app.singbox_socks_port);
+    h = fnv_value(h, g_app.mihomo_socks_port);
     h = fnv_value(h, g_app.singbox_http_port);
+    h = fnv_value(h, g_app.mihomo_http_port);
     h = fnv_value(h, g_app.h2_enabled);
     h = fnv_value(h, g_app.ech_enabled);
     h = fnv_value(h, g_app.sys_profile);
@@ -1373,11 +1381,15 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "xray_socks_port") g_app.xray_socks_port = (uint16_t)parse_port(val, g_app.xray_socks_port);
     else if (key == "xray_http_port") g_app.xray_http_port = (uint16_t)parse_port(val, g_app.xray_http_port);
     else if (key == "singbox_socks_port") g_app.singbox_socks_port = (uint16_t)parse_port(val, g_app.singbox_socks_port);
+    else if (key == "mihomo_socks_port") g_app.mihomo_socks_port = (uint16_t)parse_port(val, g_app.mihomo_socks_port);
     else if (key == "singbox_http_port") g_app.singbox_http_port = (uint16_t)parse_port(val, g_app.singbox_http_port);
+    else if (key == "mihomo_http_port") g_app.mihomo_http_port = (uint16_t)parse_port(val, g_app.mihomo_http_port);
     else if (key == "xray_socks_enabled") g_app.xray_socks_enabled = atoi(val.c_str()) != 0;
     else if (key == "xray_http_enabled") g_app.xray_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "singbox_socks_enabled") g_app.singbox_socks_enabled = atoi(val.c_str()) != 0;
+    else if (key == "mihomo_socks_enabled") g_app.mihomo_socks_enabled = atoi(val.c_str()) != 0;
     else if (key == "singbox_http_enabled") g_app.singbox_http_enabled = atoi(val.c_str()) != 0;
+    else if (key == "mihomo_http_enabled") g_app.mihomo_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "aether_http_unified") { g_app.http_enabled = atoi(val.c_str()) != 0; s_loaded_unified_aether_http = true; }
     else if (key == "firefox_http_unified") { g_app.firefox_http_enabled = atoi(val.c_str()) != 0; s_loaded_unified_firefox_http = true; }
     else if (key == "aether_http_enabled" && !s_loaded_unified_aether_http) { g_app.http_enabled = atoi(val.c_str()) != 0; s_loaded_aether_http_enabled = true; }
@@ -1477,7 +1489,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         // A line longer than the largest config the engine accepts is a corrupt
         // file, not a config to keep in memory.
         if (strcmp(end, "_name") == 0 && val.size() <= kMaxCoreConfigName) entry.name = val;
-        else if (strcmp(end, "_backend") == 0) entry.backend = atoi(val.c_str()) == 1 ? 1 : 0;
+        else if (strcmp(end, "_backend") == 0) entry.backend = std::clamp(atoi(val.c_str()), 0, 2);
         else if (strcmp(end, "_text") == 0) {
             std::string text = core_text_decode(val);
             if (text.size() <= kMaxCoreConfigText) entry.text = std::move(text);
@@ -1539,7 +1551,9 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "xray_socks_port=%u\n", (unsigned)g_app.xray_socks_port);
     fprintf(f, "xray_http_port=%u\n", (unsigned)g_app.xray_http_port);
     fprintf(f, "singbox_socks_port=%u\n", (unsigned)g_app.singbox_socks_port);
+    fprintf(f, "mihomo_socks_port=%u\n", (unsigned)g_app.mihomo_socks_port);
     fprintf(f, "singbox_http_port=%u\n", (unsigned)g_app.singbox_http_port);
+    fprintf(f, "mihomo_http_port=%u\n", (unsigned)g_app.mihomo_http_port);
     fprintf(f, "tor_http_port=%u\n", (unsigned)g_app.tor_http_port);
     fprintf(f, "tor_http_enabled=%d\n", g_app.tor_http_enabled ? 1 : 0);
     fprintf(f, "socks_enabled=%d\n", g_app.socks_enabled ? 1 : 0);
@@ -1549,7 +1563,9 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "xray_socks_enabled=%d\n", g_app.xray_socks_enabled ? 1 : 0);
     fprintf(f, "xray_http_enabled=%d\n", g_app.xray_http_enabled ? 1 : 0);
     fprintf(f, "singbox_socks_enabled=%d\n", g_app.singbox_socks_enabled ? 1 : 0);
+    fprintf(f, "mihomo_socks_enabled=%d\n", g_app.mihomo_socks_enabled ? 1 : 0);
     fprintf(f, "singbox_http_enabled=%d\n", g_app.singbox_http_enabled ? 1 : 0);
+    fprintf(f, "mihomo_http_enabled=%d\n", g_app.mihomo_http_enabled ? 1 : 0);
     fprintf(f, "psiphon_socks_enabled=%d\n", g_app.psiphon_socks_enabled ? 1 : 0);
     fprintf(f, "psiphon_http_enabled=%d\n", g_app.psiphon_http_enabled ? 1 : 0);
     fprintf(f, "tor_socks_enabled=%d\n", g_app.tor_socks_enabled ? 1 : 0);
@@ -3413,7 +3429,7 @@ static const char* const kTransportNames[kCoreTransportBase] = {
 static const char* transport_tag(int transport) {
     const AppState::CoreConfigEntry* entry = g_app.core_config_at(transport);
     if (!entry) return nullptr;
-    return entry->backend == 1 ? "sing-box" : "xray";
+    return entry->backend == 2 ? "Mihomo" : entry->backend == 1 ? "sing-box" : "xray";
 }
 
 /// The colour the tag is drawn in: distinct from the row's white name, and the
@@ -3478,7 +3494,7 @@ static int current_transport() {
 /// core, which is why they chain like a built-in hop.
 static int transport_carrier(int transport) {
     if (const AppState::CoreConfigEntry* entry = g_app.core_config_at(transport))
-        return entry->backend == 1 ? 4 : 3;
+        return AppState::core_backend_id(entry->backend);
     if (transport == 5) return 1;
     if (transport == 10) return 2;
     return 0;
@@ -3489,7 +3505,7 @@ static void apply_transport(int transport) {
         const int index = transport - kCoreTransportBase;
         if (index >= 0 && index < (int)g_app.core_configs.size()) {
             g_app.core_selected = index;
-            g_app.backend = g_app.core_configs[(size_t)index].backend == 1 ? 4 : 3;
+            g_app.backend = AppState::core_backend_id(g_app.core_configs[(size_t)index].backend);
             // A saved config has no transport of its own: the profile carries it.
             g_app.protocol = 3;
             return;
@@ -3565,7 +3581,7 @@ static void open_core_editor(int row) {
             ? &g_app.core_configs[(size_t)row] : nullptr;
     s_core_editor_row = entry ? row : -1;
     snprintf(s_core_name_buf, sizeof(s_core_name_buf), "%s", entry ? entry->name.c_str() : "");
-    s_core_backend_buf = entry && entry->backend == 1 ? 1 : 0;
+    s_core_backend_buf = entry ? entry->backend : 0;
     // One spare byte for the terminator past the largest accepted config.
     if (s_core_text_buf.size() < kMaxCoreConfigText + 1)
         s_core_text_buf.assign(kMaxCoreConfigText + 1, '\0');
@@ -3676,7 +3692,7 @@ static void core_config_check(int row) {
         return;
     }
     char reason[224] = {};
-    const int32_t backend = s_core_backend_buf == 1 ? FCAE_BACKEND_SINGBOX : FCAE_BACKEND_XRAY;
+    const int32_t backend = AppState::core_backend_id(s_core_backend_buf);
     if (!fcae_core_check_profile(s_core_text_buf.data(), backend, reason, sizeof(reason))) {
         snprintf(s_core_status, sizeof(s_core_status), "%s", reason);
         return;
@@ -3688,7 +3704,7 @@ static void core_config_check(int row) {
     uint32_t socks_port = 0;
     uint32_t http_port = 0;
     const uint32_t kinds = fcae_core_listeners(s_core_text_buf.data(), backend, &socks_port, &http_port);
-    const char* core = s_core_backend_buf == 1 ? "sing-box" : "Xray";
+    const char* core = AppState::core_backend_name(s_core_backend_buf);
     if ((kinds & FCAE_CORE_LISTENER_SOCKS) == 0) {
         s_core_status_error = false;
         snprintf(s_core_status, sizeof(s_core_status),
@@ -3705,7 +3721,7 @@ static void core_config_check(int row) {
 static void apply_core_editor() {
     AppState::CoreConfigEntry entry;
     entry.name = s_core_name_buf;
-    entry.backend = s_core_backend_buf == 1 ? 1 : 0;
+    entry.backend = s_core_backend_buf;
     entry.text = s_core_text_buf.data();
     if (s_core_editor_row >= 0 && s_core_editor_row < (int)g_app.core_configs.size())
         g_app.core_configs[(size_t)s_core_editor_row] = std::move(entry);
@@ -3739,19 +3755,19 @@ static std::string fit_core_name(const std::string& text, float width) {
 /// before saving the config that needs it, and what a listener actually answers
 /// on is the engine's call at start time.
 static void core_listener_block(int backend) {
-    const char* label = backend == 1 ? "sing-box" : "Xray";
-    bool& socks_enabled = backend == 1 ? g_app.singbox_socks_enabled : g_app.xray_socks_enabled;
-    bool& http_enabled  = backend == 1 ? g_app.singbox_http_enabled : g_app.xray_http_enabled;
-    uint16_t& socks_port = backend == 1 ? g_app.singbox_socks_port : g_app.xray_socks_port;
-    uint16_t& http_port  = backend == 1 ? g_app.singbox_http_port : g_app.xray_http_port;
+    const char* label = AppState::core_backend_name(backend);
+    bool& socks_enabled = backend == 2 ? g_app.mihomo_socks_enabled : backend == 1 ? g_app.singbox_socks_enabled : g_app.xray_socks_enabled;
+    bool& http_enabled  = backend == 2 ? g_app.mihomo_http_enabled : backend == 1 ? g_app.singbox_http_enabled : g_app.xray_http_enabled;
+    uint16_t& socks_port = backend == 2 ? g_app.mihomo_socks_port : backend == 1 ? g_app.singbox_socks_port : g_app.xray_socks_port;
+    uint16_t& http_port  = backend == 2 ? g_app.mihomo_http_port : backend == 1 ? g_app.singbox_http_port : g_app.xray_http_port;
 
     // Both pairs stay live whatever the library holds. The switch is a stored
     // preference and the port is a stored value either way; what a listener can
     // answer on is decided at start time, by the config the session runs.
     ImGui::Spacing();
     ImGui::TextDisabled("%s listener", label);
-    listener_row(backend == 1 ? "sing-box SOCKS5" : "Xray SOCKS5", &socks_enabled, &socks_port, 1, 65535);
-    listener_row(backend == 1 ? "sing-box HTTP" : "Xray HTTP", &http_enabled, &http_port, 1, 65535);
+    listener_row(backend == 2 ? "Mihomo SOCKS5" : backend == 1 ? "sing-box SOCKS5" : "Xray SOCKS5", &socks_enabled, &socks_port, 1, 65535);
+    listener_row(backend == 2 ? "Mihomo HTTP" : backend == 1 ? "sing-box HTTP" : "Xray HTTP", &http_enabled, &http_port, 1, 65535);
 }
 
 /// The saved-config editor: the name the user gives a config, the core that runs
@@ -3803,10 +3819,15 @@ static void render_core_editor() {
             s_core_backend_buf = 1;
             changed = true;
         }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Mihomo", s_core_backend_buf == 2)) {
+            s_core_backend_buf = 2;
+            changed = true;
+        }
         ImGui::PopStyleColor();
     }
     ImGui::Spacing();
-    ImGui::TextDisabled("Config (a share link or the core's own JSON)");
+    ImGui::TextDisabled("Config (share link, JSON or Mihomo YAML)");
     float text_height = ImGui::GetContentRegionAvail().y
         - ImGui::GetTextLineHeightWithSpacing() - ImGui::GetFrameHeightWithSpacing() - 8.0f;
     if (text_height < 160.0f) text_height = 160.0f;
@@ -3837,7 +3858,7 @@ static void render_core_editor() {
 }
 
 static void render_core_configs() {
-    static const char* const kTitle = "Xray & sing-box settings";
+    static const char* const kTitle = "Xray / sing-box / Mihomo settings";
     if (s_core_configs_popup_open) {
         ImGui::OpenPopup(kTitle);
         s_core_configs_popup_open = false;
@@ -3922,6 +3943,7 @@ static void render_core_configs() {
     render_core_editor();
     core_listener_block(0);
     core_listener_block(1);
+    core_listener_block(2);
     ImGui::Spacing();
     ImGui::Separator();
     // The dropdown has to be wide enough for its own longest option, or the
@@ -4222,7 +4244,7 @@ static void render_firefox_code_prompt() {
 
 void render_ui() {
     const ImGuiIO& io = ImGui::GetIO();
-    const bool narrow = io.DisplaySize.x < 720.0f;
+    const bool narrow = io.DisplaySize.x < 720.0f * ImGui::GetFontSize() / 22.0f;
 
     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
@@ -4231,7 +4253,7 @@ void render_ui() {
     ImGui::Begin("##FCAE", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_HorizontalScrollbar);
 
     // Throttle telemetry FFI (~4 Hz while live, 1 Hz when idle) — the same
     // poll the render gate (ui_should_render) uses, so it never double-polls.
@@ -5500,7 +5522,7 @@ void render_ui() {
             const char* final_name = final_backend == FCAE_BACKEND_FIREFOX ? "Firefox"
                 : final_backend == FCAE_BACKEND_PSIPHON ? "Psiphon"
                 : final_backend == FCAE_BACKEND_SINGBOX ? "sing-box"
-                : final_backend == FCAE_BACKEND_XRAY ? "Xray" : "Aether";
+                : final_backend == FCAE_BACKEND_XRAY ? "Xray" : final_backend == FCAE_BACKEND_MIHOMO ? "Mihomo" : "Aether";
             // A saved config is named by the user, so show that name.
             const AppState::CoreConfigEntry* final_core =
                 g_app.chain_transports.empty() ? g_app.core_config_at(
@@ -5517,7 +5539,7 @@ void render_ui() {
             // session is actually serving. A hop's listeners are additional:
             // only the exit may stand in for its own settings line.
             const char* exit_core = final_backend == FCAE_BACKEND_XRAY ? "Xray"
-                : final_backend == FCAE_BACKEND_SINGBOX ? "sing-box" : nullptr;
+                : final_backend == FCAE_BACKEND_SINGBOX ? "sing-box" : final_backend == FCAE_BACKEND_MIHOMO ? "Mihomo" : nullptr;
             // The exit is the last instance of its core that started, so the
             // user's own name for its saved config belongs to the last group.
             size_t exit_group = live_groups.size();
@@ -5581,7 +5603,7 @@ void render_ui() {
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-    const float remain = std::max(1.0f, ImGui::GetContentRegionAvail().y);
+    const float remain = std::max(ImGui::GetTextLineHeightWithSpacing() * 8.0f, ImGui::GetContentRegionAvail().y);
     ImGui::BeginChild("##tabs_host", ImVec2(0, remain), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
@@ -5594,7 +5616,7 @@ void render_ui() {
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Firefox settings")) open_firefox_settings();
             if (!narrow) ImGui::SameLine();
-            if (ImGui::Button("Xray & sing-box settings")) open_core_configs();
+            if (ImGui::Button("Xray / sing-box / Mihomo settings")) open_core_configs();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "APP SETTINGS");
 #if defined(ANDROID)

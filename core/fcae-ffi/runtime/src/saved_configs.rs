@@ -184,6 +184,9 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
         ));
     }
     let profile = CoreProfile::parse(text)?;
+    if backend == FcaeBackend::Mihomo {
+        crate::mihomo::validate(&profile)?;
+    }
     // A native config names its own dialect; storing one under the other tag is
     // a mistake the core could only report as a parse failure at start.
     if let Some(dialect) = native_dialect(text) {
@@ -236,6 +239,19 @@ pub fn listeners(backend: FcaeBackend, text: &str) -> Listeners {
         // Unusable: the editor refuses it, and nothing can be served from it.
         Err(_) => return Listeners::default(),
     };
+    if backend == FcaeBackend::Mihomo {
+        let mut result = Listeners::default();
+        for (key, kind) in [("socks-port", 1u32), ("port", 2), ("mixed-port", 3)] {
+            if let Some(port) = config.get(key).and_then(Value::as_u64).and_then(|n| u16::try_from(n).ok()).filter(|n| *n != 0) {
+                result.kinds |= kind;
+                if kind & 1 != 0 { result.socks_port = result.socks_port.or(Some(port)); }
+                if kind & 2 != 0 { result.http_port = result.http_port.or(Some(port)); }
+            }
+        }
+        // A profile with no explicit listeners uses the session's listeners.
+        if result.kinds == 0 { result.kinds = 3; }
+        return result;
+    }
     // The dialects name the same two facts differently, and the tag is what the
     // user chose to store the config under.
     let xray = backend == FcaeBackend::Xray;
@@ -305,6 +321,7 @@ fn parse_entry(value: &Value) -> Result<SavedConfig, String> {
         .as_deref()
     {
         Some("xray") => FcaeBackend::Xray,
+        Some("mihomo") | Some("clash-meta") => FcaeBackend::Mihomo,
         Some("sing-box") | Some("singbox") | Some("sing_box") => FcaeBackend::SingBox,
         Some(other) => {
             return Err(format!(

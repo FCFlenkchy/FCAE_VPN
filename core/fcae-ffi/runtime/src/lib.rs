@@ -56,3 +56,5 @@ pub mod windows_dll;
 mod windows_dns_firewall;
 #[cfg(windows)]
 pub mod windows_tun;
+
+pub mod mihomo;

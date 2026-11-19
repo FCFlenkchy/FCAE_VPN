@@ -132,7 +132,7 @@ internal object ImGuiSettingsMigration {
         for (index in 0 until cores.length()) {
             val core = cores.getJSONObject(index)
             line("core_config${index}_name", core.getString("name"))
-            line("core_config${index}_backend", if (core.optString("backend") == "sing-box") 1 else 0)
+            line("core_config${index}_backend", when (core.optString("backend")) { "mihomo" -> 2; "sing-box" -> 1; else -> 0 })
             val config = core.get("config").toString()
                 .replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
             line("core_config${index}_text", config)

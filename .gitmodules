@@ -22,3 +22,6 @@
 [submodule "core/sing-box"]
 	path = core/sing-box
 	url = https://github.com/SagerNet/sing-box.git
+[submodule "core/mihomo"]
+	path = core/mihomo
+	url = https://github.com/MetaCubeX/mihomo.git

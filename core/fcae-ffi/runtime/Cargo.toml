@@ -25,6 +25,9 @@ libc.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+serde_yaml_ng = "0.10"
+tempfile = "3"
+getrandom = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 sha2 = "0.10"

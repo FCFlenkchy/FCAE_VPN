@@ -1301,6 +1301,7 @@ fn configure_internal_listeners(config: &mut SessionConfig, exit: &SessionConfig
         Some(p) if config.backend == FcaeBackend::Aether => (p.aether_socks, p.aether_http),
         Some(p) if config.backend == FcaeBackend::Xray => (p.xray_socks, p.xray_http),
         Some(p) if config.backend == FcaeBackend::SingBox => (p.singbox_socks, p.singbox_http),
+        Some(p) if config.backend == FcaeBackend::Mihomo => (p.mihomo_socks, p.mihomo_http),
         _ => (true, false),
     };
     // Tor's own listener is placed by the Tor block below, not by this pair.
@@ -1430,7 +1431,7 @@ fn rtt_handle(
 fn exit_measures_rtt(exit: FcaeBackend) -> bool {
     matches!(
         exit,
-        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox
+        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox | FcaeBackend::Mihomo
     )
 }
 

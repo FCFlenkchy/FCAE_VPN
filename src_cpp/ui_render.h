@@ -90,7 +90,7 @@ struct AppState {
     // engine reads back through FcaeCore::library.
     struct CoreConfigEntry {
         std::string name;
-        // 0 = Xray, 1 = sing-box.
+        // 0 = Xray, 1 = sing-box, 2 = Mihomo.
         int backend = 0;
         // Share link or the core's own config JSON, verbatim.
         std::string text;
@@ -151,6 +151,12 @@ struct AppState {
     static constexpr uint16_t kXrayDefaultHttpPort    = 1828;
     static constexpr uint16_t kSingBoxDefaultSocksPort = 1829;
     static constexpr uint16_t kSingBoxDefaultHttpPort  = 1830;
+    static constexpr uint16_t kMihomoDefaultSocksPort = 1831;
+    static constexpr uint16_t kMihomoDefaultHttpPort = 1832;
+    uint16_t mihomo_socks_port = kMihomoDefaultSocksPort;
+    uint16_t mihomo_http_port = kMihomoDefaultHttpPort;
+    bool mihomo_socks_enabled = true;
+    bool mihomo_http_enabled = false;
     uint16_t xray_socks_port    = kXrayDefaultSocksPort;
     uint16_t xray_http_port     = kXrayDefaultHttpPort;
     uint16_t singbox_socks_port = kSingBoxDefaultSocksPort;
@@ -393,13 +399,15 @@ struct AppState {
         return index < core_configs.size() ? &core_configs[index] : nullptr;
     }
 
+    static int core_backend_id(int selection) { return selection == 2 ? FCAE_BACKEND_MIHOMO : selection == 1 ? FCAE_BACKEND_SINGBOX : FCAE_BACKEND_XRAY; }
+    static const char* core_backend_name(int selection) { return selection == 2 ? "Mihomo" : selection == 1 ? "sing-box" : "Xray"; }
     /// Whether the engine may be handed this entry. Its parser rejects the
     /// whole library over one bad entry (that is what makes a config that
     /// saves a config that starts), so the check here is the same one the
     /// editor shows the user.
     static bool core_config_usable(const CoreConfigEntry& entry) {
         if (entry.name.empty() || entry.text.empty()) return false;
-        const int32_t target = entry.backend == 1 ? FCAE_BACKEND_SINGBOX : FCAE_BACKEND_XRAY;
+        const int32_t target = core_backend_id(entry.backend);
         return fcae_core_check_profile(entry.text.c_str(), target, nullptr, 0);
     }
 
@@ -444,7 +452,7 @@ struct AppState {
             core_library_built += "{\"name\":\"";
             core_json_escape_into(core_library_built, entry.name);
             core_library_built += "\",\"backend\":\"";
-            core_library_built += entry.backend == 1 ? "sing-box" : "xray";
+            core_library_built += entry.backend == 2 ? "mihomo" : entry.backend == 1 ? "sing-box" : "xray";
             core_library_built += "\",\"config\":\"";
             core_json_escape_into(core_library_built, entry.text);
             core_library_built += "\"}";
@@ -468,7 +476,7 @@ struct AppState {
             if (transport < kCoreTransportBase) return 0;
             const CoreConfigEntry* entry = core_config_at(transport);
             if (!entry) return 0;
-            core = entry->backend == 1 ? 4 : 3;
+            core = core_backend_id(entry->backend);
         } else if (backend >= 3) {
             core = backend;
         } else {
@@ -494,7 +502,7 @@ struct AppState {
         uint32_t http_port = 0;
         entry.kinds = fcae_core_listeners(
             entry.text.c_str(),
-            entry.backend == 1 ? FCAE_BACKEND_SINGBOX : FCAE_BACKEND_XRAY,
+            core_backend_id(entry.backend),
             &socks_port, &http_port);
         entry.pinned_socks_port = (uint16_t)socks_port;
         entry.pinned_http_port = (uint16_t)http_port;
@@ -516,6 +524,7 @@ struct AppState {
         switch (final_listener_core()) {
             case 3: return kXrayDefaultSocksPort;
             case 4: return kSingBoxDefaultSocksPort;
+            case 5: return kMihomoDefaultSocksPort;
             default: return final_listener_is_firefox() ? kFirefoxDefaultSocksPort : 1819;
         }
     }
@@ -533,6 +542,7 @@ struct AppState {
         switch (final_listener_core()) {
             case 3: return pinned_or(xray_socks_port, kXrayDefaultSocksPort, true);
             case 4: return pinned_or(singbox_socks_port, kSingBoxDefaultSocksPort, true);
+            case 5: return pinned_or(mihomo_socks_port, kMihomoDefaultSocksPort, true);
             default: return final_listener_is_firefox() ? firefox_socks_port : socks_port;
         }
     }
@@ -541,6 +551,7 @@ struct AppState {
         switch (final_listener_core()) {
             case 3: return pinned_or(xray_http_port, kXrayDefaultHttpPort, false);
             case 4: return pinned_or(singbox_http_port, kSingBoxDefaultHttpPort, false);
+            case 5: return pinned_or(mihomo_http_port, kMihomoDefaultHttpPort, false);
             default: return final_listener_is_firefox() ? firefox_http_port : http_port;
         }
     }
@@ -549,6 +560,7 @@ struct AppState {
         switch (final_listener_core()) {
             case 3: return xray_socks_enabled;
             case 4: return singbox_socks_enabled;
+            case 5: return mihomo_socks_enabled;
             default: return final_listener_is_firefox() ? firefox_socks_enabled : socks_enabled;
         }
     }
@@ -557,6 +569,7 @@ struct AppState {
         switch (final_listener_core()) {
             case 3: return xray_http_enabled;
             case 4: return singbox_http_enabled;
+            case 5: return mihomo_http_enabled;
             default: return final_listener_is_firefox() ? firefox_http_enabled : http_enabled;
         }
     }
@@ -600,6 +613,7 @@ struct AppState {
         // A saved config decides its own core, and its profile is the route.
         if (main_doc >= 0 && backend == 3)      c.backend = FCAE_BACKEND_XRAY;
         else if (main_doc >= 0 && backend == 4) c.backend = FCAE_BACKEND_SINGBOX;
+        else if (main_doc >= 0 && backend == 5) c.backend = FCAE_BACKEND_MIHOMO;
         else if (backend >= 3)                  c.backend = FCAE_BACKEND_AETHER;
         else c.backend = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
 
@@ -798,7 +812,11 @@ struct AppState {
             ",\"singboxSocks\":" + (singbox_socks_enabled ? "true" : "false") +
             ",\"singboxHttp\":" + (singbox_http_enabled ? "true" : "false") +
             ",\"singboxSocksPort\":" + port(singbox_socks_port) +
-            ",\"singboxHttpPort\":" + port(singbox_http_port) + "}");
+            ",\"singboxHttpPort\":" + port(singbox_http_port) +
+            ",\"mihomoSocks\":" + (mihomo_socks_enabled ? "true" : "false") +
+            ",\"mihomoHttp\":" + (mihomo_http_enabled ? "true" : "false") +
+            ",\"mihomoSocksPort\":" + port(mihomo_socks_port) +
+            ",\"mihomoHttpPort\":" + port(mihomo_http_port) + "}");
         json = merge_psiphon_transport(json, psiphon_transport);
         psiphon_config_json_built = json;
         c.psiphon.config_json   = psiphon_config_json_built.c_str();

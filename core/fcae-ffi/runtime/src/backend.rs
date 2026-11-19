@@ -24,6 +24,7 @@ pub enum BackendId {
     Firefox,
     Xray,
     SingBox,
+    Mihomo,
 }
 
 impl BackendId {
@@ -34,6 +35,7 @@ impl BackendId {
             BackendId::Firefox => "firefox",
             BackendId::Xray => "xray",
             BackendId::SingBox => "sing-box",
+            BackendId::Mihomo => "mihomo",
         }
     }
 }

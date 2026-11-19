@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+python3 scripts/core/stage-mihomo.py "$FCAE_MATRIX_NAME"
+
 rm -rf target/release/build/aether-engine-* target/debug/build/aether-engine-* 2>/dev/null || true
 
 if [ "${FCAE_MATRIX_NAME}" = "macos-x64" ]; then
@@ -93,7 +95,7 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
       export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/$HEV_ABI"
       export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/$HEV_ABI"
 
-      cargo build --manifest-path core/fcae-ffi/Cargo.toml --locked --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon-android,firefox,zeptun,hev,xray,singbox
+      cargo build --manifest-path core/fcae-ffi/Cargo.toml --locked --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon-android,firefox,zeptun,hev,xray,singbox,mihomo
 
       DEST="$(pwd)/target/$TARGET_TRIPLE/release/libfcae_ffi.a"
       ls -lh "$DEST"
@@ -139,7 +141,7 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
     echo "Using NDK: $NDK"
     "$CLANG" --version | head -1
 
-    cargo build --manifest-path core/fcae-ffi/Cargo.toml --locked --release --target ${FCAE_MATRIX_TARGET} -p fcae-ffi --features aether,tor,psiphon-android,firefox,zeptun,hev,xray,singbox
+    cargo build --manifest-path core/fcae-ffi/Cargo.toml --locked --release --target ${FCAE_MATRIX_TARGET} -p fcae-ffi --features aether,tor,psiphon-android,firefox,zeptun,hev,xray,singbox,mihomo
 
     DEST="$(pwd)/target/${FCAE_MATRIX_TARGET}/release/libfcae_ffi.a"
     ls -lh "$DEST"
@@ -148,7 +150,7 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
 else
   case "${FCAE_MATRIX_NAME}" in
     # Desktop engines are linked in-process.
-    windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,firefox,zeptun,hev,xray,singbox ;;
+    windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,firefox,zeptun,hev,xray,singbox,mihomo ;;
     *) echo "::error::Unsupported desktop target: ${FCAE_MATRIX_NAME}"; exit 1 ;;
   esac
   if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then

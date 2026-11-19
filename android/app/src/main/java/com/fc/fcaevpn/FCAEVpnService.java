@@ -1441,7 +1441,7 @@ public class FCAEVpnService extends VpnService {
         // so a session recorded against a config that no longer exists falls back
         // to the default transport instead of failing to start.
         final int backendRaw   = intent.getIntExtra("backend", 0);
-        final int backend      = (coreConfigId.isEmpty() && (backendRaw == 3 || backendRaw == 4))
+        final int backend      = (coreConfigId.isEmpty() && (backendRaw == 3 || backendRaw == 4 || backendRaw == 5))
             ? 0 : backendRaw;
         // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
         // MainActivity sends 0 when the field still holds the default.

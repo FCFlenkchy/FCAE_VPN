@@ -84,6 +84,7 @@ pub enum FcaeBackend {
     Xray = 3,
     /// sing-box (`sing-box`), built in and driven through [`FcaeCore`].
     SingBox = 4,
+    Mihomo = 5,
 }
 
 /// What a backend supports, so the UI can describe it instead of hardcoding
@@ -872,6 +873,7 @@ impl_try_from_enum!(FcaeBackend, {
     Firefox = 2,
     Xray = 3,
     SingBox = 4,
+    Mihomo = 5,
 });
 
 impl_try_from_enum!(FcaeProtocol, {

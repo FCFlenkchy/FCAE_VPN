@@ -24,7 +24,7 @@ use fcae_abi::*;
 use fcae_runtime::config;
 use fcae_runtime::error::CoreError;
 use fcae_runtime::session::{Supervisor, SupervisorConfig, TunBridge};
-#[cfg(any(feature = "xray", feature = "singbox"))]
+#[cfg(any(feature = "xray", feature = "singbox", feature = "mihomo"))]
 use fcae_runtime::sing_xray::CoreListener;
 use fcae_runtime::telemetry::{self, TelemetryCell};
 use once_cell::sync::OnceCell;
@@ -658,6 +658,8 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         fcae_bridge_xray::register();
         #[cfg(feature = "singbox")]
         fcae_bridge_singbox::register();
+        #[cfg(feature = "mihomo")]
+        fcae_runtime::registry::register(FcaeBackend::Mihomo, || std::sync::Arc::new(fcae_runtime::mihomo::MihomoBackend));
 
         #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
         let engines = Arc::new(TunEngines {
@@ -1287,7 +1289,7 @@ pub unsafe extern "C" fn fcae_core_check_profile(
             .map_err(|_| format!("backend={backend} is invalid"))?;
         if !config::is_core_backend(backend) {
             return Err(format!(
-                "backend={} is not Xray or sing-box",
+                "backend={} is not Xray, sing-box or Mihomo",
                 config::backend_label(backend)
             ));
         }
@@ -1358,7 +1360,7 @@ pub unsafe extern "C" fn fcae_core_listeners(
 /// `scope` is `any` for an inbound bound to every interface and `local` for a
 /// loopback one: a chained hop serves only the hop below it, so offering its
 /// port on the LAN address would name an address that refuses the connection.
-#[cfg(any(feature = "xray", feature = "singbox"))]
+#[cfg(any(feature = "xray", feature = "singbox", feature = "mihomo"))]
 fn core_record(core: &str, position: u64, name: &str, listener: &CoreListener) -> String {
     let scope = if listener.any { "any" } else { "local" };
     format!(
@@ -1377,7 +1379,7 @@ fn core_record(core: &str, position: u64, name: &str, listener: &CoreListener) -
 /// the order the cores happen to be compiled in, not the order the route runs —
 /// and numbered each core's instances from one, so a route of three hops read
 /// `#1, #2, #1`.
-#[cfg(any(feature = "xray", feature = "singbox"))]
+#[cfg(any(feature = "xray", feature = "singbox", feature = "mihomo"))]
 fn listener_records() -> Vec<String> {
     let live = fcae_runtime::sing_xray::live_instances();
     if live.is_empty() {
@@ -1389,6 +1391,8 @@ fn listener_records() -> Vec<String> {
     let xray = fcae_bridge_xray::listeners();
     #[cfg(feature = "singbox")]
     let singbox = fcae_bridge_singbox::listeners();
+    #[cfg(feature = "mihomo")]
+    let mihomo = fcae_runtime::mihomo::listeners();
     let mut records = Vec::new();
     let mut position = 0;
     for instance in live {
@@ -1397,6 +1401,8 @@ fn listener_records() -> Vec<String> {
             FcaeBackend::Xray => xray.as_slice(),
             #[cfg(feature = "singbox")]
             FcaeBackend::SingBox => singbox.as_slice(),
+            #[cfg(feature = "mihomo")]
+            FcaeBackend::Mihomo => mihomo.as_slice(),
             _ => &[],
         };
         let inbounds: Vec<&CoreListener> = reported
@@ -1427,7 +1433,7 @@ fn listener_records() -> Vec<String> {
 }
 
 /// No core in this build, so nothing is listening to report.
-#[cfg(not(any(feature = "xray", feature = "singbox")))]
+#[cfg(not(any(feature = "xray", feature = "singbox", feature = "mihomo")))]
 fn listener_records() -> Vec<String> {
     Vec::new()
 }
@@ -1742,6 +1748,7 @@ fn backend_id_str(id: FcaeBackend) -> &'static str {
         FcaeBackend::Firefox => "firefox",
         FcaeBackend::Xray => "xray",
         FcaeBackend::SingBox => "sing-box",
+        FcaeBackend::Mihomo => "mihomo",
     }
 }
 
@@ -1752,6 +1759,7 @@ fn backend_display_name(id: FcaeBackend) -> &'static str {
         FcaeBackend::Firefox => "Firefox IP Protection",
         FcaeBackend::Xray => "Xray-core",
         FcaeBackend::SingBox => "sing-box",
+        FcaeBackend::Mihomo => "mihomo",
     }
 }
 
