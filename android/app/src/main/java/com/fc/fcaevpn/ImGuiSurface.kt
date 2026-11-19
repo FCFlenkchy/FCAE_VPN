@@ -211,9 +211,10 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
         return true
     }
 
-    override fun onCheckIsTextEditor(): Boolean = true
+    override fun onCheckIsTextEditor(): Boolean = keyboard
 
-    override fun onCreateInputConnection(info: EditorInfo): InputConnection {
+    override fun onCreateInputConnection(info: EditorInfo): InputConnection? {
+        if (!keyboard) return null
         info.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         info.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_FULLSCREEN

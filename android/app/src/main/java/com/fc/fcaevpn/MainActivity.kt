@@ -29,7 +29,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(state: Bundle?) {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(state)
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+            WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
         ImGuiBridge.attach(this)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {

@@ -1,6 +1,7 @@
 #include "ui_render.h"
 #if defined(ANDROID)
 #include "android_ui.h"
+#include "imgui_internal.h"
 #endif
 #include <fstream>
 #include <sstream>
@@ -5320,6 +5321,10 @@ void render_ui() {
             const ImVec2 card_origin = ImGui::GetWindowPos();
             ImGui::SetCursorScreenPos(card_origin);
             ImGui::InvisibleButton("##sponsor_card_touch", ImVec2(card_w, sponsor_card_height));
+#if defined(ANDROID)
+            if (ImGui::IsItemActive())
+                GImGui->ActiveIdUsingNavDirMask |= (1 << ImGuiDir_Left) | (1 << ImGuiDir_Right);
+#endif
             static bool sponsor_dragged = false;
             if (ImGui::IsItemActivated()) sponsor_dragged = false;
             if (ImGui::IsItemActive() && s_sponsor.campaign_count > 1

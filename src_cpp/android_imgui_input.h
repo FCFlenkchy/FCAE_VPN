@@ -33,11 +33,12 @@ public:
         }
         down_ = scrolling_ = false;
         window_ = nullptr;
+        tab_bar_ = 0;
         velocity_ = 0.0f;
     }
 
     void new_frame(float dt) {
-        if (!down_ && std::abs(velocity_) > 1.0f && window_) {
+        if (!down_ && std::abs(velocity_) > 1.0f && (window_ || tab_bar_)) {
             if (!scroll(velocity_ * dt)) velocity_ = 0.0f;
             velocity_ *= std::exp(-7.5f * dt);
             if (std::abs(velocity_) < 12.0f) velocity_ = 0.0f;
@@ -60,6 +61,8 @@ private:
     struct Event { ImVec2 pos; int action; double time; bool touch; };
     std::deque<Event> events_;
     ImGuiWindow* window_ = nullptr;
+    ImGuiID tab_bar_ = 0;
+    ImGuiAxis axis_ = ImGuiAxis_Y;
     ImVec2 origin_{};
     ImVec2 previous_{};
     float slop_ = 8.0f;
@@ -68,14 +71,14 @@ private:
     bool down_ = false;
     bool scrolling_ = false;
 
-    static ImGuiWindow* scroll_window(const ImVec2& position) {
+    static ImGuiWindow* scroll_window(const ImVec2& position, ImGuiAxis axis) {
         ImGuiWindow* hovered = nullptr;
         ImGuiWindow* ignored = nullptr;
         ImGui::FindHoveredWindowEx(position, false, &hovered, &ignored);
         ImGuiWindow* modal = ImGui::GetTopMostPopupModal();
         if (modal && hovered && !ImGui::IsWindowWithinBeginStackOf(hovered, modal)) return nullptr;
         for (ImGuiWindow* window = hovered; window; window = window->ParentWindow) {
-            if (!(window->Flags & (ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoMouseInputs)) && window->ScrollMax.y > 0)
+            if (!(window->Flags & (ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoMouseInputs)) && window->ScrollMax[axis] > 0)
                 return window;
             if (!(window->Flags & ImGuiWindowFlags_ChildWindow)) break;
         }
@@ -95,12 +98,25 @@ private:
     }
 
     bool scroll(float delta) {
+        if (tab_bar_ && axis_ == ImGuiAxis_X) {
+            ImGuiTabBar* bar = GImGui->TabBars.GetByKey(tab_bar_);
+            if (!bar || bar->CurrFrameVisible < GImGui->FrameCount - 1) return false;
+            ImGuiWindow* modal = ImGui::GetTopMostPopupModal();
+            if (modal && !ImGui::IsWindowWithinBeginStackOf(bar->Window, modal)) return false;
+            const float current = bar->ScrollingTarget;
+            const float next = std::clamp(current - delta, 0.0f,
+                std::max(0.0f, bar->WidthAllTabs - bar->BarRect.GetWidth()));
+            bar->ScrollingTarget = bar->ScrollingAnim = next;
+            bar->ScrollingTargetDistToVisibility = 0.0f;
+            return next != current;
+        }
         if (!window_ || !window_->WasActive) return false;
         ImGuiWindow* modal = ImGui::GetTopMostPopupModal();
         if (modal && !ImGui::IsWindowWithinBeginStackOf(window_, modal)) return false;
-        const float current = window_->ScrollTarget.y != FLT_MAX ? window_->ScrollTarget.y : window_->Scroll.y;
-        const float next = std::clamp(current - delta, 0.0f, window_->ScrollMax.y);
-        ImGui::SetScrollY(window_, next);
+        const float current = window_->ScrollTarget[axis_] != FLT_MAX ? window_->ScrollTarget[axis_] : window_->Scroll[axis_];
+        const float next = std::clamp(current - delta, 0.0f, window_->ScrollMax[axis_]);
+        if (axis_ == ImGuiAxis_X) ImGui::SetScrollX(window_, next);
+        else ImGui::SetScrollY(window_, next);
         return next != current;
     }
 
@@ -118,7 +134,20 @@ private:
             velocity_ = 0.0f;
             origin_ = previous_ = event.pos;
             previous_time_ = event.time;
-            window_ = scroll_window(event.pos);
+            window_ = nullptr;
+            tab_bar_ = 0;
+            ImGuiWindow* hovered = nullptr;
+            ImGuiWindow* ignored = nullptr;
+            ImGui::FindHoveredWindowEx(event.pos, false, &hovered, &ignored);
+            for (int i = 0; i < GImGui->TabBars.GetMapSize(); ++i) {
+                ImGuiTabBar* bar = GImGui->TabBars.TryGetMapData(i);
+                if (bar && bar->Window == hovered && bar->CurrFrameVisible >= GImGui->FrameCount - 1
+                        && (bar->Flags & ImGuiTabBarFlags_FittingPolicyScroll)
+                        && bar->WidthAllTabs > bar->BarRect.GetWidth() && bar->BarRect.Contains(event.pos)) {
+                    tab_bar_ = bar->ID;
+                    break;
+                }
+            }
             down_ = true;
             scrolling_ = false;
             io.AddMouseButtonEvent(0, true);
@@ -128,6 +157,7 @@ private:
             cancel_press();
             down_ = scrolling_ = false;
             window_ = nullptr;
+            tab_bar_ = 0;
             velocity_ = 0.0f;
             return;
         }
@@ -135,20 +165,27 @@ private:
         if (event.action == Move || event.action == Up) {
             const float dx = event.pos.x - origin_.x;
             const float dy = event.pos.y - origin_.y;
+            const ImGuiAxis direction = std::abs(dx) > std::abs(dy) ? ImGuiAxis_X : ImGuiAxis_Y;
             const bool scrollbar = GImGui->ActiveIdWindow &&
-                GImGui->ActiveId == ImGui::GetWindowScrollbarID(GImGui->ActiveIdWindow, ImGuiAxis_Y);
-            // Horizontal sliders and sponsor swipes retain horizontal drags;
-            // vertical motion scrolls even if a button initially took ActiveId.
-            if (!scrolling_ && !scrollbar && window_ && std::abs(dy) > slop_ && std::abs(dy) > std::abs(dx)) {
-                scrolling_ = true;
-                cancel_press();
-                scroll(dy);
+                (GImGui->ActiveId == ImGui::GetWindowScrollbarID(GImGui->ActiveIdWindow, ImGuiAxis_X) ||
+                 GImGui->ActiveId == ImGui::GetWindowScrollbarID(GImGui->ActiveIdWindow, ImGuiAxis_Y));
+            const bool horizontal_control = direction == ImGuiAxis_X && GImGui->ActiveId &&
+                (GImGui->ActiveIdUsingNavDirMask & ((1 << ImGuiDir_Left) | (1 << ImGuiDir_Right)));
+            if (!scrolling_ && !scrollbar && !horizontal_control && std::max(std::abs(dx), std::abs(dy)) > slop_) {
+                axis_ = direction;
+                window_ = scroll_window(origin_, axis_);
+                if (window_ || (axis_ == ImGuiAxis_X && tab_bar_)) {
+                    scrolling_ = true;
+                    velocity_ = 0.0f;
+                    cancel_press();
+                    scroll(axis_ == ImGuiAxis_X ? dx : dy);
+                }
             } else if (scrolling_) {
-                scroll(event.pos.y - previous_.y);
+                scroll(event.pos[axis_] - previous_[axis_]);
             }
             const double elapsed = event.time - previous_time_;
-            if (event.action == Move && elapsed > 0.0 && elapsed < 0.15) {
-                const float speed = std::clamp(static_cast<float>((event.pos.y - previous_.y) / elapsed), -6000.0f, 6000.0f);
+            if (scrolling_ && event.action == Move && elapsed > 0.0 && elapsed < 0.15) {
+                const float speed = std::clamp(static_cast<float>((event.pos[axis_] - previous_[axis_]) / elapsed), -6000.0f, 6000.0f);
                 velocity_ = velocity_ * 0.35f + speed * 0.65f;
             }
             if (event.action == Up) {
