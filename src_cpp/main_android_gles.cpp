@@ -416,6 +416,9 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeResize(JNIEnv*, jclass, jint width, jint h
     surface_width = std::max(1, width); surface_height = std::max(1, height);
     ui_request_redraw();
 }
+void android_ui_horizontal_drag_item() { input.horizontal_drag_item(); }
+bool android_ui_is_scrolling() { return input.scrolling_window(ImGui::GetCurrentWindow()->ID); }
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     if (!initialized || !renderer_initialized) return 250;

@@ -16,3 +16,6 @@ void android_ui_wake();
 void android_ui_render_controls();
 void android_ui_render_routing();
 void android_ui_render_app_picker();
+
+void android_ui_horizontal_drag_item();
+bool android_ui_is_scrolling();

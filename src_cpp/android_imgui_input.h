@@ -5,51 +5,97 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <vector>
 
-// Owned exclusively by the GL thread. Keep taps as separate press/release
-// frames, but collapse motion samples so input never builds a render backlog.
+// GL-thread owned. Ordinary touches become clicks only after a completed tap.
 class AndroidImGuiInput {
 public:
     enum Action { Down = 0, Up = 1, Move = 2, Cancel = 3 };
 
     void set_touch_slop(float value) { slop_ = std::max(1.0f, value); }
 
+    void horizontal_drag_item() {
+        ImGuiWindow* window = ImGui::GetCurrentWindow();
+        if (window->SkipItems || (GImGui->LastItemData.ItemFlags & ImGuiItemFlags_Disabled)) return;
+        ImRect rect = GImGui->LastItemData.NavRect;
+        rect.ClipWith(window->ClipRect);
+        if (!rect.IsInverted()) drag_items_.push_back({window->ID, rect, GImGui->FrameCount});
+    }
+
+    bool scrolling_window(ImGuiID id) const {
+        return (down_ && touch_window_ == id) ||
+            (window_id_ == id && (scrolling_ || std::abs(velocity_) > 1.0f));
+    }
+
     void pointer(float x, float y, int action, double time, bool touch) {
-        if (!touch || action == Down || action == Cancel) velocity_ = 0.0f;
-        Event event{ImVec2(x, y), action, time, touch};
+        const bool stopped_fling = touch && action == Down && std::abs(velocity_) > 1.0f;
+        const ImVec2 pos(x, y);
+        if (!touch || action == Down || action == Cancel) {
+            velocity_ = 0.0f;
+            raw_origin_ = raw_previous_ = pos;
+            raw_intent_ = raw_velocity_ = ImVec2();
+            raw_time_ = time;
+        } else {
+            const ImVec2 delta(pos.x - raw_origin_.x, pos.y - raw_origin_.y);
+            if (raw_intent_.x == 0.0f && raw_intent_.y == 0.0f &&
+                    std::max(std::abs(delta.x), std::abs(delta.y)) > slop_)
+                raw_intent_ = delta;
+            const double elapsed = time - raw_time_;
+            if (elapsed > 0.0) {
+                if (elapsed >= 0.15) raw_velocity_ = ImVec2();
+                else if (action == Move || pos.x != raw_previous_.x || pos.y != raw_previous_.y) {
+                    const float blend = 1.0f - std::exp(-static_cast<float>(elapsed) / 0.04f);
+                    for (int axis = 0; axis < 2; ++axis) {
+                        const float speed = std::clamp(static_cast<float>((pos[axis] - raw_previous_[axis]) / elapsed), -6000.0f, 6000.0f);
+                        raw_velocity_[axis] += (speed - raw_velocity_[axis]) * blend;
+                    }
+                } else if (elapsed > 0.04) raw_velocity_ = ImVec2();
+            }
+            raw_previous_ = pos;
+            raw_time_ = time;
+        }
+        Event event{pos, action, touch, raw_intent_, raw_velocity_, stopped_fling};
         if (action == Move && !events_.empty() && events_.back().action == Move && events_.back().touch == touch)
             events_.back() = event;
-        else
-            events_.push_back(event);
-        if (events_.size() > 256) {
-            reset();
-        }
+        else events_.push_back(event);
+        if (events_.size() > 256) reset();
     }
 
     void reset() {
         events_.clear();
-        if (down_ || scrolling_) {
-            cancel_press();
-        }
-        down_ = scrolling_ = false;
-        window_ = nullptr;
-        tab_bar_ = 0;
+        if (GImGui) cancel_press();
+        down_ = scrolling_ = forwarding_ = horizontal_owner_ = false;
+        window_id_ = tab_bar_ = touch_window_ = 0;
         velocity_ = 0.0f;
+        suppress_tap_ = false;
+        drag_items_.clear();
     }
 
     void new_frame(float dt) {
-        if (!down_ && std::abs(velocity_) > 1.0f && (window_ || tab_bar_)) {
-            if (!scroll(velocity_ * dt)) velocity_ = 0.0f;
-            velocity_ *= std::exp(-7.5f * dt);
-            if (std::abs(velocity_) < 12.0f) velocity_ = 0.0f;
+        if (down_ && !forwarding_ && !scrolling_) {
+            if (GImGui->FrameCount == capture_frame_) tap_id_ = GImGui->HoveredId;
+            else if (GImGui->FrameCount > capture_frame_ && GImGui->HoveredId != tap_id_)
+                suppress_tap_ = true;
         }
+        drag_items_.erase(std::remove_if(drag_items_.begin(), drag_items_.end(), [](const DragItem& item) {
+            return item.frame < GImGui->FrameCount;
+        }), drag_items_.end());
+        const bool was_down = down_;
         bool transitioned = false;
         while (!events_.empty()) {
+            if (forwarding_ && press_frame_ == GImGui->FrameCount) break;
             const Event event = events_.front();
             if (event.action != Move && transitioned) break;
             events_.pop_front();
             if (event.action != Move) transitioned = true;
             handle(event);
+        }
+        if (!was_down && !down_ && std::abs(velocity_) > 1.0f) {
+            const float elapsed = std::clamp(dt, 0.0f, 0.05f);
+            const float decay = std::exp(-7.5f * elapsed);
+            if (!scroll(velocity_ * (1.0f - decay) / 7.5f)) velocity_ = 0.0f;
+            velocity_ *= decay;
+            if (std::abs(velocity_) < 12.0f) velocity_ = 0.0f;
         }
     }
 
@@ -58,26 +104,31 @@ public:
     }
 
 private:
-    struct Event { ImVec2 pos; int action; double time; bool touch; };
+    struct Event { ImVec2 pos; int action; bool touch; ImVec2 intent; ImVec2 velocity; bool stopped_fling; };
+    struct DragItem { ImGuiID window; ImRect rect; int frame; };
     std::deque<Event> events_;
-    ImGuiWindow* window_ = nullptr;
-    ImGuiID tab_bar_ = 0;
+    std::vector<DragItem> drag_items_;
+    ImGuiID window_id_ = 0, tab_bar_ = 0, touch_window_ = 0, tap_id_ = 0;
     ImGuiAxis axis_ = ImGuiAxis_Y;
-    ImVec2 origin_{};
-    ImVec2 previous_{};
-    float slop_ = 8.0f;
-    float velocity_ = 0.0f;
-    double previous_time_ = 0.0;
-    bool down_ = false;
-    bool scrolling_ = false;
+    ImVec2 origin_{}, previous_{};
+    ImVec2 raw_origin_{}, raw_previous_{}, raw_intent_{}, raw_velocity_{};
+    double raw_time_ = 0.0;
+    float slop_ = 8.0f, velocity_ = 0.0f, scroll_position_ = 0.0f;
+    int press_frame_ = -1, capture_frame_ = -1;
+    bool down_ = false, scrolling_ = false, forwarding_ = false;
+    bool horizontal_owner_ = false, suppress_tap_ = false;
 
-    static ImGuiWindow* scroll_window(const ImVec2& position, ImGuiAxis axis) {
+    static ImGuiWindow* hovered_window(const ImVec2& position) {
         ImGuiWindow* hovered = nullptr;
         ImGuiWindow* ignored = nullptr;
         ImGui::FindHoveredWindowEx(position, false, &hovered, &ignored);
         ImGuiWindow* modal = ImGui::GetTopMostPopupModal();
         if (modal && hovered && !ImGui::IsWindowWithinBeginStackOf(hovered, modal)) return nullptr;
-        for (ImGuiWindow* window = hovered; window; window = window->ParentWindow) {
+        return hovered;
+    }
+
+    static ImGuiWindow* scroll_window(ImGuiWindow* window, ImGuiAxis axis) {
+        for (; window; window = window->ParentWindow) {
             if (!(window->Flags & (ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoMouseInputs)) && window->ScrollMax[axis] > 0)
                 return window;
             if (!(window->Flags & ImGuiWindowFlags_ChildWindow)) break;
@@ -87,14 +138,25 @@ private:
 
     static void cancel_press() {
         ImGui::ClearActiveID();
-        // A complete flick may arrive between two frames. Remove its queued
-        // press as well as the already-active ID, or trickling can resurrect
-        // that press after scrolling has started and click on release.
         auto& queue = GImGui->InputEventsQueue;
         for (int i = queue.Size - 1; i >= 0; --i)
             if (queue[i].Type == ImGuiInputEventType_MouseButton && queue[i].MouseButton.Button == 0)
                 queue.erase(queue.Data + i);
         ImGui::GetIO().ClearInputMouse();
+    }
+
+    void press() {
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMousePosEvent(origin_.x, origin_.y);
+        io.AddMouseButtonEvent(0, true);
+        forwarding_ = true;
+        press_frame_ = GImGui->FrameCount;
+    }
+
+    bool valid_touch_window() const {
+        ImGuiWindow* window = ImGui::FindWindowByID(touch_window_);
+        ImGuiWindow* modal = ImGui::GetTopMostPopupModal();
+        return window && window->WasActive && (!modal || ImGui::IsWindowWithinBeginStackOf(window, modal));
     }
 
     bool scroll(float delta) {
@@ -103,99 +165,116 @@ private:
             if (!bar || bar->CurrFrameVisible < GImGui->FrameCount - 1) return false;
             ImGuiWindow* modal = ImGui::GetTopMostPopupModal();
             if (modal && !ImGui::IsWindowWithinBeginStackOf(bar->Window, modal)) return false;
-            const float current = bar->ScrollingTarget;
-            const float next = std::clamp(current - delta, 0.0f,
+            const float next = std::clamp(scroll_position_ - delta, 0.0f,
                 std::max(0.0f, bar->WidthAllTabs - bar->BarRect.GetWidth()));
-            bar->ScrollingTarget = bar->ScrollingAnim = next;
+            const bool changed = next != scroll_position_;
+            scroll_position_ = bar->ScrollingTarget = bar->ScrollingAnim = next;
             bar->ScrollingTargetDistToVisibility = 0.0f;
-            return next != current;
+            return changed;
         }
-        if (!window_ || !window_->WasActive) return false;
+        ImGuiWindow* window = ImGui::FindWindowByID(window_id_);
+        if (!window || !window->WasActive) return false;
         ImGuiWindow* modal = ImGui::GetTopMostPopupModal();
-        if (modal && !ImGui::IsWindowWithinBeginStackOf(window_, modal)) return false;
-        const float current = window_->ScrollTarget[axis_] != FLT_MAX ? window_->ScrollTarget[axis_] : window_->Scroll[axis_];
-        const float next = std::clamp(current - delta, 0.0f, window_->ScrollMax[axis_]);
-        if (axis_ == ImGuiAxis_X) ImGui::SetScrollX(window_, next);
-        else ImGui::SetScrollY(window_, next);
-        return next != current;
+        if (modal && !ImGui::IsWindowWithinBeginStackOf(window, modal)) return false;
+        const float next = std::clamp(scroll_position_ - delta, 0.0f, window->ScrollMax[axis_]);
+        const bool changed = next != scroll_position_;
+        scroll_position_ = next;
+        if (axis_ == ImGuiAxis_X) ImGui::SetScrollX(window, next);
+        else ImGui::SetScrollY(window, next);
+        return changed;
     }
 
     void handle(const Event& event) {
         ImGuiIO& io = ImGui::GetIO();
         io.AddMouseSourceEvent(event.touch ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
-        io.AddMousePosEvent(event.pos.x, event.pos.y);
         if (!event.touch) {
-            velocity_ = 0.0f;
+            if (down_) {
+                cancel_press();
+                down_ = scrolling_ = forwarding_ = false;
+            }
+            io.AddMousePosEvent(event.pos.x, event.pos.y);
             if (event.action == Down) io.AddMouseButtonEvent(0, true);
             if (event.action == Up || event.action == Cancel) io.AddMouseButtonEvent(0, false);
             return;
         }
         if (event.action == Down) {
-            velocity_ = 0.0f;
             origin_ = previous_ = event.pos;
-            previous_time_ = event.time;
-            window_ = nullptr;
-            tab_bar_ = 0;
-            ImGuiWindow* hovered = nullptr;
-            ImGuiWindow* ignored = nullptr;
-            ImGui::FindHoveredWindowEx(event.pos, false, &hovered, &ignored);
+            io.AddMousePosEvent(origin_.x, origin_.y);
+            capture_frame_ = GImGui->FrameCount + 1;
+            window_id_ = tab_bar_ = touch_window_ = 0;
+            down_ = true;
+            suppress_tap_ = event.stopped_fling;
+            scrolling_ = forwarding_ = horizontal_owner_ = false;
+            ImGuiWindow* hovered = hovered_window(origin_);
+            if (!hovered) return;
+            touch_window_ = hovered->ID;
+            for (const DragItem& item : drag_items_)
+                if (item.window == touch_window_ && item.rect.Contains(origin_)) horizontal_owner_ = true;
+            for (int axis = 0; axis < 2; ++axis)
+                if ((axis == ImGuiAxis_X ? hovered->ScrollbarX : hovered->ScrollbarY) &&
+                        ImGui::GetWindowScrollbarRect(hovered, static_cast<ImGuiAxis>(axis)).Contains(origin_)) {
+                    press();
+                    return;
+                }
             for (int i = 0; i < GImGui->TabBars.GetMapSize(); ++i) {
                 ImGuiTabBar* bar = GImGui->TabBars.TryGetMapData(i);
-                if (bar && bar->Window == hovered && bar->CurrFrameVisible >= GImGui->FrameCount - 1
-                        && (bar->Flags & ImGuiTabBarFlags_FittingPolicyScroll)
-                        && bar->WidthAllTabs > bar->BarRect.GetWidth() && bar->BarRect.Contains(event.pos)) {
+                if (bar && bar->Window == hovered && bar->CurrFrameVisible >= GImGui->FrameCount - 1 &&
+                        (bar->Flags & ImGuiTabBarFlags_FittingPolicyScroll) &&
+                        bar->WidthAllTabs > bar->BarRect.GetWidth() && bar->BarRect.Contains(origin_)) {
                     tab_bar_ = bar->ID;
                     break;
                 }
             }
-            down_ = true;
-            scrolling_ = false;
-            io.AddMouseButtonEvent(0, true);
             return;
         }
-        if (event.action == Cancel) {
+        if (event.action == Cancel || (down_ && !valid_touch_window())) {
             cancel_press();
-            down_ = scrolling_ = false;
-            window_ = nullptr;
-            tab_bar_ = 0;
+            down_ = scrolling_ = forwarding_ = false;
+            window_id_ = tab_bar_ = 0;
             velocity_ = 0.0f;
             return;
         }
         if (!down_) return;
-        if (event.action == Move || event.action == Up) {
-            const float dx = event.pos.x - origin_.x;
-            const float dy = event.pos.y - origin_.y;
-            const ImGuiAxis direction = std::abs(dx) > std::abs(dy) ? ImGuiAxis_X : ImGuiAxis_Y;
-            const bool scrollbar = GImGui->ActiveIdWindow &&
-                (GImGui->ActiveId == ImGui::GetWindowScrollbarID(GImGui->ActiveIdWindow, ImGuiAxis_X) ||
-                 GImGui->ActiveId == ImGui::GetWindowScrollbarID(GImGui->ActiveIdWindow, ImGuiAxis_Y));
-            const bool horizontal_control = direction == ImGuiAxis_X && GImGui->ActiveId &&
-                (!GImGui->ActiveIdWindow || GImGui->ActiveId != GImGui->ActiveIdWindow->MoveId) &&
-                (GImGui->ActiveIdUsingNavDirMask & ((1 << ImGuiDir_Left) | (1 << ImGuiDir_Right)));
-            if (!scrolling_ && !scrollbar && !horizontal_control && std::max(std::abs(dx), std::abs(dy)) > slop_) {
-                axis_ = direction;
-                window_ = scroll_window(origin_, axis_);
-                if (window_ || (axis_ == ImGuiAxis_X && tab_bar_)) {
-                    scrolling_ = true;
-                    velocity_ = 0.0f;
-                    cancel_press();
-                    scroll(axis_ == ImGuiAxis_X ? dx : dy);
-                }
-            } else if (scrolling_) {
-                scroll(event.pos[axis_] - previous_[axis_]);
-            }
-            const double elapsed = event.time - previous_time_;
-            if (scrolling_ && event.action == Move && elapsed > 0.0 && elapsed < 0.15) {
-                const float speed = std::clamp(static_cast<float>((event.pos[axis_] - previous_[axis_]) / elapsed), -6000.0f, 6000.0f);
-                velocity_ = velocity_ * 0.35f + speed * 0.65f;
-            }
+        if (forwarding_) {
+            io.AddMousePosEvent(event.pos.x, event.pos.y);
             if (event.action == Up) {
-                if (!scrolling_ || elapsed > 0.1) velocity_ = 0.0f;
-                down_ = scrolling_ = false;
                 io.AddMouseButtonEvent(0, false);
+                down_ = forwarding_ = false;
             }
-            previous_ = event.pos;
-            previous_time_ = event.time;
+            return;
+        }
+        const bool moved = event.intent.x != 0.0f || event.intent.y != 0.0f;
+        if (!scrolling_ && moved) {
+            axis_ = std::abs(event.intent.x) > std::abs(event.intent.y) ? ImGuiAxis_X : ImGuiAxis_Y;
+            if (axis_ == ImGuiAxis_X && horizontal_owner_) {
+                press();
+                events_.push_front(event);
+                return;
+            }
+            ImGuiWindow* window = scroll_window(ImGui::FindWindowByID(touch_window_), axis_);
+            if (tab_bar_ && axis_ == ImGuiAxis_X) {
+                ImGuiTabBar* bar = GImGui->TabBars.GetByKey(tab_bar_);
+                if (bar) { scroll_position_ = bar->ScrollingTarget; scrolling_ = true; }
+            } else if (window) {
+                window_id_ = window->ID;
+                scroll_position_ = window->ScrollTarget[axis_] != FLT_MAX ? window->ScrollTarget[axis_] : window->Scroll[axis_];
+                scrolling_ = true;
+            }
+            if (scrolling_) {
+                io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                const float distance = event.pos[axis_] - origin_[axis_];
+                scroll(distance - std::copysign(std::min(std::abs(distance), slop_), distance));
+            }
+        } else if (scrolling_) scroll(event.pos[axis_] - previous_[axis_]);
+        previous_ = event.pos;
+        if (event.action == Up) {
+            if (scrolling_) velocity_ = event.velocity[axis_];
+            else if (!moved && !suppress_tap_) {
+                press();
+                events_.push_front(event);
+                return;
+            }
+            down_ = scrolling_ = false;
         }
     }
 };

@@ -5325,8 +5325,7 @@ void render_ui() {
             ImGui::SetCursorScreenPos(card_origin);
             ImGui::InvisibleButton("##sponsor_card_touch", ImVec2(card_w, sponsor_card_height));
 #if defined(ANDROID)
-            if (ImGui::IsItemActive())
-                GImGui->ActiveIdUsingNavDirMask |= (1 << ImGuiDir_Left) | (1 << ImGuiDir_Right);
+            android_ui_horizontal_drag_item();
 #endif
             static bool sponsor_dragged = false;
             if (ImGui::IsItemActivated()) sponsor_dragged = false;
@@ -5334,10 +5333,11 @@ void render_ui() {
                     && std::abs(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x) >= 36.0f)
                 sponsor_dragged = true;
             if (ImGui::IsItemDeactivated()) {
-                if (sponsor_dragged) {
+                if (sponsor_dragged && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     fcae_sponsor_next();
                     ui_request_redraw();
-                } else if (ImGui::IsItemHovered()
+                } else if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && ImGui::IsItemHovered()
+                        && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)
                         && strncmp(sponsor_destination, "https://", 8) == 0) {
                     open_link(sponsor_destination);
                 }
@@ -6000,9 +6000,21 @@ void render_ui() {
             if (g_app.fragment_enabled) {
                 ImGui::PushItemWidth(180);
                 ImGui::SliderInt("Chunk Min (B)", &g_app.frag_min_size, 8, 64);
+#if defined(ANDROID)
+                android_ui_horizontal_drag_item();
+#endif
                 ImGui::SliderInt("Chunk Max (B)", &g_app.frag_max_size, 16, 128);
+#if defined(ANDROID)
+                android_ui_horizontal_drag_item();
+#endif
                 ImGui::SliderInt("Delay Min (ms)", &g_app.frag_min_delay, 0, 20);
+#if defined(ANDROID)
+                android_ui_horizontal_drag_item();
+#endif
                 ImGui::SliderInt("Delay Max (ms)", &g_app.frag_max_delay, 1, 50);
+#if defined(ANDROID)
+                android_ui_horizontal_drag_item();
+#endif
                 ImGui::PopItemWidth();
                 ImGui::Checkbox("Split inside SNI", &g_app.fragment_sni);
             }
@@ -6098,6 +6110,9 @@ void render_ui() {
             g_app.sync_logs(revision, logs_snapshot);
 
             const bool manual_scroll =
+#if defined(ANDROID)
+                android_ui_is_scrolling() ||
+#endif
                 (ImGui::IsWindowHovered() &&
                     (ImGui::GetIO().MouseWheel != 0.0f || ImGui::IsMouseDragging(0))) ||
                 (ImGui::IsWindowFocused() &&
