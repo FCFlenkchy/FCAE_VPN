@@ -2627,8 +2627,8 @@ static const std::string kLinkLicense = std::string(kLinkGithub) + "/blob/main/L
 static const char* const kGramAddress = "UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV";
 struct CommunityLink { const char* label; const char* url; const char* shown; };
 static const CommunityLink kCommunityLinks[] = {
-    { "Telegram", kLinkTelegram, "t.me/FCAE_VPN" },
-    { "GitHub",   kLinkGithub,   "github.com/FCFlenkchy/FCAE_VPN" },
+    { "Telegram:", kLinkTelegram, "t.me/FCAE_VPN" },
+    { "GitHub:",   kLinkGithub,   "github.com/FCFlenkchy/FCAE_VPN" },
 };
 
 static std::string firefox_json_escape(const char* value) {
@@ -4940,63 +4940,107 @@ void render_ui() {
         if (startup) ImGui::EndDisabled();
 
         {
+            static bool gram_copied = false;
             if (s_about_popup_open) {
                 ImGui::OpenPopup("##about_popup");
                 s_about_popup_open = false;
+                gram_copied = false;
             }
             ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(modal_size(680.0f, ImGui::GetTextLineHeightWithSpacing() * 21.0f),
+                                     ImGuiCond_Always);
             constrain_modal();
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 16.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 12.0f);
             if (ImGui::BeginPopupModal("##about_popup", nullptr,
-                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) {
-                ImGui::TextUnformatted("FCAE VPN");
-                ImGui::TextColored(build_is_prerelease() ? ImVec4(1.0f, 0.72f, 0.20f, 1.0f)
-                                                         : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
-                                   "%s  |  %s", fcae_display_version(),
-                                   build_is_prerelease() ? "pre-release" : "release");
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar)) {
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 7.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+                ImGui::TextUnformatted("About");
                 ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-                for (const CommunityLink& link : kCommunityLinks) {
-                    ImGui::PushID(link.url);
-                    if (ImGui::TextLink(link.label))
-                        open_link(link.url);
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s", link.url);
-                    // A second column: the label, then the address it points
-                    // at. Measured rather than a flat 96 px, which the doubled
-                    // font size left too narrow for the link text.
-                    ImGui::SameLine(ImGui::CalcTextSize("Telegram").x + 24.0f);
-                    ImGui::TextDisabled("%s", link.shown);
-                    ImGui::PopID();
+                const float footer_height = ImGui::GetFrameHeightWithSpacing();
+                if (ImGui::BeginChild("##about_content", ImVec2(0, -footer_height))) {
+                    auto link = [](const char* label, const char* url) {
+                        const float text_width = ImGui::CalcTextSize(label).x;
+                        const float scale = std::min(1.0f,
+                            std::max(1.0f, ImGui::GetContentRegionAvail().x) / std::max(1.0f, text_width));
+                        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale);
+                        if (ImGui::TextLink(label)) open_link(url);
+                        ImGui::PopFont();
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", url);
+                    };
+                    auto inline_link = [&](const char* prefix, const char* label, const char* url) {
+                        ImGui::TextWrapped("%s", prefix);
+                        const float width = ImGui::CalcTextSize(label).x;
+                        const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+                        if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + width <= right)
+                            ImGui::SameLine();
+                        link(label, url);
+                    };
+                    auto colored_button = [](const char* label, const ImVec4& color, const ImVec2& size) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, color);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(
+                            std::min(color.x + 0.08f, 1.0f), std::min(color.y + 0.08f, 1.0f),
+                            std::min(color.z + 0.08f, 1.0f), 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                            ImVec4(color.x * 0.8f, color.y * 0.8f, color.z * 0.8f, 1.0f));
+                        const bool pressed = ImGui::Button(label, size);
+                        ImGui::PopStyleColor(3);
+                        return pressed;
+                    };
+                    ImGui::TextUnformatted("FCAE VPN");
+                    ImGui::TextColored(build_is_prerelease()
+                        ? ImVec4(240 / 255.0f, 180 / 255.0f, 41 / 255.0f, 1.0f)
+                        : ImVec4(138 / 255.0f, 147 / 255.0f, 166 / 255.0f, 1.0f),
+                        "%s  |  %s", fcae_display_version(),
+                        build_is_prerelease() ? "pre-release" : "release");
+                    ImGui::Spacing();
+                    for (const CommunityLink& community : kCommunityLinks) {
+                        ImGui::PushID(community.url);
+                        inline_link(community.label, community.shown, community.url);
+                        ImGui::PopID();
+                    }
+                    ImGui::Spacing();
+                    inline_link(build_is_prerelease() ? "Pre-released under the" : "Released under the",
+                                "LICENSE", kLinkLicense.c_str());
+                    inline_link("Credits are listed in the", "GitHub repository", kLinkCredits.c_str());
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+                    const float gap = 8.0f;
+                    const float button_width = std::max(1.0f, (ImGui::GetContentRegionAvail().x - gap) * 0.5f);
+                    const float min_button_width = std::max(ImGui::CalcTextSize("Telegram").x,
+                        ImGui::CalcTextSize("GitHub").x) + ImGui::GetStyle().FramePadding.x * 2.0f;
+                    const bool button_row = button_width >= min_button_width;
+                    const ImVec2 button_size(button_row ? button_width : -1.0f, 0);
+                    if (colored_button("Telegram##about", ImVec4(34 / 255.0f, 158 / 255.0f, 217 / 255.0f, 1), button_size))
+                        open_link(kLinkTelegram);
+                    if (button_row) ImGui::SameLine(0, gap);
+                    if (colored_button("GitHub##about", ImVec4(52 / 255.0f, 52 / 255.0f, 74 / 255.0f, 1), button_size))
+                        open_link(kLinkGithub);
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+                    ImGui::TextWrapped("Support the developer with GRAM (The Open Network):");
+                    ImGui::TextWrapped("%s", kGramAddress);
+                    if (colored_button("Copy GRAM address", ImVec4(0, 136 / 255.0f, 204 / 255.0f, 1), ImVec2(-1, 0))) {
+                        ImGui::SetClipboardText(kGramAddress);
+                        gram_copied = true;
+                    }
+                    if (gram_copied)
+                        ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1), "GRAM address copied");
                 }
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::TextUnformatted("Support the developer with GRAM (The Open Network):");
-                ImGui::TextUnformatted(kGramAddress);
-                if (ImGui::Button("Copy GRAM address")) ImGui::SetClipboardText(kGramAddress);
-                ImGui::Spacing();
-                ImGui::TextDisabled("%s", build_is_prerelease()
-                    ? "Pre-released under the" : "Released under the");
-                ImGui::SameLine(0, 4);
-                if (ImGui::TextLink("LICENSE"))
-                    open_link(kLinkLicense.c_str());
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", kLinkLicense.c_str());
-                ImGui::TextDisabled("Credits are listed in the");
-                ImGui::SameLine(0, 4);
-                if (ImGui::TextLink("GitHub repository"))
-                    open_link(kLinkCredits.c_str());
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", kLinkCredits.c_str());
-                ImGui::Spacing();
-                if (ImGui::Button("Telegram##about_telegram_button")) open_link(kCommunityLinks[0].url);
-                ImGui::SameLine();
-                if (ImGui::Button("GitHub##about_github_button")) open_link(kCommunityLinks[1].url);
-                ImGui::SameLine();
-                if (ImGui::Button("Close"))
-                    ImGui::CloseCurrentPopup();
+                ImGui::EndChild();
+                const float close_width = ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
+                    ImGui::GetWindowContentRegionMax().x - close_width));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 1, 1, 1));
+                if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+                ImGui::PopStyleColor(2);
+                ImGui::PopStyleColor();
+                ImGui::PopStyleVar();
                 ImGui::EndPopup();
             }
+            ImGui::PopStyleVar(2);
         }
 
         ImGui::PopStyleVar(2);
