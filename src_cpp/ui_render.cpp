@@ -393,19 +393,11 @@ static void draw_sponsor_text(const SponsorText& t, const ImVec2& origin, const 
 }
 
 // What the last painted frame looked like / when it was painted.
-static uint64_t s_painted_sig = 0;
 static uint64_t s_frame_log_revision = 0;
 static bool s_log_scroll_pending = false;
-static bool     s_painted_once = false;
 
-// Animation (sponsor frames, spinner) advances at 30 FPS; an unchanged window
-// is not repainted, only re-checked at the idle intervals below.
-static constexpr unsigned kUiFrameRate = 30;
-static constexpr unsigned kUiFrameIntervalMs = 1000 / kUiFrameRate;
-static constexpr unsigned kUiIdleIntervalMs = 250;
-static constexpr unsigned kUiUnfocusedIntervalMs = 500;
-static constexpr unsigned kUiCaretIntervalMs = 100;
-static constexpr double kUiCaretPhaseSeconds = 0.4;
+// All visible UI hosts target 60 FPS, including idle and animations.
+static constexpr unsigned kUiFrameIntervalMs = 17;
 
 // UI state that keeps needing frames on its own.
 static bool s_busy_anim = false;      // connect/scan spinner is on screen
@@ -588,161 +580,9 @@ static uint64_t config_signature() {
     return h;
 }
 
-/// Fingerprint of everything the UI paints. Unchanged fingerprint + no input ⇒
-/// the next frame would be pixel-identical, so it can be skipped.
 static bool s_error_detail_visible = false;
 
-static uint64_t ui_content_signature() {
-    uint64_t h = 1469598103934665603ull;   // FNV-1a offset basis
 
-    const FcaeTelemetry& t = g_app.telem;
-    h = fnv_value(h, t.state);
-    h = fnv_value(h, t.rtt_ms);
-    h = fnv_value(h, t.rx_bytes_sec);
-    h = fnv_value(h, t.tx_bytes_sec);
-    h = fnv_value(h, t.total_rx);
-    h = fnv_value(h, t.total_tx);
-    h = fnv_cstr(h, t.lan_ip);
-    h = fnv_cstr(h, t.last_error);
-    h = fnv_value(h, s_error_detail_visible);
-
-    // Log revision also detects identical new lines after the ring fills.
-    {
-        std::lock_guard<std::mutex> lock(g_app.logs_mutex);
-        h = fnv_value(h, g_app.logs_revision);
-        const size_t n = g_app.logs.size();
-        h = fnv_value(h, n);
-        if (n) h = fnv_cstr(h, g_app.logs.back().second.c_str());
-    }
-
-    // Settings the user can edit (changed by input, but a config load or a
-    // programmatic change must repaint too), plus transient notices.
-    h = fnv_value(h, g_app.protocol);
-    h = fnv_value(h, g_app.backend);
-    h = fnv_value(h, (int)g_app.chain_transports.size());
-    for (int transport : g_app.chain_transports) h = fnv_value(h, transport);
-    h = fnv_core_configs(h);
-    h = fnv_cstr(h, g_app.firefox_account_id);
-    h = fnv_cstr(h, g_app.firefox_location);
-    h = fnv_cstr(h, g_app.firefox_server);
-    h = fnv_value(h, g_app.firefox_transport);
-    h = fnv_cstr(h, g_app.firefox_email);
-    h = fnv_cstr(h, g_app.firefox_pending_id);
-    h = fnv_cstr(h, g_app.firefox_status);
-    h = fnv_value(h, g_app.firefox_job);
-    h = fnv_value(h, g_app.firefox_totp);
-    h = fnv_value(h, g_app.mode);
-    h = fnv_value(h, g_app.tun_engine);
-    h = fnv_value(h, g_app.scan_mode);
-    h = fnv_value(h, g_app.ip_version);
-    h = fnv_value(h, g_app.lan_sharing);
-    h = fnv_value(h, g_app.quick_reconnect);
-    h = fnv_value(h, g_app.socks_enabled);
-    h = fnv_value(h, g_app.http_enabled);
-    h = fnv_value(h, g_app.firefox_socks_enabled);
-    h = fnv_value(h, g_app.firefox_http_enabled);
-    h = fnv_value(h, g_app.xray_socks_enabled);
-    h = fnv_value(h, g_app.xray_http_enabled);
-    h = fnv_value(h, g_app.singbox_socks_enabled);
-    h = fnv_value(h, g_app.mihomo_socks_enabled);
-    h = fnv_value(h, g_app.singbox_http_enabled);
-    h = fnv_value(h, g_app.mihomo_http_enabled);
-    h = fnv_value(h, g_app.psiphon_socks_enabled);
-    h = fnv_value(h, g_app.psiphon_http_enabled);
-    h = fnv_value(h, g_app.tor_socks_enabled);
-    h = fnv_value(h, g_app.tor_http_enabled);
-    h = fnv_value(h, g_app.tor_http_port);
-    h = fnv_value(h, g_app.socks_port);
-    h = fnv_value(h, g_app.http_port);
-    h = fnv_value(h, g_app.firefox_socks_port);
-    h = fnv_value(h, g_app.firefox_http_port);
-    h = fnv_value(h, g_app.xray_socks_port);
-    h = fnv_value(h, g_app.xray_http_port);
-    h = fnv_value(h, g_app.singbox_socks_port);
-    h = fnv_value(h, g_app.mihomo_socks_port);
-    h = fnv_value(h, g_app.singbox_http_port);
-    h = fnv_value(h, g_app.mihomo_http_port);
-    h = fnv_value(h, g_app.h2_enabled);
-    h = fnv_value(h, g_app.ech_enabled);
-    h = fnv_value(h, g_app.sys_profile);
-    h = fnv_value(h, g_app.engine_log);
-    h = fnv_value(h, g_app.core_log);
-    h = fnv_value(h, g_app.t2s_log);
-    h = fnv_value(h, g_app.tor_bridges);
-    h = fnv_cstr(h, g_app.tor_bridge_lines);
-    h = fnv_cstr(h, g_app.tun_mtu);
-    h = fnv_cstr(h, g_app.tun_tcp_sndbuf);
-    h = fnv_cstr(h, g_app.tun_tcp_rcvbuf);
-    h = fnv_value(h, g_app.tun_tcp_auto_tuning);
-    h = fnv_value(h, g_app.tun_exclude_private);
-    h = fnv_cstr(h, g_app.tun_dns4);
-    h = fnv_cstr(h, g_app.tun_dns6);
-    h = fnv_cstr(h, g_app.noize_profile);
-    h = fnv_cstr(h, g_app.force_peer);
-    h = fnv_cstr(h, g_app.upstream_proxy);
-    h = fnv_cstr(h, g_app.config_path);
-    h = fnv_cstr(h, g_app.sni);
-    h = fnv_cstr(h, g_app.ech_dns);
-    h = fnv_cstr(h, g_app.ech_domain);
-    h = fnv_cstr(h, g_app.gool_inner);
-    h = fnv_cstr(h, g_app.tls_ciphers);
-    h = fnv_cstr(h, g_app.api_address);
-    h = fnv_cstr(h, g_app.api_host);
-    h = fnv_cstr(h, g_app.api_sni);
-    h = fnv_cstr(h, g_app.exit_loc);
-    h = fnv_cstr(h, g_app.tls_groups);
-    h = fnv_cstr(h, g_app.tls13_ciphers);
-    h = fnv_cstr(h, g_app.tls_key_shares);
-    h = fnv_cstr(h, g_app.tls_sigalgs);
-    h = fnv_cstr(h, g_app.tls_cert_compression);
-    h = fnv_cstr(h, g_app.tls_alps);
-    h = fnv_cstr(h, g_app.tls_trust_anchors);
-    h = fnv_cstr(h, g_app.tls_server_padding);
-    h = fnv_value(h, g_app.tls_verify);
-    h = fnv_value(h, g_app.disable_grease);
-    h = fnv_value(h, g_app.fragment_sni);
-    h = fnv_value(h, g_app.enable_grease_sigalgs);
-    h = fnv_value(h, g_app.enable_ech_grease);
-    h = fnv_value(h, g_app.disable_ocsp_stapling);
-    h = fnv_value(h, g_app.disable_sct);
-    h = fnv_value(h, g_app.disable_session_ticket);
-    h = fnv_value(h, g_app.disable_extension_permutation);
-    h = fnv_cstr(h, g_app.team_name);
-    h = fnv_cstr(h, g_app.access_token);
-    h = fnv_cstr(h, g_app.access_email);
-    h = fnv_cstr(h, g_app.routes_inline);
-    h = fnv_cstr(h, g_app.save_status);
-    h = fnv_cstr(h, g_app.copy_status);
-    h = fnv_value(h, g_app.start_busy.load());
-
-    // Update panel (button label, "Checking... (Ns)" counter, popup contents).
-    h = fnv_value(h, s_update_checked);
-    h = fnv_value(h, s_update_available);
-    h = fnv_value(h, s_update_in_progress);
-    h = fnv_value(h, s_update_popup_open);
-    h = fnv_value(h, s_update_decode_popup_open);
-    h = fnv_value(h, s_update_error_popup_open);
-    h = fnv_value(h, s_update_error_kind);
-    h = fnv_cstr(h, s_update_raw_body);
-    h = fnv_value(h, s_about_popup_open);
-    h = fnv_value(h, s_connection_info_popup_open);
-    h = fnv_cstr(h, s_update_status);
-    h = fnv_cstr(h, s_update_latest);
-    h = fnv_cstr(h, s_update_notes);
-    h = fnv_cstr(h, s_update_dl_url);
-    if (s_update_in_progress) {
-        h = fnv_value(h, (long long)std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - s_check_start_time).count());
-    }
-    h = fnv_value(h, s_tun_paused);
-    if (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput) {
-        h = fnv_value(h, (long long)(ui_now_seconds() / kUiCaretPhaseSeconds));
-    }
-    h = fnv_value(h, s_sponsor.available);
-    h = fnv_value(h, s_sponsor.generation);
-    h = fnv_value(h, fcae_sponsor_audio_enabled());
-    return h;
-}
 
 /// Pull telemetry from the FFI when due: once per second, matching the
 /// engine's 1 s rate window — the published rates are bytes-per-second
@@ -896,7 +736,7 @@ bool ui_should_render(bool interacting) {
     // Initialization owns the non-atomic AppState fields until it publishes
     // Ready. Do not fingerprint or poll them concurrently.
     if (s_runtime_init.load(std::memory_order_acquire) != RuntimeInitState::Ready) {
-        return g_app.redraw_requested.load() || interacting || !s_painted_once;
+        return true;
     }
 
     autosave_config(now);
@@ -933,29 +773,17 @@ bool ui_should_render(bool interacting) {
     // Spinner/connect animation is running: it moves on its own.
     if (s_busy_anim) return true;
 
-    // Polling above refreshes asynchronous UI state; repaint only when its
-    // fingerprint changes. A periodic forced frame can flash flip-model
-    // swapchains even though the visible content is unchanged.
-    return !s_painted_once || ui_content_signature() != s_painted_sig;
+    // Keep processing ImGui even when app content is unchanged: deferred
+    // input, caret, hover and animations all share the same 60 FPS cadence.
+    return true;
 }
 
 unsigned ui_sleep_ms() {
-    const bool focused = s_ui_window_focused.load();
-    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Starting)
-        return 16;
-    if (s_busy_anim || s_update_in_progress || (s_sponsor.available && s_sponsor.animated))
-        return focused ? kUiFrameIntervalMs : 2 * kUiFrameIntervalMs;
-    if (!focused) return kUiUnfocusedIntervalMs;
-    if (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput) return kUiCaretIntervalMs;
-    return kUiIdleIntervalMs;
+    return kUiFrameIntervalMs;
 }
 
 void ui_note_frame_drawn() {
-    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready)
-        s_painted_sig = ui_content_signature();
-    s_painted_once = true;
-    // A callback during the frame may have missed the rendered snapshot while
-    // already being included in the painted signature above.
+    // Preserve a wake if logs arrived while the frame was being built.
     if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready) {
         std::lock_guard<std::mutex> lock(g_app.logs_mutex);
         if (g_app.logs_revision != s_frame_log_revision) g_app.redraw_requested.store(true);
@@ -1689,6 +1517,12 @@ static double s_config_retry_at = 0;
 static bool s_config_tracking = false;
 
 static void autosave_config(double now) {
+    // Large pasted core configs otherwise get re-hashed at display refresh
+    // rate, on top of rendering. Saving still has its existing 600ms debounce,
+    // and explicit/background flushes still save immediately.
+    static double next_observation = 0.0;
+    if (s_config_tracking && now < next_observation) return;
+    next_observation = now + 0.1;
     const uint64_t signature = config_signature();
     if (!s_config_tracking) {
         s_config_observed = signature;
@@ -2280,13 +2114,11 @@ void ui_frame() {
         // Settings parse only: this phase lasts a frame or two.
         render_startup_shell(false);
         s_busy_anim = false;
-        s_painted_once = true;
         return;
     }
     if (init == RuntimeInitState::Failed) {
         render_startup_shell(true);
         s_busy_anim = false;
-        s_painted_once = true;
         return;
     }
 
@@ -6234,7 +6066,6 @@ void ui_release_view() {
     std::vector<uint8_t>{}.swap(s_sponsor_background_rgba);
     s_sponsor_loaded_foreground_generation = 0;
     s_sponsor_loaded_background_generation = 0;
-    s_painted_once = false;
     s_about_popup_open = false;
     s_connection_info_popup_open = false;
     s_update_popup_open = false;

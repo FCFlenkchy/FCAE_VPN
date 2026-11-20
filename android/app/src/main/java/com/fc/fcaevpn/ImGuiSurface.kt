@@ -31,7 +31,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     private var popupOpen = false
     private var backHandled = false
     private var activePointer = MotionEvent.INVALID_POINTER_ID
-    private val frameCallback: Choreographer.FrameCallback = Choreographer.FrameCallback { frames.onVsync() }
+    private val frameCallback: Choreographer.FrameCallback = Choreographer.FrameCallback { frames.onVsync(it) }
     private val repaint = Runnable { frames.request() }
     private val frames: ImGuiFrameScheduler = ImGuiFrameScheduler(object : ImGuiFrameScheduler.Driver {
         override fun postFrame() { choreographer.postFrameCallback(frameCallback) }
@@ -149,7 +149,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
                     input.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                 } else input.hideSoftInputFromWindow(windowToken, 0)
             }
-            frames.rendered(epoch, result and 0xffff)
+            frames.rendered(epoch)
         }
     }
 

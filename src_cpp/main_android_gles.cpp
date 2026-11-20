@@ -497,11 +497,7 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     // not include ImGui's deferred tab selection, focus or child-window layout;
     // using it as a second gate can replay stale draw data after an input/wake.
     // Keep its asynchronous polling, but always process an offered ImGui frame.
-    const bool content_changed = ui_should_render(interacting);
-    // Existing spinners/video already have a fast cadence. Only idle wakes
-    // need a burst; otherwise this would unnecessarily force animation to 60Hz.
-    if (content_changed && ui_sleep_ms() >= 100) settle_frames = 2;
-    else if (settle_frames > 0) --settle_frames;
+    ui_should_render(interacting);
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     ui_frame();
@@ -511,12 +507,9 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     glClearColor(background.x, background.y, background.z, background.w);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    // ImGui trickles press/release across frames. Never let the release of a
-    // quick tap, a held slider, or an inertial scroll wait for an idle poll.
-    const bool immediate = settle_frames > 0 || interacting || input->active() || GImGui->InputEventsQueue.Size != 0;
     // A text-action popup temporarily owns ImGui focus, not the Android IME.
     const bool keyboard = io.WantTextInput || UiText::wants_keyboard();
-    const unsigned delay = immediate ? 0u : std::min(ui_sleep_ms(), keyboard ? 33u : 250u);
+    const unsigned delay = 0; // Java schedules the single 60 FPS cadence.
     return static_cast<jint>(delay) | (keyboard ? 0x10000 : 0)
         | (GImGui->OpenPopupStack.Size ? 0x20000 : 0);
 }

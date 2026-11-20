@@ -37,6 +37,7 @@
 #include <thread>
 
 #include "imgui.h"
+#include "ui_frame_pacing.h"
 #if defined(FCAE_HAVE_FREETYPE)
 #include "imgui_freetype.h"
 #endif
@@ -61,8 +62,8 @@ static constexpr int kWindowHeight = 860;
 // host for why it is not the full 2x. The user's ui_scale_percent multiplies on
 // top through style.FontScaleMain.
 static constexpr float kUiBaseFontSize = 22.0f;
-// The render gate's frame cadence, matching the GLFW host's 33 ms.
-static constexpr double kMinFrameInterval = 33.0 / 1000.0;
+// Match the GLFW host's 60Hz interaction cadence.
+static constexpr double kMinFrameInterval = UiFrame::interaction_interval;
 // Upper bound on a single run-loop wait: how late a redraw requested by a
 // worker thread can land, and how quickly a window that became visible starts
 // painting again.
@@ -362,7 +363,12 @@ static id g_eventMonitor = nil;
 
             // Block until something happens, never longer than the host needs
             // to notice a worker-side redraw request.
-            NSDate* until = [NSDate dateWithTimeIntervalSinceNow:hidden ? kHiddenWakeSeconds : kMaxWakeSeconds];
+            const double before = [self now];
+            const double cadence = (double)ui_sleep_ms() / 1000.0;
+            const double wait = hidden ? kHiddenWakeSeconds : UiFrame::wait_seconds(before,
+                self.lastFrameTime, kMinFrameInterval,
+                std::min(kMaxWakeSeconds, cadence), true);
+            NSDate* until = [NSDate dateWithTimeIntervalSinceNow:wait];
             NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:until
                                                    inMode:NSDefaultRunLoopMode

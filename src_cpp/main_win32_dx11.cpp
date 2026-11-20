@@ -1,3 +1,5 @@
+#include "ui_frame_pacing.h"
+#include <cmath>
 #include "ui_style.h"
 #ifndef UNICODE
 #define UNICODE
@@ -580,7 +582,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     auto next_device_retry = std::chrono::steady_clock::now();
     bool done = false;
     bool sponsor_window_visible = false;
-    constexpr auto min_frame_interval = std::chrono::milliseconds(16);
+    const auto min_frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(UiFrame::interaction_interval));
     auto last_frame_time = std::chrono::steady_clock::now() - min_frame_interval;
     auto last_input_time = std::chrono::steady_clock::now();
     POINT last_mouse_pos = {};
@@ -660,12 +663,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             g_app.add_log(FCAE_LOG_ERROR, "[ui] Direct3D presentation failed; rebuilding the renderer");
             ui_request_redraw();
         }
-        last_frame_time = std::chrono::steady_clock::now();
+        // Present(1) may already have waited for VSYNC. Count its time inside
+        // this frame, not as work preceding a second full throttle interval.
+        last_frame_time = frame_now;
     };
 
     while (!done && g_app.running.load()) {
         const auto loop_now = std::chrono::steady_clock::now();
-        const bool interacting = (loop_now - last_input_time) < interaction_tail;
 
         // Keep polling while hidden so the next visible frame is fresh.
         bool paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
@@ -673,14 +677,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         DWORD timeout;
         if (!paintable)         timeout = 1000;
         else if (g_swapchain_occluded || g_device_lost) timeout = 100;
-        else if (interacting) {
-            const auto next_frame = last_frame_time + min_frame_interval;
-            const auto remaining = next_frame - loop_now;
-            timeout = remaining > std::chrono::steady_clock::duration::zero()
-                ? (DWORD)std::chrono::duration_cast<std::chrono::milliseconds>(remaining + std::chrono::milliseconds(1)).count()
-                : 0;
+        else {
+            const double idle = (double)ui_sleep_ms() / 1000.0;
+            const double since_start = std::chrono::duration<double>(loop_now - last_frame_time).count();
+            const double cadence = UiFrame::interaction_interval;
+            const double wait = UiFrame::wait_seconds(since_start, 0.0, cadence, idle,
+                true);
+            timeout = (DWORD)std::ceil(wait * 1000.0);
         }
-        else                    timeout = (DWORD)ui_sleep_ms();
 
         MsgWaitForMultipleObjects(0, nullptr, FALSE, timeout, QS_ALLINPUT);
 

@@ -1,6 +1,6 @@
 package com.fc.fcaevpn
 
-/** Main-thread frame pacing; input wakes the next VSYNC, never an idle timer. */
+/** Fixed 60 FPS target, aligned to display VSYNC; at most one GL frame in flight. */
 internal class ImGuiFrameScheduler(private val driver: Driver) {
     interface Driver {
         fun postFrame()
@@ -15,13 +15,15 @@ internal class ImGuiFrameScheduler(private val driver: Driver) {
     private var running = false
     private var posted = false
     private var inFlight = false
-    private var dirty = false
+    private var nextFrameNanos = 0L
+    private val frameIntervalNanos = 1_000_000_000L / 60
 
     fun start() {
         if (running) return
         running = true
         ++generation
         inFlight = false
+        nextFrameNanos = 0L
         request()
     }
 
@@ -30,13 +32,11 @@ internal class ImGuiFrameScheduler(private val driver: Driver) {
         ++generation
         posted = false
         inFlight = false
-        dirty = false
         driver.cancelFrame()
         driver.cancelWake()
     }
 
     fun request() {
-        dirty = true
         driver.cancelWake()
         if (running && !posted && !inFlight) {
             posted = true
@@ -44,28 +44,28 @@ internal class ImGuiFrameScheduler(private val driver: Driver) {
         }
     }
 
-    fun onVsync() {
+    fun onVsync(frameTimeNanos: Long) {
         posted = false
         if (!running) return
         // Arm the following VSYNC now, not after a GL -> main-thread round trip.
         // Slow frames still have only one render in flight.
         posted = true
         driver.postFrame()
-        if (inFlight) return
+        if (inFlight || frameTimeNanos + 500_000L < nextFrameNanos) return
+        // Preserve phase on 90/120Hz screens instead of running at panel rate.
+        if (nextFrameNanos == 0L || frameTimeNanos - nextFrameNanos > frameIntervalNanos)
+            nextFrameNanos = frameTimeNanos
+        nextFrameNanos += frameIntervalNanos
         inFlight = true
-        dirty = false
         driver.render()
     }
 
     fun isCurrent(epoch: Long): Boolean = running && generation == epoch
 
-    fun rendered(epoch: Long, delayMillis: Int) {
+    fun rendered(epoch: Long) {
         if (!isCurrent(epoch)) return
         inFlight = false
-        if (dirty || delayMillis <= 0) request()
-        else {
-            if (posted) { driver.cancelFrame(); posted = false }
-            driver.postWake(delayMillis.toLong().coerceAtMost(250))
-        }
+        // Continuous visible 60 FPS; lifecycle stop() cancels callbacks.
+        request()
     }
 }

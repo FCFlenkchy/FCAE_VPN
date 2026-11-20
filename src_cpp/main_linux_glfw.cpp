@@ -1,4 +1,6 @@
 #include "ui_style.h"
+#include "ui_frame_pacing.h"
+#include "imgui_internal.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
@@ -207,8 +209,8 @@ int main(int argc, char** argv) {
     ui_init();
 
     // Paint only for input or changed UI content; block on events while idle.
-    auto last_frame_time = std::chrono::steady_clock::now();
-    constexpr auto min_frame_interval = std::chrono::milliseconds(33);
+    constexpr double min_frame_interval = UiFrame::interaction_interval;
+    double last_frame_time = glfwGetTime() - min_frame_interval;
     constexpr double interaction_tail  = 0.7;
     double last_event_time = -1e9;
     bool hidden = false;
@@ -219,16 +221,18 @@ int main(int argc, char** argv) {
         const double t_before = glfwGetTime();
         bool interacting = (t_before - last_event_time) < interaction_tail;
 
-        double timeout = hidden ? 1.0
-                       : interacting ? min_frame_interval.count() / 1000.0
-                       : (double)ui_sleep_ms() / 1000.0;
-        glfwWaitEventsTimeout(timeout);
+        const double idle = (double)ui_sleep_ms() / 1000.0;
+        const double timeout = hidden ? 1.0 : UiFrame::wait_seconds(t_before, last_frame_time,
+            min_frame_interval, idle, true);
+        if (timeout > 0.0) glfwWaitEventsTimeout(timeout);
+        else glfwPollEvents();
 
         if (glfwWindowShouldClose(window)) break;
 
         const double t = glfwGetTime();
         // An early wake indicates input or a window event.
-        if (t - t_before < timeout - 0.005) last_event_time = t;
+        if ((timeout > 0.0 && t - t_before < timeout - 0.001) || GImGui->InputEventsQueue.Size != 0)
+            last_event_time = t;
         interacting = (t - last_event_time) < interaction_tail;
 
         hidden = window_hidden(window);
@@ -246,7 +250,7 @@ int main(int argc, char** argv) {
         }
         ui_set_window_focused(glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0);
 
-        auto now = std::chrono::steady_clock::now();
+        const double now = glfwGetTime();
         if (now - last_frame_time < min_frame_interval) {
             continue;
         }

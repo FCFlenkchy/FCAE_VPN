@@ -34,11 +34,13 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint
     AndroidImGuiInput _input;
     UITouch* _pointer;
     CFTimeInterval _lastFrame;
+    CFTimeInterval _lastTick;
+    int _settleFrames;
 }
 - (instancetype)initWithFrame:(CGRect)frame device:(id<MTLDevice>)device {
     if ((self=[super initWithFrame:frame device:device])) {
         _commands=[device newCommandQueue];self.delegate=self;
-        self.preferredFramesPerSecond=30;self.multipleTouchEnabled=YES;
+        self.preferredFramesPerSecond=60;self.multipleTouchEnabled=YES;
         IMGUI_CHECKVERSION();ImGui::CreateContext();
         auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.BackendPlatformName="fcae_uikit";
         ImFontConfig font;font.SizePixels=16;font.RasterizerDensity=UIScreen.mainScreen.scale;
@@ -74,54 +76,67 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint
 - (UIKeyboardType)keyboardType {return UIKeyboardTypeDefault;}
 - (UITextAutocorrectionType)autocorrectionType {return UITextAutocorrectionTypeNo;}
 - (UITextAutocapitalizationType)autocapitalizationType {return UITextAutocapitalizationTypeNone;}
+// Keep a single 60 FPS target, including idle, typing and animation.
+- (void)inputChanged {
+    ui_request_redraw();
+}
 - (void)insertText:(NSString*)text {
     auto& io=ImGui::GetIO();
     if ([text isEqualToString:@"\n"]) {io.AddKeyEvent(ImGuiKey_Enter,true);io.AddKeyEvent(ImGuiKey_Enter,false);}
     else io.AddInputCharactersUTF8(text.UTF8String);
-    ui_request_redraw();
+    [self inputChanged];
 }
 - (void)deleteBackward {
-    auto& io=ImGui::GetIO();io.AddKeyEvent(ImGuiKey_Backspace,true);io.AddKeyEvent(ImGuiKey_Backspace,false);ui_request_redraw();
+    auto& io=ImGui::GetIO();io.AddKeyEvent(ImGuiKey_Backspace,true);io.AddKeyEvent(ImGuiKey_Backspace,false);[self inputChanged];
 }
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (_pointer || event.allTouches.count!=1) {_input.reset();_pointer=nil;return;}
     _pointer=touches.anyObject;CGPoint p=[_pointer locationInView:self];
-    _input.pointer(p.x,p.y,AndroidImGuiInput::Down,_pointer.timestamp,true);ui_request_redraw();
+    _input.pointer(p.x,p.y,AndroidImGuiInput::Down,_pointer.timestamp,true);[self inputChanged];
 }
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_pointer || ![touches containsObject:_pointer]) return;
-    CGPoint p=[_pointer locationInView:self];_input.pointer(p.x,p.y,AndroidImGuiInput::Move,_pointer.timestamp,true);ui_request_redraw();
+    CGPoint p=[_pointer locationInView:self];_input.pointer(p.x,p.y,AndroidImGuiInput::Move,_pointer.timestamp,true);[self inputChanged];
 }
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_pointer || ![touches containsObject:_pointer]) return;
-    CGPoint p=[_pointer locationInView:self];_input.pointer(p.x,p.y,AndroidImGuiInput::Up,_pointer.timestamp,true);_pointer=nil;ui_request_redraw();
+    CGPoint p=[_pointer locationInView:self];_input.pointer(p.x,p.y,AndroidImGuiInput::Up,_pointer.timestamp,true);_pointer=nil;[self inputChanged];
 }
-- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {_input.reset();_pointer=nil;}
-- (void)mtkView:(MTKView*)view drawableSizeWillChange:(CGSize)size {ui_request_redraw();}
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {_input.reset();_pointer=nil;[self inputChanged];}
+- (void)mtkView:(MTKView*)view drawableSizeWillChange:(CGSize)size {[self inputChanged];}
 - (void)drawInMTKView:(MTKView*)view {
     auto& io=ImGui::GetIO();
     const double now=CACurrentMediaTime();
-    io.DeltaTime=_lastFrame?std::clamp((float)(now-_lastFrame),.001f,.25f):1.f/30;_lastFrame=now;
+    const float tick=_lastTick?std::clamp((float)(now-_lastTick),.001f,.25f):1.f/60;
+    _lastTick=now;
+    // Skipped delegate callbacks are not ImGui frames. Keep animation/caret
+    // time based on the last frame actually submitted, not the last idle poll.
+    io.DeltaTime=_lastFrame?std::clamp((float)(now-_lastFrame),.001f,.25f):1.f/60;
     io.DisplaySize={(float)view.bounds.size.width,(float)view.bounds.size.height};
     io.DisplayFramebufferScale={(float)(view.drawableSize.width/std::max(1.f,io.DisplaySize.x)),(float)(view.drawableSize.height/std::max(1.f,io.DisplaySize.y))};
-    _input.new_frame(io.DeltaTime);
-    if (!ui_should_render(_input.active() || io.WantTextInput || UiText::wants_keyboard() || GImGui->InputEventsQueue.Size)) return;
+    _input.new_frame(tick);
+    const bool interacting=_input.active() || io.MouseDown[0] || GImGui->InputEventsQueue.Size;
+    const bool keyboard=io.WantTextInput || UiText::wants_keyboard();
+    const bool redraw=ui_should_render(interacting || keyboard);
+    if (!redraw && _settleFrames==0) return;
     MTLRenderPassDescriptor* pass=view.currentRenderPassDescriptor;
     id<CAMetalDrawable> drawable=view.currentDrawable;if (!pass || !drawable) return;
+    _lastFrame=now;
+    if (redraw) _settleFrames=2; else --_settleFrames;
     ImGui_ImplMetal_NewFrame(pass);ImGui::NewFrame();ui_frame();ImGui::Render();
     id<MTLCommandBuffer> command=[_commands commandBuffer];
     id<MTLRenderCommandEncoder> encoder=[command renderCommandEncoderWithDescriptor:pass];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),command,encoder);
     [encoder endEncoding];[command presentDrawable:drawable];[command commit];
-    const bool keyboard = io.WantTextInput || UiText::wants_keyboard();
-    if (keyboard && !self.isFirstResponder) [self becomeFirstResponder];
-    if (!keyboard && self.isFirstResponder) [self resignFirstResponder];
+    const bool keepKeyboard = io.WantTextInput || UiText::wants_keyboard();
+    if (keepKeyboard && !self.isFirstResponder) [self becomeFirstResponder];
+    if (!keepKeyboard && self.isFirstResponder) [self resignFirstResponder];
 }
 - (void)setPaused:(BOOL)paused {
     [super setPaused:paused];
     if (!ImGui::GetCurrentContext()) return;
     ui_set_window_visible(!paused);ui_set_window_focused(!paused);ImGui::GetIO().AddFocusEvent(!paused);
-    _input.reset();_pointer=nil;_lastFrame=0;
+    _input.reset();_pointer=nil;_lastFrame=_lastTick=0;_settleFrames=paused?0:2;
     if (paused) {UiText::reset();ios_flush_settings();for (auto& texture:textures)texture={};[self resignFirstResponder];}
 }
 @end
