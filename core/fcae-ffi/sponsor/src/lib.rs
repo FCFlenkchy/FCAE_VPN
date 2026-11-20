@@ -36,7 +36,8 @@ const MAX_VIDEO_SOURCE_HEIGHT: u32 = 1080;
 const MAX_VIDEO_SOURCE_PIXELS: u64 =
     MAX_VIDEO_SOURCE_WIDTH as u64 * MAX_VIDEO_SOURCE_HEIGHT as u64;
 /// Caps animation at 30 fps and supplies the fallback for media with no valid rate.
-const FRAME_DELAY_US: u64 = 33_333;
+// Round up: 33_333 microseconds is slightly faster than a strict 30 FPS.
+const FRAME_DELAY_US: u64 = (1_000_000 + 30 - 1) / 30;
 /// Clamps frame delays to 20 ms through 10 s: shorter delays cannot render and corrupt timestamps cannot freeze a card.
 const MIN_FRAME_DELAY_MS: u64 = 20;
 const MAX_FRAME_DELAY_MS: u64 = 10_000;
@@ -1713,14 +1714,19 @@ fn frame_index_at(frames: &[Frame], elapsed: Duration) -> usize {
     // Use nanoseconds rather than truncating the cycle to milliseconds. The
     // modulo makes replay explicit and keeps short MP4/GIF delays from drifting
     // or getting stuck on the final frame after a long-running UI session.
+    // Enforce the cap at the final playback boundary, not just at decode.
+    // Old sidecars may contain 20ms delays; both foreground and background
+    // planes (and retained frames on minimize) must use the capped timeline.
+    // Leave the cache bytes untouched and preserve slower source timings.
+    let playback_delay = |frame: &Frame| frame.delay.max(Duration::from_micros(FRAME_DELAY_US));
     let cycle_nanos = frames.iter()
-        .map(|frame| frame.delay.as_nanos())
+        .map(|frame| playback_delay(frame).as_nanos())
         .fold(0u128, |sum, delay| sum.saturating_add(delay));
     if cycle_nanos == 0 { return 0; }
     let target = elapsed.as_nanos() % cycle_nanos;
     let mut cursor = 0u128;
     for (frame_index, frame) in frames.iter().enumerate() {
-        cursor = cursor.saturating_add(frame.delay.as_nanos());
+        cursor = cursor.saturating_add(playback_delay(frame).as_nanos());
         if target < cursor { return frame_index; }
     }
     frames.len() - 1
