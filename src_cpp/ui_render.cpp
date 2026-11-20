@@ -5340,12 +5340,9 @@ void render_ui() {
                                     std::max(1.0f, card_size.y - card_border * 2.0f));
 
             if (background_texture) {
-                // Keep the complete creative visible as the fixed-height card
-                // changes width. Cover-fit used the growing width as a zoom,
-                // cutting more and more off the top/bottom on maximized windows.
-                const auto image = UiMedia::fit(media_origin, media_area,
-                    ImVec2((float)s_sponsor.background_width, (float)s_sponsor.background_height),
-                    false, background_scale);
+                // Stretch the full source to the current card on every frame:
+                // no cover crop, aspect-fit bars, or destructive source resize.
+                const auto image = UiMedia::stretch(media_origin, media_area, background_scale);
                 const bool fills_card = image.min.x <= media_origin.x && image.min.y <= media_origin.y
                     && image.max.x >= media_origin.x + media_area.x
                     && image.max.y >= media_origin.y + media_area.y;
@@ -5356,10 +5353,9 @@ void render_ui() {
             }
 
             if (texture) {
-                const bool cover = s_sponsor.image_fit != 0;
-                const auto image = UiMedia::fit(media_origin, media_area,
-                    ImVec2((float)s_sponsor.width, (float)s_sponsor.height), cover,
-                    cover ? icon_scale : std::min(icon_scale, 1.0f),
+                // The same complete-image mapping on every platform, including
+                // legacy campaigns which requested cover/cropping.
+                const auto image = UiMedia::stretch(media_origin, media_area, icon_scale,
                     ImVec2((float)s_sponsor.icon_x / 100.0f, (float)s_sponsor.icon_y / 100.0f));
                 ImGui::GetWindowDrawList()->AddImage(texture, image.min, image.max, image.uv0, image.uv1,
                     ImGui::GetColorU32(ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f)));
