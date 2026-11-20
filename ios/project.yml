@@ -83,6 +83,8 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: 'YES'
         SKIP_INSTALL: 'YES'
     dependencies:
+      # The embedded core references UIDevice even in the headless extension.
+      - sdk: UIKit.framework
       - sdk: Foundation.framework
       - sdk: NetworkExtension.framework
       - sdk: Network.framework
