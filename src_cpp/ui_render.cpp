@@ -1758,7 +1758,7 @@ static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const c
     const bool hovered = ImGui::IsItemHovered();
     const bool held = ImGui::IsItemActive();
     if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    ImGui::SetItemTooltip("%s", tooltip);
+    UiText::ItemTooltip("%s", tooltip);
 
     const ImU32 fg = IM_COL32(241, 247, 255, 255);
     const float cx = std::floor(pos.x) + kIconButtonSize * 0.5f;
@@ -2729,7 +2729,7 @@ static void firefox_account_rows(const std::string& root) {
         const bool selected = g_app.firefox_account_id == account.id;
         ImGui::TextUnformatted(email.c_str());
         if (account.usage_exhausted)
-            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Monthly usage: %s", account.monthly_usage.c_str());
+            UiText::TextColoredWrapped(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Monthly usage: %s", account.monthly_usage.c_str());
         else
             ImGui::TextDisabled("Monthly usage: %s", account.monthly_usage.empty() ? "Unavailable" : account.monthly_usage.c_str());
         ImGui::BeginDisabled(selected);
@@ -3822,7 +3822,7 @@ static void render_core_configs() {
         ImGui::SetNextItemWidth(std::min(log_combo_w, std::max(1.0f, ImGui::GetContentRegionAvail().x)));
         ImGui::Combo("##core_log_level", &g_app.core_log, kCoreLogs, 6);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Applies on the next connection. Mihomo maps Trace to Debug.");
+            UiText::Tooltip("Applies on the next connection. Mihomo maps Trace to Debug.");
     }
     ImGui::Spacing();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
@@ -4194,13 +4194,13 @@ void render_ui() {
                         && url.find('\r') == std::string::npos;
                     if (looks_safe) {
                         ImGui::Text("Download:");
-                        ImGui::SameLine(0, 6);
-                        if (ImGui::TextLink(url.c_str()))
+                        // Give a long release URL its own full-width lines.
+                        bool hovered = false;
+                        if (UiText::TextLinkWrapped(url.c_str(), &hovered))
                             open_link(url.c_str());
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("%s", url.c_str());
+                        if (hovered) UiText::Tooltip("%s", url.c_str());
                     } else {
-                        ImGui::Text("Download: %s", s_update_dl_url);
+                        ImGui::TextWrapped("Download: %s", s_update_dl_url);
                     }
                     ImGui::Spacing();
                     if (ImGui::Button("Open")) {
@@ -4670,7 +4670,7 @@ void render_ui() {
 #endif
         }
         if (connect_disabled) ImGui::EndDisabled();
-        if (startup) ImGui::SetItemTooltip("Finishing initialization...");
+        if (startup) UiText::ItemTooltip("Finishing initialization...");
         ImGui::PopStyleColor(3);
 
         if (show_tun_control) {
@@ -4896,13 +4896,9 @@ void render_ui() {
                 ImGui::Spacing();
                 if (ImGui::BeginChild("##about_content", ImVec2(0, -footer_height))) {
                     auto link = [](const char* label, const char* url) {
-                        const float text_width = ImGui::CalcTextSize(label).x;
-                        const float scale = std::min(1.0f,
-                            std::max(1.0f, ImGui::GetContentRegionAvail().x) / std::max(1.0f, text_width));
-                        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale);
-                        if (ImGui::TextLink(label)) open_link(url);
-                        ImGui::PopFont();
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", url);
+                        bool hovered = false;
+                        if (UiText::TextLinkWrapped(label, &hovered)) open_link(url);
+                        if (hovered) UiText::Tooltip("%s", url);
                     };
                     auto inline_link = [&](const char* prefix, const char* label, const char* url) {
                         ImGui::TextWrapped("%s", prefix);
@@ -5049,7 +5045,7 @@ void render_ui() {
                 ui_request_redraw();
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Show connection details");
+                UiText::Tooltip("Show connection details");
         }
         ImGui::EndGroup();
 
@@ -5104,7 +5100,7 @@ void render_ui() {
             ImGui::SetCursorScreenPos(ImVec2(
                 link_left + std::max(0.0f, (link_right - link_left - cta_w) * 0.5f), header_text_y));
             if (ImGui::TextLink(cta)) open_link(sponsor_policy);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", sponsor_policy);
+            if (ImGui::IsItemHovered()) UiText::Tooltip("%s", sponsor_policy);
             ImGui::PopFont();
             const float header_icon_y = header_min.y + kHeaderPadV;
             ImGui::SetCursorScreenPos(ImVec2(refresh_x, header_icon_y));
@@ -5214,7 +5210,7 @@ void render_ui() {
                 sponsor_dragged = false;
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(s_sponsor.campaign_count > 1
+                UiText::Tooltip(s_sponsor.campaign_count > 1
                     ? "Click to open, drag to change sponsor"
                     : "Click to open sponsor website");
 
@@ -5937,7 +5933,7 @@ void render_ui() {
             }
             if (g_app.copy_status[0]) {
                 ImGui::SameLine(0, 8);
-                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.copy_status);
+                UiText::TextColoredWrapped(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.copy_status);
             }
             ImGui::Spacing();
 

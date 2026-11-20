@@ -116,7 +116,7 @@ public:
                 draw->AddText(ImVec2(start.x + 48, start.y + 4), ImGui::GetColorU32(ImGuiCol_Text), app.label.c_str());
                 draw->AddText(ImVec2(start.x + 48, start.y + 6 + ImGui::GetTextLineHeight()), ImGui::GetColorU32(ImGuiCol_TextDisabled), app.package.c_str());
                 draw->PopClipRect();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("%s\n%s", app.label.c_str(), app.package.c_str());
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) UiText::Tooltip("%s\n%s", app.label.c_str(), app.package.c_str());
                 ImGui::PopID();
             }
         }

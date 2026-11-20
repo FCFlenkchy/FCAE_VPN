@@ -2,6 +2,7 @@
 
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "ui_text_input.h"
 #include <algorithm>
 #include <cmath>
 #include <deque>
@@ -219,6 +220,7 @@ private:
             return;
         }
         if (event.action == Down) {
+            UiText::pointer_down(event.pos);
             held_ = 0.0f;
             text_selection_ = 0;
             origin_ = previous_ = event.pos;

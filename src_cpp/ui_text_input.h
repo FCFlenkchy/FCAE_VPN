@@ -4,8 +4,60 @@
 #include <cstdarg>
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 namespace UiText {
+// Tooltips must be bounded by the actual viewport, not an unwrapped URL or
+// desktop-sized text estimate. Long words/URLs are broken by ImGui itself.
+inline void TooltipV(const char* format, va_list args) {
+    const float viewport_width = ImGui::GetWindowViewport()->WorkSize.x;
+    const auto& style = ImGui::GetStyle();
+    const float outer_width = std::max(1.0f, viewport_width - 16.0f);
+    const float wrap_width = std::max(1.0f, std::min(ImGui::GetFontSize() * 35.0f,
+        outer_width - style.WindowPadding.x * 2.0f - style.WindowBorderSize * 2.0f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(outer_width, FLT_MAX));
+    if (ImGui::BeginTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_width);
+        ImGui::TextV(format, args);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+inline void Tooltip(const char* format, ...) {
+    va_list args; va_start(args, format); TooltipV(format, args); va_end(args);
+}
+inline void ItemTooltip(const char* format, ...) {
+    if (!ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) return;
+    va_list args; va_start(args, format); TooltipV(format, args); va_end(args);
+}
+// Keep native, keyboard-accessible TextLink items on each visual line rather
+// than shrinking long URLs to unreadable text. The original URL is untouched.
+inline bool TextLinkWrapped(const char* text, bool* hovered = nullptr) {
+    const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    const char* end = text + std::strlen(text);
+    bool pressed = false, any_hovered = false;
+    ImGui::PushID(text);
+    ImGui::BeginGroup();
+    int line = 0;
+    for (const char* begin = text; begin < end;) {
+        const char* next = ImGui::GetFont()->CalcWordWrapPosition(ImGui::GetFontSize(), begin, end, width);
+        if (next <= begin) {
+            unsigned int character;
+            next = begin + std::max(1, ImTextCharFromUtf8(&character, begin, end));
+        }
+        ImGui::PushID(line++);
+        const std::string label(begin, next);
+        pressed |= ImGui::TextLink(label.c_str());
+        any_hovered |= ImGui::IsItemHovered();
+        ImGui::PopID();
+        begin = next;
+        while (begin < end && (*begin == ' ' || *begin == '\n' || *begin == '\r')) ++begin;
+    }
+    ImGui::EndGroup();
+    ImGui::PopID();
+    if (hovered) *hovered = any_hovered;
+    return pressed;
+}
 inline void TextColoredWrapped(const ImVec4& color, const char* format, ...) {
     ImGui::PushStyleColor(ImGuiCol_Text, color);
     ImGui::PushTextWrapPos(0.0f);
@@ -27,6 +79,8 @@ inline ImGuiID select_id = 0, menu_id = 0, popup_id = 0, restore_id = 0, collaps
 inline int select_frame = 0, menu_frame = 0, restore_frame = 0, collapse_frame = 0;
 inline int start = 0, end = 0;
 inline ImGuiKey action = ImGuiKey_None;
+inline ImGuiID editor_id = 0;
+inline ImRect editor_rect;
 }
 inline void close_menu() {
     if (GImGui && Detail::context == GImGui && Detail::popup_id)
@@ -41,6 +95,7 @@ inline void reset() {
     Detail::context = ImGui::GetCurrentContext();
     Detail::select_id = Detail::menu_id = Detail::restore_id = Detail::collapse_id = 0;
     Detail::action = ImGuiKey_None;
+    Detail::editor_id = 0;
     Detail::start = Detail::end = 0;
 }
 inline void reset_android_view() { reset(); }
@@ -53,8 +108,35 @@ inline bool wants_keyboard() {
     if (collapse_id && GImGui->FrameCount > collapse_frame + 6) collapse_id = 0;
     return menu_id || restore_id || collapse_id;
 }
+// Touch adapters call this on the physical Down, before deciding whether a
+// completed gesture becomes a click. Otherwise the popup blocks hover capture
+// and the adapter may suppress the very tap that should dismiss the menu.
+inline void pointer_down(ImVec2 position) {
+    using namespace Detail;
+    if (!GImGui || context != GImGui) return;
+    if (menu_id && popup_id) {
+        for (const auto& popup : GImGui->OpenPopupStack)
+            if (popup.PopupId == popup_id && popup.Window && popup.Window->Rect().Contains(position))
+                return; // Actual menu actions keep their real selection.
+    }
+    const ImGuiID owner = editor_id ? editor_id : menu_id;
+    const bool outside_editor = owner && (editor_id != owner || !editor_rect.Contains(position));
+    if (!menu_id && !outside_editor) return;
+    close_menu();
+    menu_id = select_id = restore_id = collapse_id = 0;
+    action = ImGuiKey_None;
+    if (outside_editor) {
+        // Clear the real InputText range, not merely its painted highlight.
+        // Leave another control's active ID alone so its tap can complete.
+        if (auto* state = ImGui::GetInputTextState(owner)) state->ClearSelection();
+        if (GImGui->ActiveId == owner) ImGui::ClearActiveID();
+        editor_id = 0;
+        start = end = 0;
+    }
+}
 inline void prepare(const char* label) {
     wants_keyboard(); // Also expires a pending restore if the field disappeared.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) pointer_down(ImGui::GetIO().MousePos);
     const ImGuiID id = ImGui::GetID(label);
     // A text-actions popup must not turn the editor's selection into a visual
     // imitation. Keep the real InputText state active so ImGui renders and
@@ -62,14 +144,21 @@ inline void prepare(const char* label) {
     if (id != 0 && Detail::menu_id == id && Detail::popup_id != 0 &&
         ImGui::IsPopupOpen(Detail::popup_id, ImGuiPopupFlags_None)) {
         if (auto* state = ImGui::GetInputTextState(id)) {
-            if (GImGui->ActiveId != id) {
+            if (GImGui->ActiveId == 0) {
                 ImGui::SetActiveID(id, ImGui::GetCurrentWindow());
                 state->SetSelection(std::clamp(Detail::start, 0, state->TextLen),
                                     std::clamp(Detail::end, 0, state->TextLen));
             }
         }
     }
-    if (Detail::restore_id == id) ImGui::SetKeyboardFocusHere();
+    if (Detail::restore_id == id) {
+        if (GImGui->ActiveId && GImGui->ActiveId != id) {
+            // A button/another field owns an in-progress gesture. Never steal
+            // it between press and release just to restore a text selection.
+            Detail::restore_id = Detail::collapse_id = 0;
+            Detail::action = ImGuiKey_None;
+        } else ImGui::SetKeyboardFocusHere();
+    }
 }
 inline void finish(ImGuiInputTextFlags flags, const char* text) {
     using namespace Detail;
@@ -79,6 +168,11 @@ inline void finish(ImGuiInputTextFlags flags, const char* text) {
     // "no pending action" sentinel: never dispatch hooks or open a popup for it.
     if (id == 0) return;
     auto* state = ImGui::GetInputTextState(id);
+    if (state && (GImGui->ActiveId == id || menu_id == id)) {
+        editor_id = id;
+        editor_rect = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        editor_rect.ClipWith(ImGui::GetCurrentWindow()->ClipRect);
+    }
     const bool restoring_action = restore_id == id;
     if (touch_hold && touch_hold(id, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()))) {
         if (refresh_clipboard) refresh_clipboard();
@@ -115,8 +209,14 @@ inline void finish(ImGuiInputTextFlags flags, const char* text) {
     }
     if (menu_id == id) {
         menu_frame = GImGui->FrameCount;
+        // The editor stays active for its native selection, but must not
+        // block hover/press ownership of the popup's real MenuItem widgets.
+        if (GImGui->ActiveId == id) GImGui->ActiveIdAllowOverlap = true;
     }
     if (menu_id == id && popup_id != 0 && ImGui::BeginPopup("Text actions", ImGuiWindowFlags_NoFocusOnAppearing)) {
+        // NoFocusOnAppearing preserves native editor selection, but must not
+        // leave this popup behind a multiline editor's child window.
+        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
         const bool password = (flags & ImGuiInputTextFlags_Password) != 0;
         const bool selected = start != end;
         ImGuiKey key = ImGuiKey_None;
