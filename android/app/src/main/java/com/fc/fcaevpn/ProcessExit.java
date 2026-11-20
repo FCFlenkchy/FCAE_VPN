@@ -39,9 +39,14 @@ public final class ProcessExit {
         return true;
     }
 
-    /** A widget, tile or notification Disconnect explicitly ends the process;
-     *  an in-app Disconnect leaves the visible Activity ready to reconnect. */
+    /** Remote Disconnect may end a headless process, never an existing UI
+     *  session. Native session teardown is owned by the services, not this exit
+     *  watchdog, and must continue even when returning to the UI cancels exit. */
     public static void request(Context context, boolean remoteDisconnect) {
+        if (FCAEApplication.uiSessionAlive()) {
+            cancel();
+            return;
+        }
         Context app = context.getApplicationContext();
         boolean terminal = (remoteDisconnect && !FCAEApplication.uiVisibleNow())
                 || terminalPending.get();
@@ -101,10 +106,14 @@ public final class ProcessExit {
 
     private static boolean mayExit(Context app, boolean afterGrace,
                                    boolean deadline, boolean remoteDisconnect) {
-        if (!remoteDisconnect && (afterGrace ? FCAEApplication.uiOnScreen()
-                                              : FCAEApplication.uiVisibleNow())) return false;
-        // A terminal control is the user's final instruction. A late owner
-        // generation change, stale active flag, or wedged cleanup must not
+        // Re-check at execution time: a UI can return after this request was
+        // armed, including during tile deferral or a slow native teardown.
+        // Terminal/deadline exits must never bypass UI ownership protection.
+        if (FCAEApplication.uiSessionAlive()
+                || (afterGrace ? FCAEApplication.uiOnScreen()
+                               : FCAEApplication.uiVisibleNow())) return false;
+        // With no UI owner, a terminal control is the user's final instruction.
+        // A late owner generation change, stale active flag, or wedged cleanup must not
         // leave the application resident forever. A real reconnect cancels
         // this request through cancel() before starting its owner.
         if (remoteDisconnect && deadline) return true;
