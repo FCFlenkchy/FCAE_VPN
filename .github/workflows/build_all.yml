@@ -291,12 +291,12 @@ jobs:
         if: matrix.name == 'ios-arm64'
         run: bash -e scripts/ci/build_steps/build-frontend-ios.sh
 
-      - name: build apk
+      - name: build frontend (android)
         if: startsWith(matrix.name, 'android-')
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_HOME: /usr/local/lib/android/sdk
-        run: bash -e scripts/ci/build_steps/build-apk.sh
+        run: bash -e scripts/ci/build_steps/build-frontend-android.sh
 
       - name: sign apk
         if: startsWith(matrix.name, 'android-')
