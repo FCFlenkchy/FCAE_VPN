@@ -6078,6 +6078,9 @@ void ui_release_view() {
     s_core_name_buf[0] = s_core_status[0] = 0;
     std::vector<int>{}.swap(s_chain_draft);
     s_chain_editor_popup_open = false;
+    s_firefox_settings_popup_open = s_firefox_settings_visible = false;
+    s_firefox_add_popup_open = s_firefox_code_popup_open = false;
+    s_firefox_add_should_close = s_firefox_code_should_close = false;
     std::vector<uint8_t>{}.swap(s_firefox_captcha_rgba);
     s_firefox_captcha_width = s_firefox_captcha_height = 0;
     g_app.firefox_captcha_id = 0;

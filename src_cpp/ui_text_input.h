@@ -55,51 +55,21 @@ inline bool wants_keyboard() {
 }
 inline void prepare(const char* label) {
     wants_keyboard(); // Also expires a pending restore if the field disappeared.
-    if (Detail::restore_id == ImGui::GetID(label)) ImGui::SetKeyboardFocusHere();
-}
-// InputText doesn't draw its selection while a popup owns focus. Draw the saved
-// range using the widget's own visual-line index (UTF-8 byte offsets), including
-// wrapping and child scrolling. No text bytes or wrap points are modified.
-inline void draw_menu_selection(ImGuiID id, const char* text, int start, int end) {
-    if (start == end) return;
-    const int length = (int)strlen(text);
-    start = std::clamp(start, 0, length); end = std::clamp(end, 0, length);
-    if (start > end) std::swap(start, end);
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    const auto& children = window->DC.ChildWindows;
-    ImGuiWindow* child = !children.empty() && children.back()->ChildId == id ? children.back() : nullptr;
-    const auto& lines = GImGui->InputTextLineIndex.Offsets;
-    const int count = child ? std::max(1, lines.Size) : 1;
-    auto line_start = [&](int n) { return child && !lines.empty() ? std::clamp(lines[n], 0, length) : 0; };
-    ImVec2 origin = ImGui::GetItemRectMin();
-    if (child) origin = child->DC.CursorStartPos;
-    else { origin.x += ImGui::GetStyle().FramePadding.x; origin.y += ImGui::GetStyle().FramePadding.y; }
-    if (auto* state = ImGui::GetInputTextState(id)) origin.x -= state->Scroll.x;
-    ImDrawList* draw = child ? child->DrawList : window->DrawList;
-    const ImRect clip = child ? child->InnerClipRect : ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-    draw->PushClipRect(clip.Min, clip.Max, true);
-    const float height = ImGui::GetFontSize();
-    auto width = [&](int a, int b) {
-        return ImFontCalcTextSizeEx(ImGui::GetFont(), height, FLT_MAX, 0,
-            text + a, text + b, text + b, nullptr, nullptr, ImDrawTextFlags_WrapKeepBlanks).x;
-    };
-    ImVec4 color = ImGui::GetStyleColorVec4(ImGuiCol_TextSelectedBg);
-    color.w = std::min(color.w, 0.35f); // Overlay, not an opaque cover over glyphs.
-    const int first = std::clamp((int)((clip.Min.y - origin.y) / height), 0, count - 1);
-    for (int n = first; n < count; ++n) {
-        const float y = origin.y + n * height;
-        if (y + height < clip.Min.y) continue;
-        if (y > clip.Max.y) break;
-        const int begin = line_start(n), finish = n + 1 < count ? line_start(n + 1) : length;
-        const int a = std::max(start, begin), b = std::min(end, finish);
-        if (a >= b) continue;
-        int visible_end = b;
-        if (visible_end > a && text[visible_end - 1] == '\n') --visible_end;
-        const float x = origin.x + width(begin, a);
-        const float right = origin.x + width(begin, visible_end);
-        draw->AddRectFilled(ImVec2(x, y), ImVec2(std::max(x + 2.0f, right), y + height), ImGui::GetColorU32(color));
+    const ImGuiID id = ImGui::GetID(label);
+    // A text-actions popup must not turn the editor's selection into a visual
+    // imitation. Keep the real InputText state active so ImGui renders and
+    // operates on its own selected range (including wrapped/multiline text).
+    if (id != 0 && Detail::menu_id == id && Detail::popup_id != 0 &&
+        ImGui::IsPopupOpen(Detail::popup_id, ImGuiPopupFlags_None)) {
+        if (auto* state = ImGui::GetInputTextState(id)) {
+            if (GImGui->ActiveId != id) {
+                ImGui::SetActiveID(id, ImGui::GetCurrentWindow());
+                state->SetSelection(std::clamp(Detail::start, 0, state->TextLen),
+                                    std::clamp(Detail::end, 0, state->TextLen));
+            }
+        }
     }
-    draw->PopClipRect();
+    if (Detail::restore_id == id) ImGui::SetKeyboardFocusHere();
 }
 inline void finish(ImGuiInputTextFlags flags, const char* text) {
     using namespace Detail;
@@ -109,6 +79,7 @@ inline void finish(ImGuiInputTextFlags flags, const char* text) {
     // "no pending action" sentinel: never dispatch hooks or open a popup for it.
     if (id == 0) return;
     auto* state = ImGui::GetInputTextState(id);
+    const bool restoring_action = restore_id == id;
     if (touch_hold && touch_hold(id, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()))) {
         if (refresh_clipboard) refresh_clipboard();
         select_id = id; select_frame = GImGui->FrameCount;
@@ -144,9 +115,8 @@ inline void finish(ImGuiInputTextFlags flags, const char* text) {
     }
     if (menu_id == id) {
         menu_frame = GImGui->FrameCount;
-        if (GImGui->ActiveId != id && !(flags & ImGuiInputTextFlags_Password)) draw_menu_selection(id, text, start, end);
     }
-    if (menu_id == id && popup_id != 0 && ImGui::BeginPopup("Text actions")) {
+    if (menu_id == id && popup_id != 0 && ImGui::BeginPopup("Text actions", ImGuiWindowFlags_NoFocusOnAppearing)) {
         const bool password = (flags & ImGuiInputTextFlags_Password) != 0;
         const bool selected = start != end;
         ImGuiKey key = ImGuiKey_None;
@@ -165,7 +135,7 @@ inline void finish(ImGuiInputTextFlags flags, const char* text) {
         menu_id = popup_id = 0;
         // Dismissing the menu without an action preserves the selection. A tap
         // on another active control must not pull focus back to this editor.
-        if (!restore_id && (!GImGui->ActiveId || GImGui->ActiveId == id)) {
+        if (!restoring_action && !restore_id && !collapse_id && (!GImGui->ActiveId || GImGui->ActiveId == id)) {
             restore_id = id; restore_frame = GImGui->FrameCount;
         }
     }

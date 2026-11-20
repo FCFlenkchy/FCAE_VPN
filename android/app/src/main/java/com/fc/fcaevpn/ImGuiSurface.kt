@@ -26,6 +26,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     private val pending = ArrayDeque<() -> Unit>()
     @Volatile private var acceptingEvents = false
     private var nativeReady = false // GL-thread owned
+    private var freshUiSession = true // New View, not an EGL resume.
     private var renderingResumed = false
     private var keyboard = false
     private var popupOpen = false
@@ -79,7 +80,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
         }
     }
 
-    fun pauseRendering() {
+    fun pauseRendering(closeUi: Boolean = false) {
         if (!renderingResumed) return
         renderingResumed = false
         ImGuiBridge.invalidateView()
@@ -90,7 +91,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
         queueEvent {
             events.forEach { it() }
             ImGuiBridge.nativeVisibility(false)
-            ImGuiBridge.nativeSuspend()
+            if (closeUi) ImGuiBridge.nativeRelease() else ImGuiBridge.nativeSuspend()
             nativeReady = false
         }
         // GLSurfaceView drains queued events before acknowledging pause.
@@ -102,7 +103,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     }
 
     fun stopRendering() {
-        pauseRendering()
+        pauseRendering(closeUi = true)
         queueEvent {
             ImGuiBridge.nativeRelease()
             nativeReady = false
@@ -115,6 +116,13 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
 
     private fun ensureNative() {
         if (nativeReady) return
+        if (freshUiSession) {
+            // A service can keep the process alive after the previous Activity
+            // was removed. Never reuse that Activity's native navigation state.
+            // Do this on the new GL thread, before creating the new UI context.
+            ImGuiBridge.nativeRelease()
+            freshUiSession = false
+        }
         ImGuiBridge.nativeSurface(context.filesDir.absolutePath, resources.displayMetrics.density,
             ViewConfiguration.get(context).scaledTouchSlop.toFloat())
         ImGuiBridge.nativeResize(width.coerceAtLeast(1), height.coerceAtLeast(1))

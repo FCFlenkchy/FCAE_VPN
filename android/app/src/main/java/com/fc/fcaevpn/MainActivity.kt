@@ -35,9 +35,9 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (surface?.handleBack() == true) return
-                isEnabled = false
-                try { onBackPressedDispatcher.onBackPressed() }
-                finally { isEnabled = true }
+                // Back closes this UI session; Home/Recents merely minimize it.
+                // Do not stop the independently owned VPN service.
+                finish()
             }
         })
         ImGuiBridge.worker.execute {
@@ -182,7 +182,7 @@ class MainActivity : AppCompatActivity() {
     }
     override fun onPause() {
         resumed = false
-        surface?.pauseRendering()
+        surface?.pauseRendering(closeUi = isFinishing)
         super.onPause()
     }
     override fun onDestroy() {

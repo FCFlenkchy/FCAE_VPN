@@ -267,6 +267,12 @@ private:
             }
             return;
         }
+        // A finger has no proximity hover, but while it is on screen its
+        // position must still reach ImGui: menus/buttons need hover feedback
+        // before release. Scroll ownership below hides the pointer again so a
+        // swipe cannot leave unrelated controls highlighted or clicked.
+        if (event.action == Move && !scrolling_)
+            io.AddMousePosEvent(event.pos.x, event.pos.y);
         const bool moved = event.intent.x != 0.0f || event.intent.y != 0.0f;
         if (!scrolling_ && moved) {
             axis_ = std::abs(event.intent.x) > std::abs(event.intent.y) ? ImGuiAxis_X : ImGuiAxis_Y;
