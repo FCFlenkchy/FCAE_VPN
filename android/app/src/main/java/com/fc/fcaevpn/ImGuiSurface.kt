@@ -127,6 +127,7 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
     }
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         ImGuiBridge.nativeResize(width, height)
+        main.post { frames.request() }
     }
     override fun onDrawFrame(gl: GL10?) {
         if (!acceptingEvents) return

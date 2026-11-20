@@ -169,3 +169,16 @@ If this project helped you bypass censorship or just saved you some time, consid
 **Other languages:** [فارسی](READMEFA.md) | [中文](READMECH.md)
 
 </div>
+
+### iOS build
+
+CI builds an unsigned arm64 iPhone/iPad app and embedded PacketTunnel extension
+(iOS 16+). The shared ImGui UI selects tun2socks, Zeptun, or HEV; all three run
+in-process in the extension. NetworkExtension owns the virtual interface, routes,
+and DNS. Its public packetFlow API is adapted to an injected datagram descriptor
+with Darwin address-family framing; the selected engine processes those packets.
+Zeptun and HEV archives are built from the pinned submodules, not downloaded binaries.
+Mihomo and PROXY-only mode are not included in the iOS build. DNS currently requires
+a numeric UDP resolver on port 53. Installable VPN use requires signing both targets
+with matching NetworkExtension and App Group entitlements and provisioning profiles;
+the unsigned IPA is a build artifact, not a directly installable App Store package.

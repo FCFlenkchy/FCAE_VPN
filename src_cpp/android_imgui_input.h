@@ -12,6 +12,18 @@ class AndroidImGuiInput {
 public:
     enum Action { Down = 0, Up = 1, Move = 2, Cancel = 3 };
 
+    // Handle hit regions are supplied by the active ImGui editor each frame.
+    void text_handles(ImGuiID id, ImVec2 start, ImVec2 end, bool selected) {
+        handles_id_ = id; handles_frame_ = GImGui->FrameCount;
+        handles_[0] = start; handles_[1] = end; handles_selected_ = selected;
+    }
+    bool text_handle_drag(ImGuiID id, ImVec2& position, int& endpoint) {
+        if (handle_id_ != id) return false;
+        position = handle_position_; endpoint = handle_endpoint_;
+        if (!handle_down_) handle_id_ = 0;
+        return true;
+    }
+
     void set_touch_slop(float value) { slop_ = std::max(1.0f, value); }
 
     void horizontal_drag_item() {
@@ -44,6 +56,28 @@ public:
     }
 
     void pointer(float x, float y, int action, double time, bool touch) {
+        if (touch && action == Down && handles_id_ &&
+            GImGui->ActiveId == handles_id_ && GImGui->OpenPopupStack.empty() &&
+            handles_frame_ >= GImGui->FrameCount - 1) {
+            float nearest = 24.0f * 24.0f;
+            int endpoint = -1;
+            for (int n = handles_selected_ ? 0 : 1; n < 2; ++n) {
+                float dx = x - handles_[n].x, dy = y - handles_[n].y;
+                float distance = dx * dx + dy * dy;
+                if (distance < nearest) { nearest = distance; endpoint = n; }
+            }
+            if (endpoint >= 0) {
+                handle_id_ = handles_id_; handle_endpoint_ = endpoint;
+                handle_down_ = true; velocity_ = 0.0f;
+            }
+        }
+        if (touch && handle_id_) {
+            handle_position_ = ImVec2(x, y);
+            if (action == Up) text_selection_ = handle_id_;
+            if (action == Up || action == Cancel) handle_down_ = false;
+            if (action == Cancel) handle_id_ = 0;
+            return;
+        }
         const bool stopped_fling = touch && action == Down && std::abs(velocity_) > 1.0f;
         const ImVec2 pos(x, y);
         if (!touch || action == Down || action == Cancel) {
@@ -79,6 +113,8 @@ public:
 
     void reset() {
         events_.clear();
+        handles_id_ = handle_id_ = 0;
+        handle_down_ = false;
         text_selection_ = 0;
         if (GImGui) cancel_press();
         down_ = scrolling_ = forwarding_ = horizontal_owner_ = false;
@@ -118,10 +154,14 @@ public:
     }
 
     bool active() const {
-        return down_ || !events_.empty() || std::abs(velocity_) > 1.0f;
+        return handle_down_ || down_ || !events_.empty() || std::abs(velocity_) > 1.0f;
     }
 
 private:
+    ImGuiID handles_id_ = 0, handle_id_ = 0;
+    int handles_frame_ = -10, handle_endpoint_ = 1;
+    ImVec2 handles_[2]{}, handle_position_{};
+    bool handles_selected_ = false, handle_down_ = false;
     struct Event { ImVec2 pos; int action; bool touch; ImVec2 intent; ImVec2 velocity; bool stopped_fling; };
     struct DragItem { ImGuiID window; ImRect rect; int frame; };
     std::deque<Event> events_;

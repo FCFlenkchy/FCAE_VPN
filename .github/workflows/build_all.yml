@@ -347,14 +347,54 @@ jobs:
           path: ${{ startsWith(matrix.name, 'macos-') && 'package/*.dmg' || 'package/*' }}
           if-no-files-found: error
 
+  ios:
+    name: ios-arm64 (unsigned app + PacketTunnel)
+    needs: prepare
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
+      FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+      FCAE_MACOS_VERSION: ${{ needs.prepare.outputs.macos_version }}
+      GOTOOLCHAIN: auto
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: core/psiphon/go.mod
+          cache: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-arm64
+          workspaces: core/fcae-ffi -> ../../target
+      - name: Install native build tools
+        run: brew install xcodegen cmake ninja llvm pkg-config
+      - name: Set up Zig for the native Zeptun engine
+        shell: bash
+        run: bash scripts/ci/build_steps/setup-zig.sh
+      - name: Build unsigned IPA (no certificates or provisioning profiles)
+        run: bash scripts/ci/ios/build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: FCAE_VPN-ios-arm64
+          path: package/*.ipa
+          # IPA is already compressed; do not recompress the artifact payload.
+          compression-level: 0
+          if-no-files-found: error
+
   release:
     name: release/pre-release
-    needs: [prepare, build]
+    needs: [prepare, build, ios]
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
     runs-on: ubuntu-latest
-    if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.publish
+    if: always() && needs.build.result == 'success' && needs.ios.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.publish
     permissions:
       contents: write
     steps:

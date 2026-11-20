@@ -17,6 +17,10 @@ for dir in artifacts/*/; do
       cp "$dmg" "release-zips/${dmg_base}-${FCAE_VERSION}.dmg"
       echo "Copied release-zips/${dmg_base}-${FCAE_VERSION}.dmg"
     done
+  elif ls "$dir"/*.ipa 1>/dev/null 2>&1; then
+    for ipa in "$dir"/*.ipa; do
+      cp "$ipa" "release-zips/$(basename "$ipa" .ipa)-${FCAE_VERSION}.ipa"
+    done
   else
     zip_name="${name}-${FCAE_VERSION}.zip"
     (

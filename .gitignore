@@ -48,3 +48,7 @@ core/*/target/
 zig-out/
 
 target/
+
+# Generated iOS project and icon assets
+/ios/FCAE.xcodeproj/
+/ios/Assets.xcassets/

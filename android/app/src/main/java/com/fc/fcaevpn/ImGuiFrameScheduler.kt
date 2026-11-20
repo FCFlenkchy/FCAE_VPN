@@ -46,7 +46,12 @@ internal class ImGuiFrameScheduler(private val driver: Driver) {
 
     fun onVsync() {
         posted = false
-        if (!running || inFlight) return
+        if (!running) return
+        // Arm the following VSYNC now, not after a GL -> main-thread round trip.
+        // Slow frames still have only one render in flight.
+        posted = true
+        driver.postFrame()
+        if (inFlight) return
         inFlight = true
         dirty = false
         driver.render()
@@ -58,6 +63,9 @@ internal class ImGuiFrameScheduler(private val driver: Driver) {
         if (!isCurrent(epoch)) return
         inFlight = false
         if (dirty || delayMillis <= 0) request()
-        else if (!posted) driver.postWake(delayMillis.toLong().coerceAtMost(250))
+        else {
+            if (posted) { driver.cancelFrame(); posted = false }
+            driver.postWake(delayMillis.toLong().coerceAtMost(250))
+        }
     }
 }

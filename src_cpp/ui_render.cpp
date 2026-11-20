@@ -1,6 +1,18 @@
 #include "ui_text_input.h"
 #include "ui_render.h"
-#if !defined(ANDROID) && !defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
+#if defined(FCAE_IOS)
+#include "Platform.h"
+#define fcae_start ios_start
+#define fcae_stop ios_stop
+#define fcae_stop_begin ios_stop
+#define fcae_get_telemetry ios_telemetry
+#define fcae_live_listeners ios_live_listeners
+#define fcae_psiphon_regions ios_regions
+#define fcae_tun_paused ios_tun_paused
+#define fcae_pause_tun ios_tun_control
+#define fcae_resume_tun ios_tun_control
+#endif
+#if !defined(ANDROID) && !defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && !defined(FCAE_IOS)
 #include "imgui_horizontal_drag.h"
 #endif
 #if defined(ANDROID)
@@ -985,7 +997,9 @@ static std::string join_path(const std::string& dir, const char* name) {
 static std::string join_cfg(const std::string& dir) { return join_path(dir, "FCAE_VPN.cfg"); }
 
 static std::string exe_dir() {
-#if defined(ANDROID)
+#if defined(FCAE_IOS)
+    return ios_data_dir();
+#elif defined(ANDROID)
     return android_ui_data_dir();
 #elif defined(_WIN32)
     std::wstring w(MAX_PATH, L'\0');
@@ -1111,7 +1125,9 @@ static bool ends_with(const std::string& s, const char* suffix) {
 // .app bundle (never inside it, which would break the signature). An app
 // installed under /Applications is not portable.
 static std::string portable_root() {
-#if defined(__APPLE__)
+#if defined(FCAE_IOS)
+    return ios_data_dir();
+#elif defined(__APPLE__)
     std::string dir = exe_dir();
     if (!ends_with(dir, ".app/Contents/MacOS")) return dir;
     dir.resize(dir.size() - strlen("/Contents/MacOS"));
@@ -1138,7 +1154,9 @@ static std::string portable_root() {
 
 // Per-user location for when the portable folder is read-only.
 static std::string user_data_dir() {
-#if defined(_WIN32)
+#if defined(FCAE_IOS)
+    return ios_data_dir();
+#elif defined(_WIN32)
     const wchar_t* root = _wgetenv(L"LOCALAPPDATA");
     if (!root || !*root) return {};
     std::string dir = narrow(root) + "\\FCAE_VPN";
@@ -1652,8 +1670,12 @@ static bool save_config(bool quiet = false) {
     return true;
 }
 
+#if defined(ANDROID) || defined(FCAE_IOS)
 #if defined(ANDROID)
 void android_ui_flush_settings() {
+#else
+void ios_flush_settings() {
+#endif
     if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready)
         save_config(true);
 }
@@ -2611,7 +2633,9 @@ static bool open_external_url(const char* url) {
         if (*c == '\'' || *c == '"' || *c == '`' || *c == '\\' ||
             *c == '\n' || *c == '\r') return false;
     }
-#if defined(_WIN32)
+#if defined(FCAE_IOS)
+    return ios_open_url(url);
+#elif defined(_WIN32)
     return (INT_PTR)ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL) > 32;
 #elif defined(ANDROID)
     android_ui_command("url", url);
@@ -4456,7 +4480,11 @@ void render_ui() {
                                               ImGui::CalcTextSize("DISCONNECT").x) + action_btn_pad;
         const float stop_btn_w = std::max(ImGui::CalcTextSize("START").x,
                                           ImGui::CalcTextSize("STOP").x) + action_btn_pad;
+#if defined(FCAE_IOS)
+        const bool show_tun_control = false;
+#else
         const bool show_tun_control = g_app.mode == 1 && (connected || tun_paused);
+#endif
         const float pair_reserve = show_tun_control ? stop_btn_w + 6.0f : 0.0f;
         float btn_w = narrow ? (std::max)(action_btn_min, ImGui::GetContentRegionAvail().x - pair_reserve)
                              : action_btn_min;
@@ -6232,7 +6260,7 @@ void render_ui() {
 
     ImGui::PopStyleVar(2);
     ImGui::End();
-#if !defined(ANDROID) && !defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
+#if !defined(ANDROID) && !defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && !defined(FCAE_IOS)
     static ImGuiHorizontalDrag horizontal_drag;
     if (horizontal_drag.update()) ui_request_redraw();
 #endif

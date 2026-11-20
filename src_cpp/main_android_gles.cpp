@@ -572,6 +572,68 @@ void finish(ImGuiInputTextFlags flags) {
         restore_id = 0;
         edit_key = ImGuiKey_None;
     }
+    if (state && GImGui->ActiveId == id && !(flags & ImGuiInputTextFlags_Password)) {
+        ImGuiWindow* window = ImGui::GetCurrentWindow();
+        const auto& children = window->DC.ChildWindows;
+        ImGuiWindow* child = !children.empty() && children.back()->ChildId == id ? children.back() : nullptr;
+        const ImVec2 padding = ImGui::GetStyle().FramePadding;
+        ImVec2 origin = ImGui::GetItemRectMin();
+        if (child) origin = child->DC.CursorStartPos;
+        else { origin.x += padding.x; origin.y += padding.y; }
+        origin.x -= state->Scroll.x;
+        const char* text = state->GetText();
+        const auto& lines = GImGui->InputTextLineIndex.Offsets;
+        const float height = ImGui::GetFontSize();
+        auto line_start = [&](int line) { return child && !lines.empty() ? lines[line] : 0; };
+        const int count = child ? std::max(1, lines.Size) : 1;
+        auto text_width = [&](const char* begin, const char* end) {
+            return ImFontCalcTextSizeEx(ImGui::GetFont(), height, FLT_MAX, 0.0f,
+                begin, end, end, nullptr, nullptr, ImDrawTextFlags_WrapKeepBlanks).x;
+        };
+        auto position = [&](int offset) {
+            int line = 0;
+            while (line + 1 < count && line_start(line + 1) <= offset) ++line;
+            float width = text_width(text + line_start(line), text + offset);
+            return ImVec2(origin.x + width, origin.y + (line + 1) * height);
+        };
+        ImVec2 finger; int endpoint;
+        if (input->text_handle_drag(id, finger, endpoint)) {
+            // The bulb sits below the baseline; track the text above the finger.
+            int line = std::clamp(static_cast<int>(std::floor((finger.y - origin.y - height * 0.5f) / height)), 0, count - 1);
+            int offset = line_start(line);
+            int end = line + 1 < count ? line_start(line + 1) : state->TextLen;
+            float x = origin.x;
+            while (offset < end && text[offset] != '\n') {
+                unsigned int codepoint = 0;
+                int length = ImTextCharFromUtf8(&codepoint, text + offset, text + end);
+                if (length <= 0) break;
+                float width = text_width(text + offset, text + offset + length);
+                if (finger.x < x + width * 0.5f) break;
+                x += width; offset += length;
+            }
+            int start = state->GetSelectionStart(), finish = state->GetSelectionEnd();
+            if (start == finish) start = finish = offset;
+            else if (endpoint == 0) start = offset;
+            else finish = offset;
+            state->SetSelection(start, finish);
+            state->CursorFollow = true;
+            state->CursorAnimReset();
+        }
+        ImVec2 start = position(state->GetSelectionStart());
+        ImVec2 end = position(state->GetSelectionEnd());
+        start.y += height * 0.35f; end.y += height * 0.35f;
+        ImRect clip = child ? child->InnerClipRect : ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        // Do not expose offscreen handles as invisible touch targets.
+        if (clip.Contains(start) || clip.Contains(end)) {
+            const bool selected = state->GetSelectionStart() != state->GetSelectionEnd();
+            input->text_handles(id, clip.Contains(start) ? start : ImVec2(-10000,-10000),
+                clip.Contains(end) ? end : ImVec2(-10000,-10000), selected);
+            ImDrawList* draw = ImGui::GetForegroundDrawList();
+            ImU32 color = ImGui::GetColorU32(ImGuiCol_SliderGrabActive);
+            if (selected && clip.Contains(start)) draw->AddCircleFilled(start, height * 0.3f, color);
+            if (clip.Contains(end)) draw->AddCircleFilled(end, height * 0.3f, color);
+        }
+    }
     ImGui::PushID(static_cast<int>(id));
     if (input->text_menu(id) && state) {
         selection_start = state->GetSelectionStart();
@@ -620,11 +682,14 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     input->new_frame(io.DeltaTime);
     const bool interacting = input->active() || now < interaction_until || io.MouseDown[0]
         || GImGui->InputEventsQueue.Size != 0;
-    ui_should_render(interacting || io.WantTextInput);
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui::NewFrame();
-    ui_frame();
-    ImGui::Render();
+    if (ui_should_render(interacting || io.WantTextInput || UiText::wants_keyboard())) {
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui::NewFrame();
+        ui_frame();
+        ImGui::Render();
+    }
+    // GLSurfaceView swaps even on an idle poll: replay cached draw data rather
+    // than rebuilding the complete UI or relying on undefined backbuffer contents.
     glViewport(0, 0, surface_width, surface_height);
     const ImVec4 background = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
     glClearColor(background.x, background.y, background.z, background.w);
