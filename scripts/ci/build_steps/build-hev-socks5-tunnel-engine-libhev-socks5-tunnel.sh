@@ -22,7 +22,7 @@ case "${FCAE_MATRIX_NAME}" in
     make clean
     make static CC="$CC" PP="$CC -E" AR="$AR" CFLAGS="$FLAGS" LFLAGS="$FLAGS"
     for archive in bin/libhev-socks5-tunnel.a third-part/{yaml,lwip,hev-task-system}/bin/*.a; do
-      xcrun lipo -verify_arch arm64 "$archive"
+      xcrun lipo "$archive" -verify_arch arm64
     done
     ;;
   windows-x64)

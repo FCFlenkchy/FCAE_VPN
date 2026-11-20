@@ -4,8 +4,8 @@ mkdir -p package
 app="$PWD/build/ios/Build/Products/Release-iphoneos/FCAE.app"
 # Fail the job instead of uploading an app without its VPN provider or core.
 test -f "$app/PlugIns/PacketTunnel.appex/PacketTunnel"
-xcrun lipo -verify_arch arm64 "$app/FCAE"
-xcrun lipo -verify_arch arm64 "$app/PlugIns/PacketTunnel.appex/PacketTunnel"
+xcrun lipo "$app/FCAE" -verify_arch arm64
+xcrun lipo "$app/PlugIns/PacketTunnel.appex/PacketTunnel" -verify_arch arm64
 xcrun nm "$app/PlugIns/PacketTunnel.appex/PacketTunnel" > build/ios/extension-symbols.txt
 grep -q ' _fcae_start$' build/ios/extension-symbols.txt
 for symbol in t2s_start zeptun_create hev_socks5_tunnel_main_from_str; do

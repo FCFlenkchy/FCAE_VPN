@@ -137,6 +137,10 @@ jobs:
               -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
               -DAETHER_TARGET=MACOS_X64
 
+          - target: aarch64-apple-ios
+            name: ios-arm64
+            os: macos-latest
+
     steps:
       - name: checkout
         uses: actions/checkout@v7
@@ -184,8 +188,8 @@ jobs:
       # The macOS front end renders through Metal and links nothing that has to
       # be built first, so the GLFW cache this job used to restore is gone.
 
-      - name: install deps (macOS)
-        if: startsWith(matrix.name, 'macos-')
+      - name: install deps (Apple)
+        if: startsWith(matrix.name, 'macos-') || matrix.name == 'ios-arm64'
         run: bash -e scripts/ci/build_steps/install-deps-macos.sh
 
       # llvm-tools-preview is not optional: it supplies llvm-objcopy and llvm-nm,
@@ -194,7 +198,7 @@ jobs:
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, aarch64-apple-darwin, x86_64-apple-darwin
+          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios
           components: rust-src, llvm-tools-preview
 
       - name: cache rust
@@ -206,7 +210,7 @@ jobs:
           cache-on-failure: true
 
       - name: cache cmake
-        if: "!startsWith(matrix.name, 'android-')"
+        if: "!startsWith(matrix.name, 'android-') && matrix.name != 'ios-arm64'"
         uses: actions/cache@v6
         with:
           path: build
@@ -283,6 +287,10 @@ jobs:
         if: startsWith(matrix.name, 'macos-')
         run: bash -e scripts/ci/build_steps/build-frontend-macos.sh
 
+      - name: build frontend (iOS)
+        if: matrix.name == 'ios-arm64'
+        run: bash -e scripts/ci/build_steps/build-frontend-ios.sh
+
       - name: build apk
         if: startsWith(matrix.name, 'android-')
         env:
@@ -307,7 +315,7 @@ jobs:
         run: bash -e scripts/ci/build_steps/import-macos-codesigning-cert.sh
 
       - name: package
-        if: "!startsWith(matrix.name, 'android-') && !startsWith(matrix.name, 'macos-')"
+        if: matrix.name == 'linux-x64' || matrix.name == 'windows-x64'
         run: bash -e scripts/ci/build_steps/package.sh
 
       - name: install osslsigncode (windows signing)
@@ -336,6 +344,10 @@ jobs:
         if: startsWith(matrix.name, 'macos-')
         run: bash -e scripts/ci/build_steps/package-macos.sh
 
+      - name: package (iOS)
+        if: matrix.name == 'ios-arm64'
+        run: bash -e scripts/ci/build_steps/package-ios.sh
+
       - name: cleanup macos keychain
         if: always() && startsWith(matrix.name, 'macos-')
         run: bash -e scripts/ci/build_steps/cleanup-macos-keychain.sh
@@ -344,67 +356,19 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: FCAE_VPN-${{ matrix.name }}
-          path: ${{ startsWith(matrix.name, 'macos-') && 'package/*.dmg' || 'package/*' }}
-          if-no-files-found: error
-
-  ios:
-    name: ios-arm64
-    needs: prepare
-    runs-on: macos-latest
-    timeout-minutes: 90
-    env:
-      FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
-      FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
-      FCAE_MACOS_VERSION: ${{ needs.prepare.outputs.macos_version }}
-      GOTOOLCHAIN: auto
-      FCAE_MATRIX_NAME: ios-arm64
-      FCAE_MATRIX_TARGET: aarch64-apple-ios
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: core/psiphon/go.mod
-          cache: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ios-arm64
-          workspaces: core/fcae-ffi -> ../../target
-      - name: Install native build tools
-        run: brew install xcodegen cmake ninja llvm pkg-config
-      - name: Set up Zig for the native Zeptun engine
-        shell: bash
-        run: bash scripts/ci/build_steps/setup-zig.sh
-      - name: Build Zeptun engine
-        run: bash scripts/ci/build_steps/build-zeptun-engine-libzeptun.sh
-      - name: Build HEV engine
-        run: bash scripts/ci/build_steps/build-hev-socks5-tunnel-engine-libhev-socks5-tunnel.sh
-      - name: Build Rust engine FFI in-process
-        run: bash scripts/ci/build_steps/build-rust-engine-ffi-in-process.sh
-      - name: Build iOS frontend
-        run: bash scripts/ci/build_steps/build-frontend-ios.sh
-      - name: Package iOS
-        run: bash scripts/ci/build_steps/package-ios.sh
-      - uses: actions/upload-artifact@v7
-        with:
-          name: FCAE_VPN-ios-arm64
-          path: package/*.ipa
+          path: ${{ matrix.name == 'ios-arm64' && 'package/*.ipa' || startsWith(matrix.name, 'macos-') && 'package/*.dmg' || 'package/*' }}
           # IPA is already compressed; do not recompress the artifact payload.
-          compression-level: 0
+          compression-level: ${{ matrix.name == 'ios-arm64' && '0' || '6' }}
           if-no-files-found: error
 
   release:
     name: release/pre-release
-    needs: [prepare, build, ios]
+    needs: [prepare, build]
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
     runs-on: ubuntu-latest
-    if: always() && needs.build.result == 'success' && needs.ios.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.publish
+    if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.publish
     permissions:
       contents: write
     steps:

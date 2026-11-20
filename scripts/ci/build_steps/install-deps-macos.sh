@@ -5,9 +5,13 @@
 #
 # The toolchain packages the rest of the build wants are still installed the
 # same way, with the same retries.
+packages=(cmake ninja nasm protobuf)
+if [ "${FCAE_MATRIX_NAME:-}" = "ios-arm64" ]; then
+  packages+=(xcodegen llvm pkg-config)
+fi
 brew_ok=0
 for attempt in 1 2 3; do
-  brew install cmake ninja nasm protobuf && { brew_ok=1; break; }
+  brew install "${packages[@]}" && { brew_ok=1; break; }
   echo "::warning::brew install failed (attempt $attempt/3); retrying in 15s"
   sleep 15
 done

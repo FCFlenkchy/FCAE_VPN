@@ -31,7 +31,7 @@ case "${FCAE_MATRIX_NAME}" in
     SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
     zig build -Dtarget="aarch64-ios.${IPHONEOS_DEPLOYMENT_TARGET:-16.0}" \
       -Doptimize=small -Dmobile=true -Dstrip=true --sysroot "$SDKROOT"
-    xcrun lipo -verify_arch arm64 zig-out/lib/libzeptun.a
+    xcrun lipo zig-out/lib/libzeptun.a -verify_arch arm64
     ;;
   android-*)
     SYSROOT="${ANDROID_NDK_HOME:?}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
