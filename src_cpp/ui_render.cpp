@@ -1,4 +1,5 @@
 #include "ui_text_input.h"
+#include "ui_media_fit.h"
 #include "ui_render.h"
 #if defined(FCAE_IOS)
 #include "Platform.h"
@@ -5339,64 +5340,28 @@ void render_ui() {
                                     std::max(1.0f, card_size.y - card_border * 2.0f));
 
             if (background_texture) {
-                const ImVec2 card_min = media_origin;
-                const ImVec2 card_size = media_area;
-                const ImVec2 source((float)s_sponsor.background_width, (float)s_sponsor.background_height);
-                const float cover = std::max(card_size.x / source.x, card_size.y / source.y) * background_scale;
-                const ImVec2 drawn(source.x * cover, source.y * cover);
-                // Overflow is cropped through the UVs rather than drawn past the
-                // card, so a filling background shares the card's rounded corners.
-                const ImVec2 visible(std::min(drawn.x, card_size.x), std::min(drawn.y, card_size.y));
-                const ImVec2 uv_min((1.0f - visible.x / drawn.x) * 0.5f, (1.0f - visible.y / drawn.y) * 0.5f);
-                const ImVec2 image_min(card_min.x + (card_size.x - visible.x) * 0.5f,
-                                       card_min.y + (card_size.y - visible.y) * 0.5f);
-                const bool fills_card = visible.x >= card_size.x && visible.y >= card_size.y;
-                ImGui::GetWindowDrawList()->AddImageRounded(background_texture, image_min,
-                    ImVec2(image_min.x + visible.x, image_min.y + visible.y),
-                    uv_min, ImVec2(1.0f - uv_min.x, 1.0f - uv_min.y),
+                // Keep the complete creative visible as the fixed-height card
+                // changes width. Cover-fit used the growing width as a zoom,
+                // cutting more and more off the top/bottom on maximized windows.
+                const auto image = UiMedia::fit(media_origin, media_area,
+                    ImVec2((float)s_sponsor.background_width, (float)s_sponsor.background_height),
+                    false, background_scale);
+                const bool fills_card = image.min.x <= media_origin.x && image.min.y <= media_origin.y
+                    && image.max.x >= media_origin.x + media_area.x
+                    && image.max.y >= media_origin.y + media_area.y;
+                ImGui::GetWindowDrawList()->AddImageRounded(background_texture, image.min, image.max,
+                    image.uv0, image.uv1,
                     ImGui::GetColorU32(ImVec4(1, 1, 1, (float)s_sponsor.background_opacity / 100.0f)),
                     fills_card ? ImGui::GetStyle().ChildRounding : 0.0f);
             }
 
             if (texture) {
-                const ImVec2 icon_origin = media_origin;
-                const ImVec2 icon_area = media_area;
-                const ImVec2 band = icon_area;
-                const ImVec2 source((float)s_sponsor.width, (float)s_sponsor.height);
-                ImVec2 size = band;
-                ImVec2 uv0(0, 0);
-                ImVec2 uv1(1, 1);
-                if (s_sponsor.image_fit == 0) {
-                    const float fit = std::min(band.x / source.x, band.y / source.y);
-                    size = ImVec2(source.x * fit, source.y * fit);
-                } else {
-                    const float image_ratio = source.x / source.y;
-                    const float band_ratio = band.x / band.y;
-                    if (image_ratio > band_ratio) {
-                        const float crop = (1.0f - band_ratio / image_ratio) * 0.5f;
-                        uv0.x = crop;
-                        uv1.x = 1.0f - crop;
-                    } else {
-                        const float crop = (1.0f - image_ratio / band_ratio) * 0.5f;
-                        uv0.y = crop;
-                        uv1.y = 1.0f - crop;
-                    }
-                }
-                const float media_scale = s_sponsor.image_fit == 0
-                    ? std::min(icon_scale, 1.0f) : icon_scale;
-                size.x *= media_scale;
-                size.y *= media_scale;
-                const auto sponsor_icon_center = [](float extent, float drawn, float percent) {
-                    if (drawn >= extent) return extent * 0.5f;
-                    return std::clamp(extent * percent, drawn * 0.5f, extent - drawn * 0.5f);
-                };
-                const ImVec2 icon_min(
-                    icon_origin.x + sponsor_icon_center(icon_area.x, size.x,
-                        std::clamp((float)s_sponsor.icon_x / 100.0f, 0.0f, 1.0f)) - size.x * 0.5f,
-                    icon_origin.y + sponsor_icon_center(icon_area.y, size.y,
-                        std::clamp((float)s_sponsor.icon_y / 100.0f, 0.0f, 1.0f)) - size.y * 0.5f);
-                const ImVec2 icon_max(icon_min.x + size.x, icon_min.y + size.y);
-                ImGui::GetWindowDrawList()->AddImage(texture, icon_min, icon_max, uv0, uv1,
+                const bool cover = s_sponsor.image_fit != 0;
+                const auto image = UiMedia::fit(media_origin, media_area,
+                    ImVec2((float)s_sponsor.width, (float)s_sponsor.height), cover,
+                    cover ? icon_scale : std::min(icon_scale, 1.0f),
+                    ImVec2((float)s_sponsor.icon_x / 100.0f, (float)s_sponsor.icon_y / 100.0f));
+                ImGui::GetWindowDrawList()->AddImage(texture, image.min, image.max, image.uv0, image.uv1,
                     ImGui::GetColorU32(ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f)));
             }
             ImGui::SetCursorScreenPos(media_origin);
