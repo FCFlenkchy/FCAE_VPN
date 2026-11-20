@@ -105,6 +105,9 @@ inline void finish(ImGuiInputTextFlags flags, const char* text) {
     using namespace Detail;
     if ((flags & ImGuiInputTextFlags_ReadOnly) || (GImGui->LastItemData.ItemFlags & ImGuiItemFlags_Disabled)) return;
     const ImGuiID id = ImGui::GetItemID();
+    // Clipped/omitted widgets can leave a zero LastItem ID. Zero is also our
+    // "no pending action" sentinel: never dispatch hooks or open a popup for it.
+    if (id == 0) return;
     auto* state = ImGui::GetInputTextState(id);
     if (touch_hold && touch_hold(id, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()))) {
         if (refresh_clipboard) refresh_clipboard();
@@ -143,7 +146,7 @@ inline void finish(ImGuiInputTextFlags flags, const char* text) {
         menu_frame = GImGui->FrameCount;
         if (GImGui->ActiveId != id && !(flags & ImGuiInputTextFlags_Password)) draw_menu_selection(id, text, start, end);
     }
-    if (ImGui::BeginPopup("Text actions")) {
+    if (menu_id == id && popup_id != 0 && ImGui::BeginPopup("Text actions")) {
         const bool password = (flags & ImGuiInputTextFlags_Password) != 0;
         const bool selected = start != end;
         ImGuiKey key = ImGuiKey_None;

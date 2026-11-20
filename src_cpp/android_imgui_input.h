@@ -23,7 +23,7 @@ public:
     }
 
     bool text_hold(ImGuiID id, const ImRect& rect) {
-        if (down_ && !forwarding_ && !scrolling_ && !suppress_tap_ &&
+        if (id != 0 && down_ && !forwarding_ && !scrolling_ && !suppress_tap_ &&
             held_ >= 0.5f && rect.Contains(origin_) && tap_id_ == id) {
             press();
             text_selection_ = id;
@@ -33,7 +33,8 @@ public:
     }
 
     bool text_menu(ImGuiID id) {
-        if (text_selection_ != id || down_) return false;
+        // Zero means no pending long-press, never a field to open a menu for.
+        if (id == 0 || text_selection_ == 0 || text_selection_ != id || down_) return false;
         text_selection_ = 0;
         return true;
     }
