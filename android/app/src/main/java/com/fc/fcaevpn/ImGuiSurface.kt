@@ -234,8 +234,27 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
         }
         if (event.action != KeyEvent.ACTION_DOWN && event.action != KeyEvent.ACTION_UP)
             return super.dispatchKeyEvent(event)
-        val down = event.action == KeyEvent.ACTION_DOWN
+        // Do not consume every hardware key: Android must retain volume,
+        // media, power, camera and other system/default actions on both edges.
+        // Only text and keys actually understood by our ImGui bridge belong here.
         val code = event.keyCode
+        val navigationOrModifier = when (code) {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_TAB, KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_FORWARD_DEL,
+            KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_PAGE_DOWN,
+            KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_MOVE_HOME, KeyEvent.KEYCODE_MOVE_END,
+            KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT,
+            KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT,
+            KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT,
+            KeyEvent.KEYCODE_META_LEFT, KeyEvent.KEYCODE_META_RIGHT -> true
+            else -> false
+        }
+        if (event.isSystem || (!event.isPrintingKey && !navigationOrModifier))
+            return super.dispatchKeyEvent(event)
+        if (!acceptingEvents) return super.dispatchKeyEvent(event)
+        val down = event.action == KeyEvent.ACTION_DOWN
         val meta = event.metaState
         val unicode = if (down && !event.isCtrlPressed && !event.isMetaPressed) event.unicodeChar else 0
         enqueue {
