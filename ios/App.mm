@@ -3,11 +3,13 @@
 #import "Platform.h"
 #include "ui_render.h"
 #include "ui_style.h"
+#include "ui_text_input.h"
 #include "android_imgui_input.h"
 #include "imgui_impl_metal.h"
 
 void ios_vpn_poll();
 static id<MTLDevice> metal;
+static AndroidImGuiInput* text_input = nullptr;
 struct Texture { id<MTLTexture> image; uint64_t generation=0; int width=0,height=0; };
 static Texture textures[3];
 ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint64_t generation,int slot) {
@@ -50,9 +52,22 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint
             UIPasteboard.generalPasteboard.string=[NSString stringWithUTF8String:text ?: ""];
         };
         ImGui_ImplMetal_Init(device);
-        _input.set_touch_slop(8);ui_init();
+        _input.set_touch_slop(8);
+        text_input = &_input;
+        UiText::reset();
+        UiText::touch_hold = [](ImGuiID id, const ImRect& rect) { return text_input && text_input->text_hold(id, rect); };
+        UiText::touch_menu = [](ImGuiID id) { return text_input && text_input->text_menu(id); };
+        UiText::refresh_clipboard = nullptr;
+        ui_init();
     }
     return self;
+}
+- (void)dealloc {
+    if (text_input == &_input) {
+        text_input = nullptr;
+        UiText::reset();
+        UiText::touch_hold = nullptr;UiText::touch_menu = nullptr;
+    }
 }
 - (BOOL)canBecomeFirstResponder {return YES;}
 - (BOOL)hasText {return YES;}
@@ -90,7 +105,7 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint
     io.DisplaySize={(float)view.bounds.size.width,(float)view.bounds.size.height};
     io.DisplayFramebufferScale={(float)(view.drawableSize.width/std::max(1.f,io.DisplaySize.x)),(float)(view.drawableSize.height/std::max(1.f,io.DisplaySize.y))};
     _input.new_frame(io.DeltaTime);
-    if (!ui_should_render(_input.active() || io.WantTextInput || GImGui->InputEventsQueue.Size)) return;
+    if (!ui_should_render(_input.active() || io.WantTextInput || UiText::wants_keyboard() || GImGui->InputEventsQueue.Size)) return;
     MTLRenderPassDescriptor* pass=view.currentRenderPassDescriptor;
     id<CAMetalDrawable> drawable=view.currentDrawable;if (!pass || !drawable) return;
     ImGui_ImplMetal_NewFrame(pass);ImGui::NewFrame();ui_frame();ImGui::Render();
@@ -98,15 +113,16 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint
     id<MTLRenderCommandEncoder> encoder=[command renderCommandEncoderWithDescriptor:pass];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),command,encoder);
     [encoder endEncoding];[command presentDrawable:drawable];[command commit];
-    if (io.WantTextInput && !self.isFirstResponder) [self becomeFirstResponder];
-    if (!io.WantTextInput && self.isFirstResponder) [self resignFirstResponder];
+    const bool keyboard = io.WantTextInput || UiText::wants_keyboard();
+    if (keyboard && !self.isFirstResponder) [self becomeFirstResponder];
+    if (!keyboard && self.isFirstResponder) [self resignFirstResponder];
 }
 - (void)setPaused:(BOOL)paused {
     [super setPaused:paused];
     if (!ImGui::GetCurrentContext()) return;
     ui_set_window_visible(!paused);ui_set_window_focused(!paused);ImGui::GetIO().AddFocusEvent(!paused);
     _input.reset();_pointer=nil;_lastFrame=0;
-    if (paused) {ios_flush_settings();for (auto& texture:textures)texture={};[self resignFirstResponder];}
+    if (paused) {UiText::reset();ios_flush_settings();for (auto& texture:textures)texture={};[self resignFirstResponder];}
 }
 @end
 @interface FCAEController : UIViewController
