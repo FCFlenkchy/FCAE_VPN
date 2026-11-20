@@ -10,7 +10,7 @@
   </a>
 </p>
 
-A censorship circumvention client for Windows, Linux, macOS, and Android, with TUN and local proxy modes.
+A censorship circumvention client for Windows, Linux, macOS, Android, and iOS, with TUN and local proxy modes (iOS: TUN only).
 
 ## Available cores
 
@@ -55,6 +55,7 @@ Aether supports custom routing rules directly in the UI (Routes tab) without nee
 | Linux | GLFW + OpenGL | ImGui |
 | macOS | AppKit + Metal | ImGui |
 | Android | GLSurfaceView + OpenGL ES 3 + JNI | ImGui |
+| iOS (arm64, iOS 16+) | UIKit + Metal | ImGui |
 
 ### Screenshots
 
@@ -73,6 +74,7 @@ Aether supports custom routing rules directly in the UI (Routes tab) without nee
 - CMake >= 3.22
 - Vulkan SDK or DirectX SDK (Windows)
 - For Android: NDK, Android SDK, Kotlin
+- For iOS: macOS, Xcode with iPhoneOS SDK, XcodeGen, Zig, and the Rust `aarch64-apple-ios` target
 
 ### Build the Rust engine first
 

@@ -348,15 +348,17 @@ jobs:
           if-no-files-found: error
 
   ios:
-    name: ios-arm64 (unsigned app + PacketTunnel)
+    name: ios-arm64
     needs: prepare
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 90
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
       FCAE_MACOS_VERSION: ${{ needs.prepare.outputs.macos_version }}
       GOTOOLCHAIN: auto
+      FCAE_MATRIX_NAME: ios-arm64
+      FCAE_MATRIX_TARGET: aarch64-apple-ios
     steps:
       - uses: actions/checkout@v7
         with:
@@ -377,8 +379,16 @@ jobs:
       - name: Set up Zig for the native Zeptun engine
         shell: bash
         run: bash scripts/ci/build_steps/setup-zig.sh
-      - name: Build unsigned IPA (no certificates or provisioning profiles)
-        run: bash scripts/ci/ios/build.sh
+      - name: Build Zeptun engine
+        run: bash scripts/ci/build_steps/build-zeptun-engine-libzeptun.sh
+      - name: Build HEV engine
+        run: bash scripts/ci/build_steps/build-hev-socks5-tunnel-engine-libhev-socks5-tunnel.sh
+      - name: Build Rust engine FFI in-process
+        run: bash scripts/ci/build_steps/build-rust-engine-ffi-in-process.sh
+      - name: Build iOS frontend
+        run: bash scripts/ci/build_steps/build-frontend-ios.sh
+      - name: Package iOS
+        run: bash scripts/ci/build_steps/package-ios.sh
       - uses: actions/upload-artifact@v7
         with:
           name: FCAE_VPN-ios-arm64

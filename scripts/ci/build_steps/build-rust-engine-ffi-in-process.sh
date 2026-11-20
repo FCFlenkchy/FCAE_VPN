@@ -7,6 +7,29 @@ if [ "${FCAE_MATRIX_NAME}" = "macos-x64" ]; then
   export MACOSX_DEPLOYMENT_TARGET=13.0
 fi
 
+if [ "${FCAE_MATRIX_NAME}" = "ios-arm64" ]; then
+  export IPHONEOS_DEPLOYMENT_TARGET=16.0
+  export SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
+  export CARGO_TARGET_DIR="$PWD/target"
+  export CC_aarch64_apple_ios="$(xcrun --sdk iphoneos --find clang)"
+  export CXX_aarch64_apple_ios="$(xcrun --sdk iphoneos --find clang++)"
+  export AR_aarch64_apple_ios="$(xcrun --sdk iphoneos --find ar)"
+  export CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="$CC_aarch64_apple_ios"
+  export CFLAGS_aarch64_apple_ios="-target arm64-apple-ios16.0 -isysroot $SDKROOT"
+  export CXXFLAGS_aarch64_apple_ios="$CFLAGS_aarch64_apple_ios"
+  export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios="$CFLAGS_aarch64_apple_ios"
+  export CMAKE_TOOLCHAIN_FILE_aarch64_apple_ios="$PWD/ios/toolchain.cmake"
+  export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
+  unset MACOSX_DEPLOYMENT_TARGET || true
+  export FCAE_ZEPTUN_LIBDIR="$PWD/core/zeptun/zig-out/lib"
+  export FCAE_HEV_LIBDIR="$PWD/core/hev-socks5-tunnel/bin"
+  cargo build --manifest-path core/fcae-ffi/Cargo.toml --locked --release \
+    --target aarch64-apple-ios -p fcae-ffi \
+    --features aether,firefox,psiphon-live,xray,singbox,zeptun,hev
+  test -s target/aarch64-apple-ios/release/libfcae_ffi.a
+  exit 0
+fi
+
 if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
   NDK="${ANDROID_NDK_HOME:-${FCAE_NDK_PATH}}"
   if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then

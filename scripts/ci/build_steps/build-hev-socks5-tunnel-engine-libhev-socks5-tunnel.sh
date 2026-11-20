@@ -14,6 +14,17 @@ case "${FCAE_MATRIX_NAME}" in
     # deployment target the Rust and CMake halves use.
     make static CFLAGS="-arch x86_64 -mmacosx-version-min=13.0"
     ;;
+  ios-arm64)
+    SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
+    CC="$(xcrun --sdk iphoneos --find clang)"
+    AR="$(xcrun --sdk iphoneos --find ar)"
+    FLAGS="-target arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET:-16.0} -isysroot \"$SDKROOT\""
+    make clean
+    make static CC="$CC" PP="$CC -E" AR="$AR" CFLAGS="$FLAGS" LFLAGS="$FLAGS"
+    for archive in bin/libhev-socks5-tunnel.a third-part/{yaml,lwip,hev-task-system}/bin/*.a; do
+      xcrun lipo -verify_arch arm64 "$archive"
+    done
+    ;;
   windows-x64)
     # Use the same Windows GNU ABI/CRT as the final FCAE link. Clang is
     # needed here because HEV's lwIP fallback allocators use its COFF weak
