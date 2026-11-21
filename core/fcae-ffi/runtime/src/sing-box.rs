@@ -493,6 +493,7 @@ fn tls_config(security: &Security, server: &str) -> Option<Value> {
             fingerprint,
             allow_insecure,
             ech,
+            pinned_cert_sha256,
             ..
         } => {
             let mut tls = Map::new();
@@ -514,6 +515,9 @@ fn tls_config(security: &Security, server: &str) -> Option<Value> {
             }
             if let Some(ech) = ech {
                 tls.insert("ech".into(), json!({"enabled": true, "config": [ech]}));
+            }
+            if let Some(pins) = pinned_cert_sha256 {
+                tls.insert("certificate_sha256".into(), json!(super::proxy_cores::profile::certificate_pins(pins).expect("pins validated before generation")));
             }
             Some(Value::Object(tls))
         }
@@ -539,6 +543,7 @@ fn transport_config(outbound: &Outbound, dialled: bool) -> Result<Option<Value>,
     let name = dialled.then(|| host_of(&outbound.server)).flatten();
     let transport = match &outbound.transport {
         Transport::Tcp => return Ok(None),
+        Transport::Quic => json!({"type":"quic"}),
         Transport::Ws {
             path,
             host,
@@ -674,8 +679,11 @@ fn native(config: &Value, plan: &Plan<'_>) -> Result<Value, String> {
     let native_log = native_log
         .as_object_mut()
         .ok_or("native log must be an object")?;
+    native_log.insert("disabled".into(), json!(plan.level == Level::Off));
     if let Some(level) = log(plan.level).get("level") {
         native_log.insert("level".into(), level.clone());
+    } else {
+        native_log.remove("level");
     }
 
     let inbounds = match object.remove("inbounds") {
@@ -1346,6 +1354,9 @@ pub(crate) fn link_blocker(outbound: &Outbound) -> Option<String> {
         } => return refuse("the gRPC authority is an Xray-core setting"),
         _ => {}
     }
+    if matches!(&outbound.security, Security::Tls { verify_cert_by_name: Some(_), .. }) {
+        return refuse("the verified certificate name has no equivalent sing-box TLS field");
+    }
     match &outbound.security {
         Security::Reality {
             support_x25519mlkem768: Some(_),
@@ -1357,14 +1368,12 @@ pub(crate) fn link_blocker(outbound: &Outbound) -> Option<String> {
             mldsa65_verify: Some(_),
             ..
         } => return refuse("the REALITY ML-DSA-65 key is an Xray-core setting"),
-        Security::Tls {
-            pinned_cert_sha256: Some(_),
-            ..
-        } => return refuse("the certificate pin is an Xray-core setting"),
-        Security::Tls {
-            verify_cert_by_name: Some(_),
-            ..
-        } => return refuse("the verified certificate name is an Xray-core setting"),
+        Security::Reality { spider_x, .. } if !spider_x.is_empty() && spider_x != "/" => {
+            return Some("sing-box has no REALITY spiderX field; remove spx or select Xray".into());
+        }
+        Security::Tls { pinned_cert_sha256: Some(pins), .. } => {
+            if let Err(error) = super::proxy_cores::profile::certificate_pins(pins) { return Some(error); }
+        },
         _ => {}
     }
     if outbound.finalmask.is_some() {

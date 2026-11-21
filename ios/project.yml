@@ -60,11 +60,17 @@ targets:
       - sdk: MetalKit.framework
       - sdk: QuartzCore.framework
       - sdk: Foundation.framework
+      - sdk: CoreFoundation.framework
       - sdk: NetworkExtension.framework
       - sdk: Network.framework
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
       - sdk: CFNetwork.framework
+      - sdk: CoreTelephony.framework
+      - sdk: CryptoTokenKit.framework
+      - sdk: LocalAuthentication.framework
+      - sdk: MobileCoreServices.framework
+      - sdk: UniformTypeIdentifiers.framework
       - sdk: CoreAudio.framework
       - sdk: AudioToolbox.framework
       - sdk: AVFAudio.framework
@@ -86,11 +92,19 @@ targets:
       # The embedded core references UIDevice even in the headless extension.
       - sdk: UIKit.framework
       - sdk: Foundation.framework
+      - sdk: CoreFoundation.framework
       - sdk: NetworkExtension.framework
       - sdk: Network.framework
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
       - sdk: CFNetwork.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreText.framework
+      - sdk: CoreTelephony.framework
+      - sdk: CryptoTokenKit.framework
+      - sdk: LocalAuthentication.framework
+      - sdk: MobileCoreServices.framework
+      - sdk: UniformTypeIdentifiers.framework
       - sdk: CoreAudio.framework
       - sdk: AudioToolbox.framework
       - sdk: AVFAudio.framework

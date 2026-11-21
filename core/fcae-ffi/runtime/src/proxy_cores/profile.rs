@@ -16,6 +16,7 @@ pub(crate) mod share_links;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
     Tcp,
+    Quic,
     Ws {
         path: String,
         host: Option<String>,
@@ -70,6 +71,7 @@ impl Transport {
     pub fn name(&self) -> &'static str {
         match self {
             Transport::Tcp => "tcp",
+            Transport::Quic => "quic",
             Transport::Ws { .. } => "ws",
             Transport::HttpUpgrade { .. } => "httpupgrade",
             Transport::H2 { .. } => "http",
@@ -94,7 +96,7 @@ impl Transport {
                 .map(str::trim)
                 .filter(|host| !host.is_empty()),
             Transport::Grpc { authority, .. } => authority.as_deref(),
-            Transport::Tcp | Transport::Kcp { .. } => None,
+            Transport::Tcp | Transport::Quic | Transport::Kcp { .. } => None,
         }
     }
 }
@@ -111,8 +113,8 @@ pub enum Security {
         /// `allowInsecure`. Xray-core removed the setting, so only sing-box can
         /// carry an outbound that asks for it.
         allow_insecure: bool,
-        /// `pcs`: hex SHA-256 pins of the server certificate. Xray-core only —
-        /// sing-box pins the public key, which is a different digest.
+        /// `pcs`: hex SHA-256 pins of the server certificate. sing-box takes
+        /// the same certificate digest as base64, not its public-key digest.
         pinned_cert_sha256: Option<String>,
         /// `vcn`: the names the peer certificate is verified against.
         /// Xray-core only.
@@ -511,11 +513,28 @@ fn native_json(text: &str) -> Result<Value, String> {
 /// embedded core validates its own schema, including new/less common types.
 fn normalize_native(mut value: Value, backend: FcaeBackend) -> Result<Value, String> {
     let object = value.as_object().ok_or("native config must be an object")?;
-    if ["outbounds", "endpoints", "inbounds", "proxies", "proxy-groups", "proxy-providers", "services"]
-        .iter().any(|key| object.contains_key(*key)) { return Ok(value); }
-    let proxy_type = object.get("type").and_then(Value::as_str).map(str::to_owned);
+    if [
+        "outbounds",
+        "endpoints",
+        "inbounds",
+        "proxies",
+        "proxy-groups",
+        "proxy-providers",
+        "services",
+    ]
+    .iter()
+    .any(|key| object.contains_key(*key))
+    {
+        return Ok(value);
+    }
+    let proxy_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     if backend == FcaeBackend::Xray && proxy_type.is_some() {
-        return Err("this native outbound uses type, not Xray protocol; select sing-box or Mihomo".into());
+        return Err(
+            "this native outbound uses type, not Xray protocol; select sing-box or Mihomo".into(),
+        );
     }
     if backend != FcaeBackend::Xray && object.contains_key("protocol") {
         return Err("this native outbound uses Xray protocol; select Xray".into());
@@ -546,7 +565,9 @@ fn normalize_native(mut value: Value, backend: FcaeBackend) -> Result<Value, Str
             if name.contains(',') || name.chars().any(char::is_control) {
                 return Err("a standalone Mihomo proxy name cannot contain rule separators; use a full config for this name".into());
             }
-            Ok(serde_json::json!({"mode":"rule","proxies":[value],"rules":[format!("MATCH,{name}")]}))
+            Ok(
+                serde_json::json!({"mode":"rule","proxies":[value],"rules":[format!("MATCH,{name}")]}),
+            )
         }
         _ => Ok(value),
     }
@@ -559,15 +580,31 @@ impl CoreProfile {
         if let Some(result) = share_links::native_link(text, backend) {
             return result.map(CoreProfile::Native);
         }
-        let uri = text.split_once("://").is_some_and(|(scheme,_)| !scheme.is_empty()
-            && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b)));
+        let uri = text.split_once("://").is_some_and(|(scheme, _)| {
+            !scheme.is_empty()
+                && scheme
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+        });
         let profile = if backend == FcaeBackend::Mihomo && !uri {
             // A single native YAML proxy is as useful as a full proxies list.
             // Complete configurations still pass through unchanged.
-            let value = native_json(text).or_else(|_| serde_yaml_ng::from_str::<Value>(text)
-                .map_err(|error| format!("native Mihomo config is invalid: {error}")))?;
+            let value = native_json(text).or_else(|_| {
+                serde_yaml_ng::from_str::<Value>(text)
+                    .map_err(|error| format!("native Mihomo config is invalid: {error}"))
+            })?;
             Self::Native(value)
-        } else { Self::parse(text)? };
+        } else if backend == FcaeBackend::Xray && !uri {
+            let value = native_json(text)
+                .or_else(|_| serde_yaml_ng::from_str::<Value>(text).map_err(|e| e.to_string()))
+                .or_else(|_| {
+                    toml::from_str::<Value>(text)
+                        .map_err(|e| format!("native Xray config must be JSON, YAML or TOML: {e}"))
+                })?;
+            Self::Native(value)
+        } else {
+            Self::parse(text)?
+        };
         match profile {
             Self::Native(value) => normalize_native(value, backend).map(Self::Native),
             other => Ok(other),
@@ -1684,6 +1721,17 @@ fn parse_wireguard(rest: &str) -> Result<Outbound, String> {
     })
 }
 
+pub(crate) fn certificate_pins(text: &str) -> Result<Vec<String>, String> {
+    let mut pins = Vec::new();
+    for pin in text.split(',') {
+        let bytes = hex_decode(&pin.trim().replace(':', ""))
+            .filter(|bytes| bytes.len() == 32)
+            .ok_or("certificate pin must be a 32-byte SHA-256 hex digest")?;
+        pins.push(STANDARD.encode(bytes));
+    }
+    Ok(pins)
+}
+
 /// A WireGuard key: base64 in either alphabet, padded or not, or the 64-hex form
 /// Xray-core also takes. Normalised to padded standard base64, which both cores
 /// decode; a key of the wrong width is refused rather than handed to a core that
@@ -1843,6 +1891,7 @@ fn parse_transport(query: &Query) -> Result<Transport, String> {
             plain_tcp_header(query)?;
             Transport::Tcp
         }
+        "quic" => Transport::Quic,
         "ws" => Transport::Ws {
             path,
             host,

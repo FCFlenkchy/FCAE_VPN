@@ -1267,10 +1267,10 @@ pub unsafe extern "C" fn fcae_normalize_upstream_proxy(text: *const c_char, out:
     parsed.is_ok()
 }
 
-/// Validates one saved Xray/sing-box config without a runtime, so the config
+/// Preflights one saved core config without starting a runtime, so the config
 /// editor can refuse a bad paste while the user is still in the dialog.
 ///
-/// `backend` is [`fcae_abi::FcaeBackend`] (`3` = Xray, `4` = sing-box). On
+/// `backend` is [`fcae_abi::FcaeBackend`] (`3` = Xray, `4` = sing-box, `5` = Mihomo). On
 /// success `out` receives the empty string and the return value is true;
 /// otherwise `out` receives the reason. An empty config is always rejected:
 /// a caller that means "no config" must not call this at all.
@@ -1295,8 +1295,13 @@ pub unsafe extern "C" fn fcae_core_check_profile(
         }
         let text = if config.is_null() { None } else { CStr::from_ptr(config).to_str().ok() };
         let text = text.ok_or_else(|| "the config is not valid UTF-8".to_string())?;
-        // The library's own check, so what the editor accepts and what the
-        // session later loads can never disagree.
+        // The editor may run before a VPN runtime/backends have been created.
+        #[cfg(feature = "xray")]
+        fcae_bridge_xray::install_validator();
+        #[cfg(feature = "singbox")]
+        fcae_bridge_singbox::install_validator();
+        #[cfg(feature = "mihomo")]
+        fcae_bridge_mihomo::install_validator();
         fcae_runtime::saved_configs::check_config(backend, text)?;
         Ok(String::new())
     });

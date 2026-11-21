@@ -166,12 +166,23 @@ impl SavedConfigs {
     }
 }
 
+type Validator = fn(&CoreProfile) -> Result<(), String>;
+static VALIDATORS: once_cell::sync::Lazy<
+    parking_lot::RwLock<std::collections::HashMap<u32, Validator>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
+
+/// Installed by compiled core bridges; schema checking must not start a core.
+pub fn register_validator(backend: FcaeBackend, validator: Validator) {
+    VALIDATORS.write().insert(backend as u32, validator);
+}
+
 /// Validate one saved config exactly the way the list does, and return the
 /// profile the core will run.
 ///
 /// The config editors reach this through `fcae_core_check_profile`, so the
 /// bytes the user is about to store are held to the same standard as the ones
-/// the session loads: a config that saves is a config that starts.
+/// the session loads. Compiled bridges preflight the schema without starting
+/// a core; network access and runtime resources are checked at start.
 pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -206,6 +217,10 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
         if !outbound.carried_by(backend) {
             return Err(outbound.refusal(backend));
         }
+    }
+    let validator = VALIDATORS.read().get(&(backend as u32)).copied();
+    if let Some(validate) = validator {
+        validate(&profile)?;
     }
     Ok(profile)
 }
@@ -332,7 +347,9 @@ fn parse_entry(value: &Value) -> Result<SavedConfig, String> {
                 "backend {other:?} is not one of \"xray\" or \"sing-box\""
             ))
         }
-        None => return Err("a saved config needs a \"backend\" of \"xray\" or \"sing-box\"".into()),
+        None => {
+            return Err("a saved config needs a \"backend\" of \"xray\" or \"sing-box\"".into())
+        }
     };
 
     let config = object

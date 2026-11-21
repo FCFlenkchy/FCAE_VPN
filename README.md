@@ -55,7 +55,7 @@ Aether supports custom routing rules directly in the UI (Routes tab) without nee
 | Linux | GLFW + OpenGL | ImGui |
 | macOS | AppKit + Metal | ImGui |
 | Android | GLSurfaceView + OpenGL ES 3 + JNI | ImGui |
-| iOS (arm64, iOS 16+) | UIKit + Metal | ImGui |
+| iOS | UIKit + Metal | ImGui |
 
 ### Screenshots
 
@@ -141,27 +141,6 @@ git submodule update --init --recursive
 Outputs:
 - App: `build/ios/Build/Products/Release-iphoneos/FCAE.app`
 - IPA: `package/FCAE_VPN-ios-arm64.ipa`
-
-The app embeds its VPN extension and the in-process tun2socks, Zeptun, and HEV
-engines. Mihomo and PROXY-only mode are not included on iOS. DNS currently
-requires a numeric UDP resolver on port 53.
-
-The unsigned IPA is a build artifact, **not directly installable**. To run the
-VPN on a device, sign both the app and embedded extension with provisioning
-profiles that grant `packet-tunnel-provider` to **both** bundles. SideStore can
-re-sign the IPA, but a free Apple ID cannot grant this VPN capability; a paid
-team/profile with Network Extension permission is required. Keep the embedded
-extension when installing. The app discovers its signed provider identifier,
-so re-signing does not leave it pointing at the original bundle ID.
-
-App Groups are optional: when the original shared group is unavailable, the
-app and extension use their own protected Application Support directories and
-transfer a bounded session/identity snapshot through the VPN profile and
-provider messages. Newer credentials are not overwritten by an older saved
-profile. Native configurations should keep certificates/keys inline; arbitrary
-external file paths are not transferred between the two sandboxes.
-The identifiers and requested entitlements are in `ios/project.yml`,
-`ios/App.entitlements`, and `ios/Tunnel.entitlements`.
 
 ## Credits
 

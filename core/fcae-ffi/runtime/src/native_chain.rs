@@ -37,8 +37,8 @@ pub fn attach(config: &mut Value, upstream: Value, xray: bool) -> Result<(), Str
                 .to_owned();
             if xray {
                 match kind.as_str() {
-                    "freedom" | "blackhole" | "dns" | "loopback" => continue,
-                    "http" | "socks" | "shadowsocks" | "trojan" | "vless" | "vmess" | "hysteria" | "masque" => {},
+                    "freedom" | "direct" | "blackhole" | "block" | "dns" | "loopback" => continue,
+                    "http" | "socks" | "shadowsocks" | "trojan" | "vless" | "vmess" | "hysteria" | "masque" | "wireguard" => {},
                     _ => return Err(format!("native Xray {kind:?} cannot be safely chained by the app; disable the upstream proxy or use the core's own chain settings")),
                 }
                 // Legacy proxySettings already owns this outbound's next hop.
@@ -65,7 +65,9 @@ pub fn attach(config: &mut Value, upstream: Value, xray: bool) -> Result<(), Str
                 }
             } else {
                 match kind.as_str() {
-                    "direct" | "block" | "dns" | "selector" | "urltest" => continue,
+                    // A bridge is an OS-local port, not a network dialer: it
+                    // has no detour field, just like an intentional direct route.
+                    "direct" | "block" | "dns" | "selector" | "urltest" | "bridge" => continue,
                     "socks" | "http" | "shadowsocks" | "vmess" | "trojan" | "wireguard" |
                     "hysteria" | "vless" | "shadowtls" | "tuic" | "hysteria2" | "anytls" |
                     "snell" | "ssh" | "naive" | "tor" | "tailcat" | "tailscale" |

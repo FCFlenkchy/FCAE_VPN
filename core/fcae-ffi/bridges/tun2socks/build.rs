@@ -33,7 +33,15 @@ fn main() {
     fcae_build::rerun_if_env_changed("ANDROID_NDK_HOME");
     fcae_build::rerun_if_env_changed("CGO_CC");
     fcae_build::rerun_if_env_changed("GO_BIN");
-    for key in ["SDKROOT", "DEVELOPER_DIR", "IPHONEOS_DEPLOYMENT_TARGET", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS"] {
+    for key in [
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "IPHONEOS_DEPLOYMENT_TARGET",
+        "CGO_CFLAGS",
+        "CGO_CPPFLAGS",
+        "CGO_CXXFLAGS",
+        "CGO_LDFLAGS",
+    ] {
         fcae_build::rerun_if_env_changed(key);
     }
     // `go.rs` reads this to decide whether to refresh the module graph.
@@ -98,73 +106,54 @@ fn main() {
     if mihomo {
         archive.tags.push("fcae_mihomo".into());
         archive.tags.push("with_gvisor".into());
-        archive.ldflags.push("-X github.com/metacubex/mihomo/constant.Version=v1.19.34".into());
+        archive
+            .ldflags
+            .push("-X github.com/metacubex/mihomo/constant.Version=embedded".into());
     }
     if xray {
         archive.tags.push("fcae_xray".into());
     }
     if singbox {
         archive.tags.push("fcae_singbox".into());
-        // Existing platforms retain the full upstream feature set; iOS uses
-        // a static mobile profile without desktop services or runtime dylibs.
+        // Upstream's Apple libbox profile supports the same embedded protocols.
+        // Keep one feature list so mobile does not silently lose endpoints.
+        archive.tags.extend(
+            [
+                "with_gvisor",
+                "with_quic",
+                "with_dhcp",
+                "with_wireguard",
+                "with_utls",
+                "with_naive_outbound",
+                "with_acme",
+                "with_clash_api",
+                "with_v2ray_api",
+                "with_cloudflared",
+                "with_ccm",
+                "with_ocm",
+                "with_usbip",
+                "with_openvpn",
+                "with_openconnect",
+                "with_tailscale",
+                "ts_omit_logtail",
+                "ts_omit_ssh",
+                "ts_omit_drive",
+                "ts_omit_taildrop",
+                "ts_omit_webclient",
+                "ts_omit_doctor",
+                "ts_omit_capture",
+                "ts_omit_kube",
+                "ts_omit_aws",
+                "ts_omit_synology",
+                "ts_omit_bird",
+                "grpcnotrace",
+                "badlinkname",
+                "tfogo_checklinkname0",
+            ]
+            .map(str::to_string),
+        );
         if target.os == fcae_build::target::Os::Ios {
-            archive.tags.extend(
-                [
-                    "with_gvisor",
-                    "with_quic",
-                    "with_wireguard",
-                    "with_utls",
-                    "with_clash_api",
-                    "with_low_memory",
-                    "grpcnotrace",
-                    "badlinkname",
-                    "tfogo_checklinkname0",
-                ]
-                .map(str::to_string),
-            );
-            fcae_build::note("iOS sing-box: mobile protocol set; desktop services and dynamically loaded Naive/Cronet are excluded");
-        } else {
-            archive.tags.extend(
-                [
-                    "with_gvisor",
-                    "with_quic",
-                    "with_dhcp",
-                    "with_wireguard",
-                    "with_utls",
-                    "with_naive_outbound",
-                    "with_acme",
-                    "with_clash_api",
-                    "with_cloudflared",
-                    "with_ccm",
-                    "with_ocm",
-                    "with_usbip",
-                    "with_openvpn",
-                    "with_openconnect",
-                    // Tailscale, trimmed to what an embedded core can use: no SSH,
-                    // drive, web UI, log uploader or cloud integrations.
-                    "with_tailscale",
-                    "ts_omit_logtail",
-                    "ts_omit_ssh",
-                    "ts_omit_drive",
-                    "ts_omit_taildrop",
-                    "ts_omit_webclient",
-                    "ts_omit_doctor",
-                    "ts_omit_capture",
-                    "ts_omit_kube",
-                    "ts_omit_aws",
-                    "ts_omit_synology",
-                    "ts_omit_bird",
-                    // An embedded core needs no gRPC tracing; this also drops
-                    // `golang.org/x/net/trace` from the archive.
-                    "grpcnotrace",
-                    // kTLS, the oom-killer's cache cleanup and HTTP/2 force-close
-                    // reach into stdlib internals with `go:linkname`; upstream ships
-                    // both tags, and both need the linker check disabled below.
-                    "badlinkname",
-                    "tfogo_checklinkname0",
-                ]
-                .map(str::to_string),
-            );
+            archive.tags.push("with_low_memory".into());
         }
         // `with_purego` is what makes cronet-go call cronet through its C ABI at
         // run time instead of linking it: its cgo files then contribute no
@@ -196,7 +185,7 @@ fn main() {
         // and MPTCP stays off.
         archive
             .ldflags
-            .push(format!("-X github.com/sagernet/sing-box/constant.Version={SING_BOX}"));
+            .push("-X github.com/sagernet/sing-box/constant.Version=embedded".into());
         archive
             .ldflags
             .push("-X runtime.godebugDefault=multipathtcp=0,tlssha1=1".into());
@@ -210,6 +199,39 @@ fn main() {
                 panic!("failed to stage the Go bridge for Android: {e}");
             }
             built.emit_link_directives("libfcae_go_bridge", target);
+            if singbox && target.os == fcae_build::target::Os::Ios {
+                // c-archive records cgo LDFLAGS but does not bundle external
+                // static libraries. Make rustc include Cronet in libfcae_ffi.a.
+                let go = std::env::var_os("GO_BIN")
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::var_os("GOROOT").map(|p| PathBuf::from(p).join("bin/go")))
+                    .unwrap_or_else(|| PathBuf::from("go"));
+                let output = std::process::Command::new(go)
+                    .current_dir(&module)
+                    .args([
+                        "list",
+                        "-m",
+                        "-f",
+                        "{{.Dir}}",
+                        "github.com/sagernet/cronet-go/lib/ios_arm64",
+                    ])
+                    .env("GOTOOLCHAIN", "auto")
+                    .output()
+                    .expect("locate the pinned iOS Cronet archive");
+                assert!(
+                    output.status.success(),
+                    "Cronet lookup failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let directory = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+                assert!(
+                    directory.join("libcronet.a").is_file(),
+                    "missing iOS Cronet static library"
+                );
+                println!("cargo:rustc-link-search=native={}", directory.display());
+                println!("cargo:rustc-link-lib=static=cronet");
+                println!("cargo:rustc-link-lib=dylib=c++");
+            }
             println!("cargo:rustc-cfg=tun2socks_linked");
             println!(
                 "cargo:rustc-env=FCAE_TUN2SOCKS_HEADER={}",
@@ -240,7 +262,9 @@ fn cores(psiphon: bool, xray: bool, singbox: bool, mihomo: bool) -> String {
     if singbox {
         names.push("sing-box");
     }
-    if mihomo { names.push("mihomo"); }
+    if mihomo {
+        names.push("mihomo");
+    }
     if names.is_empty() {
         String::new()
     } else {
@@ -279,7 +303,11 @@ fn assemble(
         fcae_build::rerun_if_changed(psiphon_src.join("go.mod"));
         let source = std::fs::read_to_string(psi_go.join("bridge.go")).expect("read Psiphon shim");
         let main = "// c-archive / c-shared require a main package.\nfunc main() {}";
-        assert_eq!(source.matches(main).count(), 1, "unexpected Psiphon bridge main");
+        assert_eq!(
+            source.matches(main).count(),
+            1,
+            "unexpected Psiphon bridge main"
+        );
         std::fs::write(module.join("psiphon.go"), source.replace(main, ""))
             .expect("copy the Psiphon shim");
     }
@@ -291,17 +319,26 @@ fn assemble(
         if !enabled {
             continue;
         }
-        let shim = root.join("core/fcae-ffi/bridges").join(dir).join("go/bridge.go");
+        let shim = root
+            .join("core/fcae-ffi/bridges")
+            .join(dir)
+            .join("go/bridge.go");
         fcae_build::go::track_sources(shim.parent().expect("shim directory"));
         copy(&shim, &module.join(name));
+        if dir == "singbox" {
+            copy(
+                &shim.with_file_name("cronet_ios.c"),
+                &module.join("cronet_ios.c"),
+            );
+        }
     }
 
     if mihomo && singbox {
         let source = root.join("core/fcae-ffi/bridges/mihomo/go/expvar/expvar.go");
         fcae_build::rerun_if_changed(&source);
-        let destination=module.join("mihomoexpvar");
+        let destination = module.join("mihomoexpvar");
         std::fs::create_dir_all(&destination).expect("create namespaced metrics package");
-        copy(&source,&destination.join("expvar.go"));
+        copy(&source, &destination.join("expvar.go"));
     }
     let local = |path: &Path| {
         assert!(
@@ -329,15 +366,22 @@ fn assemble(
             local(&psiphon_src.join("replace/dtls"))
         ));
     }
-    if xray {
-        manifest.push_str(&format!(
-            "\nrequire github.com/xtls/xray-core {XRAY}\n"
-        ));
-    }
-    if singbox {
-        manifest.push_str(&format!(
-            "\nrequire github.com/sagernet/sing-box {SING_BOX}\n"
-        ));
+    for (enabled, directory, module_name) in [
+        (xray, "xray", "github.com/xtls/xray-core"),
+        (singbox, "sing-box", "github.com/sagernet/sing-box"),
+    ] {
+        if enabled {
+            let source = root.join("core").join(directory);
+            assert!(
+                source.join("go.mod").is_file(),
+                "missing {directory} submodule"
+            );
+            fcae_build::go::track_sources(&source);
+            manifest.push_str(&format!(
+                "\nrequire {module_name} v0.0.0\nreplace {module_name} => {}\n",
+                local(&source)
+            ));
+        }
     }
     if mihomo {
         let source = root.join("core/mihomo");
@@ -362,11 +406,6 @@ fn assemble(
     let _ = std::fs::remove_file(module.join("go.sum"));
     module
 }
-
-/// Versions the generators target. Bump here, in the README and in the shims'
-/// comments together.
-const XRAY: &str = "v1.260327.0";
-const SING_BOX: &str = "v1.14.4";
 
 fn copy(from: &Path, to: &Path) {
     std::fs::copy(from, to)

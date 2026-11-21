@@ -103,6 +103,11 @@ pub(super) fn check_hy2_query(params: &str) -> Result<(), String> {
     let params = pairs(params, &[])?;
     only(&params, HY2)?;
     let q = Query(params.iter().cloned().collect());
+    for key in ["pcs", "hpkp"] {
+        if q.0.get(key).is_some_and(|value| value.trim().is_empty()) {
+            return Err(format!("{key} certificate pin cannot be empty"));
+        }
+    }
     if q.first(&["obfs-password", "obfs_password"]).is_some() && q.get("obfs").is_none() {
         return Err("obfs-password needs an obfs scheme".into());
     }
@@ -170,19 +175,29 @@ pub(super) fn native_link(text: &str, backend: FcaeBackend) -> Option<Result<Val
     }
     let scheme = scheme.to_ascii_lowercase();
     let result = match scheme.as_str() {
-        "socks4" | "socks4a" => Some((|| {
-            if backend != FcaeBackend::SingBox { return Err("SOCKS4/4a share links require sing-box; Xray and Mihomo expose SOCKS5 only".into()); }
-            let (body, _) = split_fragment(rest);
-            let (address, query) = split_query(body);
-            only(&pairs(query, &[])?, &[])?;
-            let (auth, target) = address.rsplit_once('@').map_or((None, address), |(auth,target)| (Some(auth),target));
-            let (server, port) = split_host_port(trim_trailing_path(target), Some(1080))?;
-            if auth.is_some_and(|user| user.contains(':')) { return Err("SOCKS4/4a carries a user ID, not a password".into()); }
-            let user = auth.map(percent_decode);
-            let mut proxy = json!({"type":"socks","tag":"FCAE-PROXY","server":server,"server_port":port,"version":if scheme == "socks4a" {"4a"} else {"4"}});
-            if let Some(user) = user { proxy["username"] = json!(user); }
-            Ok(native(proxy, backend))
-        })()),
+        "socks4" | "socks4a" => {
+            Some((|| {
+                if backend != FcaeBackend::SingBox {
+                    return Err("SOCKS4/4a share links require sing-box; Xray and Mihomo expose SOCKS5 only".into());
+                }
+                let (body, _) = split_fragment(rest);
+                let (address, query) = split_query(body);
+                only(&pairs(query, &[])?, &[])?;
+                let (auth, target) = address
+                    .rsplit_once('@')
+                    .map_or((None, address), |(auth, target)| (Some(auth), target));
+                let (server, port) = split_host_port(trim_trailing_path(target), Some(1080))?;
+                if auth.is_some_and(|user| user.contains(':')) {
+                    return Err("SOCKS4/4a carries a user ID, not a password".into());
+                }
+                let user = auth.map(percent_decode);
+                let mut proxy = json!({"type":"socks","tag":"FCAE-PROXY","server":server,"server_port":port,"version":if scheme == "socks4a" {"4a"} else {"4"}});
+                if let Some(user) = user {
+                    proxy["username"] = json!(user);
+                }
+                Ok(native(proxy, backend))
+            })())
+        }
         "ssh" => Some((|| {
             let params = pairs(split_query(split_fragment(rest).0).1, &[])?;
             only(
@@ -473,6 +488,11 @@ pub(super) fn check_query(scheme: &str, rest: &str) -> Result<(), String> {
         return check_hy2_query(split_query(body).1);
     }
     let q = Query(params.iter().cloned().collect());
+    for key in ["pcs", "hpkp"] {
+        if q.0.get(key).is_some_and(|value| value.trim().is_empty()) {
+            return Err(format!("{key} certificate pin cannot be empty"));
+        }
+    }
     // Parse shared dial options even when disabled; with_dial_options rejects
     // active framing on protocols which cannot carry it.
     let mut allowed = vec![

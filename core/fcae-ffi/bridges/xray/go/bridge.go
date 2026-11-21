@@ -186,11 +186,28 @@ func init() {
 	}))
 }
 
-//export xray_start
-//
+//export xray_check
+func xray_check(text *C.char) (result *C.char) {
+	defer func() {
+		if err := recover(); err != nil {
+			result = C.CString(fmt.Sprintf("Xray config: %v", err))
+		}
+	}()
+	if text == nil {
+		return C.CString("missing Xray config")
+	}
+	_, err := xcore.LoadConfig("json", bytes.NewReader([]byte(C.GoString(text))))
+	if err != nil {
+		return C.CString("Xray config: " + err.Error())
+	}
+	return nil
+}
+
 // Brings one instance up and writes its handle to `handle`. The build happens
 // outside the registry lock: it parses a config and binds the core's inbounds,
 // which is per-instance work that a second hop must not be serialised behind.
+//
+//export xray_start
 func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 	text := C.GoString(config)
 	configOptions, err := xcore.LoadConfig("json", bytes.NewReader([]byte(text)))
@@ -219,10 +236,10 @@ func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 	return nil
 }
 
-//export xray_stop
-//
 // Closes one instance. The registry entry goes first, so a stop that races a
 // stop of the same handle closes the core exactly once.
+//
+//export xray_stop
 func xray_stop(id C.uint64_t) {
 	xrayMu.Lock()
 	core := xrayCores[uint64(id)]
@@ -235,10 +252,10 @@ func xray_stop(id C.uint64_t) {
 	engineStopped(engineXray)
 }
 
-//export xray_stop_all
-//
 // The session teardown net: closes every instance this shim still holds,
 // including one whose start was abandoned before its handle reached the caller.
+//
+//export xray_stop_all
 func xray_stop_all() {
 	xrayMu.Lock()
 	cores := xrayCores
@@ -297,11 +314,11 @@ func xray_running(id C.uint64_t) C.int {
 	return 1
 }
 
-//export xray_stats
-//
 // Cumulative tunnelled bytes as (uplink, downlink). Returns 0 when the core
 // keeps no counters, which is what a config without the `stats` app or the
 // policy flags gets.
+//
+//export xray_stats
 func xray_stats(id C.uint64_t, uplink *C.int64_t, downlink *C.int64_t) C.int {
 	xrayMu.Lock()
 	core := xrayCores[uint64(id)]
@@ -352,10 +369,10 @@ func xray_stats(id C.uint64_t, uplink *C.int64_t, downlink *C.int64_t) C.int {
 	return 1
 }
 
-//export xray_set_log
-//
 // Installs (or clears, with NULL) the host log sink and its level gate: 0
 // silences the core, 1..=4 are errors, warnings, info and debug.
+//
+//export xray_set_log
 func xray_set_log(fn C.xray_log_fn, gate C.int) {
 	xrayLogMu.Lock()
 	xrayLogFn, xrayLogGate = fn, int(gate)

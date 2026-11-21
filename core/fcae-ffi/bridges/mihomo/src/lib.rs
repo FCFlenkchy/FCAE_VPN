@@ -19,6 +19,7 @@ use fcae_runtime::Result;
 // Exported by `bridges/mihomo/go/bridge.go` through the shared archive. The
 // prefix is per core: one Go package cannot export `start` twice.
 extern "C" {
+    fn mihomo_check(config: *const c_char) -> *mut c_char;
     fn mihomo_set_home(path: *const c_char) -> *mut c_char;
     fn mihomo_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
     fn mihomo_stop(handle: u64);
@@ -137,6 +138,27 @@ pub fn listeners() -> Vec<fcae_runtime::proxy_cores::CoreListener> {
     fcae_runtime::proxy_cores::live_listeners(MihomoDialect::FFI)
 }
 
+/// Checks the managed configuration through the embedded core's parser, without
+/// starting listeners, contacting providers, or replacing a live session.
+pub fn install_validator() {
+    fcae_runtime::saved_configs::register_validator(FcaeBackend::Mihomo, |profile| {
+        let routing = fcae_runtime::config::RoutingConfig::default();
+        let plan = Plan { profile, socks: Some("127.0.0.1:1080".parse().unwrap()),
+            http: Some("127.0.0.1:1081".parse().unwrap()),
+            level: fcae_runtime::proxy_cores::Level::Off, upstream: None, routing: &routing, dial: None };
+        let value = config::generate(&plan)?;
+        let text = std::ffi::CString::new(value.to_string()).map_err(|_| "config contains NUL")?;
+        unsafe {
+            let error = mihomo_check(text.as_ptr());
+            if error.is_null() { return Ok(()); }
+            let message = std::ffi::CStr::from_ptr(error).to_string_lossy().into_owned();
+            mihomo_string_free(error);
+            Err(message)
+        }
+    });
+}
+
 pub fn register() {
+    install_validator();
     fcae_runtime::registry::register(FcaeBackend::Mihomo, || Arc::new(MihomoBackend));
 }

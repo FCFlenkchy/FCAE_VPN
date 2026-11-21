@@ -52,8 +52,12 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
     }
     let mut result = json!({"name":PROXY,"server":outbound.server,"port":outbound.port,"udp":true,"tfo":outbound.dial.tfo});
     if let Some(encoding) = &outbound.dial.packet_encoding {
-        if *encoding == PacketEncoding::Disabled && matches!(outbound.protocol, Protocol::Vless { .. }) {
-            return Err(refuse("packetEncoding=none for VLESS (the pinned core enables XUDP by default)"));
+        if *encoding == PacketEncoding::Disabled
+            && matches!(outbound.protocol, Protocol::Vless { .. })
+        {
+            return Err(refuse(
+                "packetEncoding=none for VLESS (the pinned core enables XUDP by default)",
+            ));
         }
         result["packet-encoding"] = json!(match encoding {
             PacketEncoding::PacketAddr => "packetaddr",
@@ -408,6 +412,7 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
         }
     }
     match &outbound.transport {
+        Transport::Quic => return Err(refuse("legacy QUIC transport")),
         Transport::Tcp => {}
         Transport::Ws {
             path,
@@ -476,6 +481,13 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
                     serde_json::from_str(extra).map_err(|e| format!("invalid XHTTP extra: {e}"))?;
                 let extra = extra.as_object().ok_or("XHTTP extra must be an object")?;
                 for (key, value) in extra {
+                    if key == "downloadSettings" {
+                        if mode.as_deref() == Some("stream-one") {
+                            return Err("XHTTP stream-one cannot use downloadSettings".into());
+                        }
+                        result["xhttp-opts"]["download-settings"] = xhttp_download(value)?;
+                        continue;
+                    }
                     if key == "xmux" {
                         result["xhttp-opts"]["reuse-settings"] = xhttp_reuse(value)?;
                         continue;
@@ -562,6 +574,139 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
             }
             result["mkcp-opts"] = opts;
         }
+    }
+    Ok(result)
+}
+
+/// Xray downloadSettings is a StreamConfig, not an XHTTP options object.
+/// Translate only fields whose Mihomo nested schema has the same semantics.
+fn xhttp_download(value: &Value) -> Result<Value, String> {
+    let source = value
+        .as_object()
+        .ok_or("XHTTP downloadSettings must be an object")?;
+    let mut result = json!({});
+    for (key, value) in source {
+        match key.as_str() {
+            "network" if matches!(value.as_str(), Some("xhttp" | "splithttp")) => {}
+            "network" => return Err("Mihomo XHTTP downloadSettings needs network=xhttp".into()),
+            "address" if value.as_str().is_some_and(|v| !v.is_empty()) => {
+                result["server"] = value.clone()
+            }
+            "port" if value.as_u64().is_some_and(|v| (1..=65535).contains(&v)) => {
+                result["port"] = value.clone()
+            }
+            "security" if matches!(value.as_str(), Some("none" | "tls" | "reality")) => {
+                result["tls"] = json!(value != "none")
+            }
+            "tlsSettings" => {
+                for (key, value) in value
+                    .as_object()
+                    .ok_or("download tlsSettings must be an object")?
+                {
+                    let target = match key.as_str() {
+                        "serverName" => "servername", "alpn" => "alpn", "fingerprint" => "client-fingerprint",
+                        "allowInsecure" => "skip-cert-verify", "verifyPeerCertByName" => "name-cert-verify",
+                        "pinnedPeerCertSha256" => "fingerprint",
+                        "echConfigList" => { result["ech-opts"] = json!({"enable":true,"config":value}); continue; },
+                        _ => return Err(format!("no verified Mihomo download tlsSettings.{key} mapping; use native Mihomo")),
+                    };
+                    let valid = match target {
+                        "alpn" => value
+                            .as_array()
+                            .is_some_and(|v| v.iter().all(Value::is_string)),
+                        "skip-cert-verify" => value.is_boolean(),
+                        _ => value.is_string(),
+                    };
+                    if !valid {
+                        return Err(format!("invalid download TLS {key} value"));
+                    }
+                    if target == "fingerprint" {
+                        let pin = value.as_str().unwrap().replace(':', "");
+                        if pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            return Err(
+                                "Mihomo download certificate pin must be one SHA-256 hex digest"
+                                    .into(),
+                            );
+                        }
+                        result[target] = json!(pin);
+                    } else {
+                        result[target] = value.clone();
+                    }
+                }
+            }
+            "realitySettings" => {
+                let mut reality = json!({});
+                for (key, value) in value
+                    .as_object()
+                    .ok_or("download realitySettings must be an object")?
+                {
+                    let target = match key.as_str() {
+                        "serverName" => {
+                            result["servername"] = value.clone();
+                            continue;
+                        }
+                        "fingerprint" => {
+                            result["client-fingerprint"] = value.clone();
+                            continue;
+                        }
+                        "publicKey" | "password" => "public-key",
+                        "shortId" => "short-id",
+                        "spiderX" if matches!(value.as_str(), Some("" | "/")) => continue,
+                        _ => {
+                            return Err(format!(
+                                "no verified Mihomo download REALITY {key} mapping"
+                            ))
+                        }
+                    };
+                    if !value.is_string() {
+                        return Err(format!("download REALITY {key} must be a string"));
+                    }
+                    if reality.get(target).is_some_and(|old| old != value) {
+                        return Err(format!("conflicting download REALITY {target}"));
+                    }
+                    reality[target] = value.clone();
+                }
+                result["reality-opts"] = reality;
+            }
+            "xhttpSettings" | "splithttpSettings" => {
+                if source.contains_key("xhttpSettings") && source.contains_key("splithttpSettings")
+                {
+                    return Err("use one download XHTTP settings object".into());
+                }
+                for (key, value) in value
+                    .as_object()
+                    .ok_or("download XHTTP settings must be an object")?
+                {
+                    match key.as_str() {
+                        "path" | "host" if value.is_string() => result[key]=value.clone(),
+                        "headers" if value.as_object().is_some_and(|v| v.values().all(Value::is_string)) => result[key]=value.clone(),
+                        "xmux" => result["reuse-settings"]=xhttp_reuse(value)?,
+                        _ => return Err(format!("no verified Mihomo download xhttpSettings.{key} mapping; use native Mihomo")),
+                    }
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "no verified Mihomo downloadSettings.{key} mapping; use native Mihomo"
+                ))
+            }
+        }
+    }
+    if !matches!(
+        source.get("network").and_then(Value::as_str),
+        Some("xhttp" | "splithttp")
+    ) {
+        return Err("downloadSettings must explicitly select network=xhttp".into());
+    }
+    if source.contains_key("tlsSettings")
+        && source.get("security").and_then(Value::as_str) != Some("tls")
+    {
+        return Err("download tlsSettings requires security=tls".into());
+    }
+    if source.contains_key("realitySettings")
+        && source.get("security").and_then(Value::as_str) != Some("reality")
+    {
+        return Err("download realitySettings requires security=reality".into());
     }
     Ok(result)
 }

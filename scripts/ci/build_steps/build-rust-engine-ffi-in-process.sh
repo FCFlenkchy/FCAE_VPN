@@ -25,7 +25,7 @@ if [ "${FCAE_MATRIX_NAME}" = "ios-arm64" ]; then
   export FCAE_HEV_LIBDIR="$PWD/core/hev-socks5-tunnel/bin"
   cargo build --manifest-path core/fcae-ffi/Cargo.toml --locked --release \
     --target aarch64-apple-ios -p fcae-ffi \
-    --features aether,firefox,psiphon-live,xray,singbox,zeptun,hev
+    --features aether,firefox,psiphon-live,xray,singbox,mihomo,zeptun,hev
   test -s target/aarch64-apple-ios/release/libfcae_ffi.a
   exit 0
 fi

@@ -288,6 +288,7 @@ fn stream_settings(outbound: &Outbound, chained: bool) -> Result<Map<String, Val
     let mut stream = Map::new();
     let network = match &outbound.transport {
         Transport::Tcp => "tcp",
+        Transport::Quic => return Err("Xray removed the legacy QUIC transport; use native XHTTP H3".into()),
         Transport::Ws { .. } => "ws",
         Transport::HttpUpgrade { .. } => "httpupgrade",
         Transport::Grpc { .. } => "grpc",
@@ -358,6 +359,7 @@ fn stream_settings(outbound: &Outbound, chained: bool) -> Result<Map<String, Val
         }
     }
     match &outbound.transport {
+        Transport::Quic => return Err("Xray removed legacy QUIC; use native XHTTP H3".into()),
         Transport::Tcp | Transport::H2 { .. } => {}
         Transport::Ws {
             path,
@@ -570,6 +572,7 @@ fn native(config: &Value, plan: &Plan<'_>) -> Result<Value, String> {
     let mut rewritten = Vec::with_capacity(inbounds.len());
     let mut socks_seen = false;
     let mut tun_tag: Option<String> = None;
+    let mut tun_sniffing: Option<Value> = None;
     for mut inbound in inbounds {
         let protocol = inbound
             .get("protocol")
@@ -606,6 +609,7 @@ fn native(config: &Value, plan: &Plan<'_>) -> Result<Value, String> {
             // would create a second one, fight the app's engine for it and
             // hijack routes the session already installed.
             "tun" => {
+                if tun_sniffing.is_none() { tun_sniffing = inbound.get("sniffing").cloned(); }
                 tun_tag.get_or_insert_with(|| {
                     inbound
                         .get("tag")
@@ -636,7 +640,7 @@ fn native(config: &Value, plan: &Plan<'_>) -> Result<Value, String> {
                 "listen": socks.ip().to_string(),
                 "port": socks.port(),
                 "settings": {"auth": "noauth", "udp": true},
-                "sniffing": {"enabled": false},
+                "sniffing": tun_sniffing.unwrap_or_else(|| json!({"enabled": false})),
             }));
         }
     }
@@ -1336,6 +1340,7 @@ pub(crate) fn link_blocker(outbound: &Outbound) -> Option<String> {
         }
     }
     match &outbound.transport {
+        Transport::Quic => return refuse("Xray removed the legacy QUIC transport; use XHTTP H3"),
         Transport::H2 { .. } => {
             return refuse(&format!(
                 "Xray-core removed the {} transport in favour of XHTTP",

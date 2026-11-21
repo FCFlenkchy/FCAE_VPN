@@ -8,12 +8,11 @@
 // FCAE combines the Psiphon shim with this bridge in a generated module.
 module github.com/FCFlenkchy/FCAE_VPN/core/fcae-ffi/bridges/tun2socks
 
-// Must be >= the `go` directive in core/tun2socks/go.mod (currently 1.26.3):
-// Go refuses to build a dependency that requires a newer language version than
-// the main module declares. Bump this whenever the submodule is updated.
-go 1.26.3
+// Must satisfy every pinned source module (Xray currently requires Go 1.27).
+// Keep the toolchain directive in sync; GOTOOLCHAIN=auto installs it in CI.
+go 1.27
 
-toolchain go1.26.8
+toolchain go1.27.4
 
 require (
 	github.com/xjasonlyu/tun2socks/v2 v2.6.0

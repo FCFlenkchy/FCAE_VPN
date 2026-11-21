@@ -33,6 +33,7 @@ import "C"
 import (
 	"context"
 	stdjson "encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -167,11 +168,29 @@ var (
 	sbLogGate int
 )
 
-//export sb_start
-//
+//export sb_check
+func sb_check(text *C.char) (result *C.char) {
+	defer func() {
+		if err := recover(); err != nil {
+			result = C.CString(fmt.Sprintf("sing-box config: %v", err))
+		}
+	}()
+	if text == nil {
+		return C.CString("missing sing-box config")
+	}
+	ctx := include.Context(service.ContextWithDefaultRegistry(context.Background()))
+	_, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(C.GoString(text)))
+	if err != nil {
+		return C.CString("sing-box config: " + err.Error())
+	}
+	return nil
+}
+
 // Brings one instance up and writes its handle to `handle`. The build happens
 // outside the registry lock: it parses a config and binds the core's inbounds,
 // which is per-instance work that a second hop must not be serialised behind.
+//
+//export sb_start
 func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 	text := C.GoString(config)
 	// include.Context registers every protocol, transport and service this
@@ -225,10 +244,10 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 	return nil
 }
 
-//export sb_stop
-//
 // Closes one instance. The registry entry goes first, so a stop that races a
 // stop of the same handle closes the box exactly once.
+//
+//export sb_stop
 func sb_stop(id C.uint64_t) {
 	sbMu.Lock()
 	core := sbCores[uint64(id)]
@@ -242,10 +261,10 @@ func sb_stop(id C.uint64_t) {
 	engineStopped(engineSingBox)
 }
 
-//export sb_stop_all
-//
 // The session teardown net: closes every instance this shim still holds,
 // including one whose start was abandoned before its handle reached the caller.
+//
+//export sb_stop_all
 func sb_stop_all() {
 	sbMu.Lock()
 	cores := sbCores
@@ -307,10 +326,10 @@ func sb_running(id C.uint64_t) C.int {
 	return 1
 }
 
-//export sb_stats
-//
 // Cumulative tunnelled bytes as (uplink, downlink); 0 when no tracker is
 // attached.
+//
+//export sb_stats
 func sb_stats(id C.uint64_t, uplink *C.int64_t, downlink *C.int64_t) C.int {
 	sbMu.Lock()
 	core := sbCores[uint64(id)]
@@ -324,10 +343,10 @@ func sb_stats(id C.uint64_t, uplink *C.int64_t, downlink *C.int64_t) C.int {
 	return 1
 }
 
-//export sb_set_log
-//
 // Installs (or clears, with NULL) the host log sink and its level gate: 0
 // silences the core, 1..=4 are errors, warnings, info and debug.
+//
+//export sb_set_log
 func sb_set_log(fn C.sb_log_fn, gate C.int) {
 	sbLogMu.Lock()
 	sbLogFn, sbLogGate = fn, int(gate)

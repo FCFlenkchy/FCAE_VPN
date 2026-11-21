@@ -87,6 +87,58 @@ func mihomo_set_home(path *C.char) *C.char {
 	return nil
 }
 
+//export mihomo_check
+func mihomo_check(text *C.char) (result *C.char) {
+	defer func() {
+		if err := recover(); err != nil {
+			result = C.CString(fmt.Sprintf("Mihomo config: %v", err))
+		}
+	}()
+	if text == nil {
+		return C.CString("missing Mihomo config")
+	}
+	// ParseRawConfig constructs adapters, loads geodata and can download
+	// providers. Never call it from the editor, especially during a live VPN.
+	if _, err := config.UnmarshalRawConfig([]byte(C.GoString(text))); err != nil {
+		return C.CString("Mihomo config: " + err.Error())
+	}
+	var document struct {
+		Proxies []map[string]any `json:"proxies"`
+		Groups  []map[string]any `json:"proxy-groups"`
+	}
+	if err := json.Unmarshal([]byte(C.GoString(text)), &document); err != nil {
+		return C.CString(err.Error())
+	}
+	names := make(map[string]bool)
+	for _, proxy := range document.Proxies {
+		name, _ := proxy["name"].(string)
+		kind, _ := proxy["type"].(string)
+		if name == "" || names[name] {
+			return C.CString("Mihomo proxy names must be nonempty and unique")
+		}
+		names[name] = true
+		switch kind {
+		case "ss", "ssr", "socks5", "http", "vmess", "vless", "snell", "trojan", "hysteria", "hysteria2", "wireguard", "tuic", "shadowquic", "gost-relay", "direct", "dns", "reject", "rematch", "ssh", "mieru", "anytls", "sudoku", "masque", "trusttunnel", "openvpn", "tailscale", "zerotier", "easytier":
+		default:
+			return C.CString("unknown Mihomo proxy type: " + kind)
+		}
+	}
+	for _, group := range document.Groups {
+		name, _ := group["name"].(string)
+		kind, _ := group["type"].(string)
+		if name == "" || names[name] {
+			return C.CString("Mihomo group names must be nonempty and unique")
+		}
+		names[name] = true
+		switch kind {
+		case "select", "url-test", "fallback", "load-balance":
+		default:
+			return C.CString("unsupported Mihomo group type: " + kind + "; relay was removed upstream; use dialer-proxy")
+		}
+	}
+	return nil
+}
+
 //export mihomo_start
 func mihomo_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	mihomoMu.Lock()
