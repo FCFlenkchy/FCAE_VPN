@@ -21,7 +21,10 @@ settings:
       - $(SRCROOT)/../src_cpp/imgui/backends
       - $(SRCROOT)/../core/fcae-ffi/include
     LIBRARY_SEARCH_PATHS: $(SRCROOT)/../target/aarch64-apple-ios/release
-    OTHER_LDFLAGS: ['$(inherited)', '-lfcae_ffi', '-lc++', '-lresolv', '-lz', '-liconv', '-lsqlite3']
+    # Rust, Cronet, C++ and Objective-C need four exception personalities.
+    # Mach-O compact unwind can encode only three. Use DWARF unwind tables
+    # for both the app and extension; keep exception/panic handling enabled.
+    OTHER_LDFLAGS: ['$(inherited)', '-Wl,-no_compact_unwind', '-Wl,-keep_dwarf_unwind', '-lfcae_ffi', '-lc++', '-lresolv', '-lz', '-liconv', '-lsqlite3']
     MARKETING_VERSION: '1.0.0'
     CURRENT_PROJECT_VERSION: '1'
     FCAE_APP_GROUP: group.com.fc.fcaevpn
