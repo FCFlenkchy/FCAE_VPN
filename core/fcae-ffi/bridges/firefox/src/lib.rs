@@ -133,11 +133,7 @@ impl Backend for FirefoxBackend {
             "auto" => TransportPreference::Auto,
             "h1" => TransportPreference::H1,
             "h2" => TransportPreference::H2,
-            "h3" => {
-                return Err(CoreError::InvalidConfig(
-                    "Firefox HTTP/3 is not available in this build; select auto, h2 or h1".into(),
-                ))
-            }
+            "h3" => TransportPreference::H3,
             other => return Err(CoreError::InvalidConfig(format!("unsupported Firefox transport {other:?}"))),
         };
         let data_dir = PathBuf::from(config.data_dir.clone().unwrap_or_else(|| "fcae-data".into()));

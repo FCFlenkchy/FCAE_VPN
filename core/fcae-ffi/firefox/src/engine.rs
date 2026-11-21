@@ -39,6 +39,11 @@ impl FirefoxEngine {
         if config.account_id.as_deref().is_some_and(|id| id.is_empty()) {
             return Err(FirefoxError::InvalidConfig("Firefox account ID cannot be empty".into()));
         }
+        if config.transport == crate::types::TransportPreference::H3 && config.upstream_proxy.is_some() {
+            return Err(FirefoxError::InvalidConfig(
+                "Firefox HTTP/3 cannot bypass an upstream proxy; select auto, h2 or h1 for chained routes".into(),
+            ));
+        }
         log::info!("[firefox] loading account and Mozilla locations");
         let store = AccountStore::new(&config.data_dir)?;
         let account = store.resolve(config.account_id.as_deref())?;
@@ -182,6 +187,16 @@ impl FirefoxEngine {
         self.proxies.stop().await;
         self.upstream.close().await;
         self.carrier_up.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for FirefoxEngine {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        self.carrier_up.store(false, Ordering::Release);
+        if let Some(task) = self.renewal.get_mut().take() { task.abort(); }
+        // Listener and carrier guards also abort on drop, without owning us.
+        self.notify.notify_waiters();
     }
 }
 

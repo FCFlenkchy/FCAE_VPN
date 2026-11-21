@@ -23,6 +23,7 @@ pub(crate) fn provider(server: &str) -> Option<&'static str> {
 enum DohConnection {
     H1(tokio_boring::SslStream<BoxedTunnel>),
     H2(Arc<DohH2>),
+    H3(crate::h3::Session),
 }
 
 struct DohH2 {
@@ -79,9 +80,33 @@ impl DohPool {
 }
 
 async fn connect(upstream: &Upstream, server: &str, host: &str, force_h1: bool) -> Result<DohConnection> {
+    let preference = upstream.transport_preference();
+    if !force_h1 && matches!(preference, TransportPreference::Auto | TransportPreference::H3) {
+        let budget = if preference == TransportPreference::Auto { Duration::from_secs(3) } else { Duration::from_secs(20) };
+        let attempt = async {
+            let udp = upstream.open_udp(&authority(server, 443)).await?;
+            let peer = std::net::SocketAddr::new(server.parse::<IpAddr>()
+                .map_err(|_| FirefoxError::UnsupportedDestination(server.into()))?, 443);
+            crate::h3::Session::connect_tunnel(udp, peer, host, budget).await.map(DohConnection::H3)
+        };
+        match tokio::time::timeout(budget, attempt).await.unwrap_or_else(|_| Err(FirefoxError::Timeout(budget))) {
+            Ok(connection) => return Ok(connection),
+            Err(error) if preference == TransportPreference::Auto && crate::h3::fallback_allowed(&error) => {},
+            Err(error) => return Err(error),
+        }
+    }
+    connect_tcp(upstream, server, host, force_h1).await
+}
+
+async fn connect_tcp(upstream: &Upstream, server: &str, host: &str, force_h1: bool) -> Result<DohConnection> {
     let transport = if force_h1 { TransportPreference::H1 } else { upstream.transport_preference() };
     let tunnel = upstream.open_tcp(&authority(server, 443)).await?;
-    let tls = match crate::tls::connect_stream(tunnel, host, control_alpn(transport)).await {
+    let handshake = crate::tls::connect_stream(tunnel, host, control_alpn(transport));
+    let tls = if transport == TransportPreference::Auto {
+        tokio::time::timeout(Duration::from_secs(3), handshake).await
+            .unwrap_or_else(|_| Err(FirefoxError::Timeout(Duration::from_secs(3))))
+    } else { handshake.await };
+    let tls = match tls {
         Err(error @ FirefoxError::TlsCertificate { .. }) => return Err(error),
         Err(_) if transport == TransportPreference::Auto => {
             let tunnel = upstream.open_tcp(&authority(server, 443)).await?;
@@ -111,6 +136,7 @@ async fn connect(upstream: &Upstream, server: &str, host: &str, force_h1: bool) 
 
 async fn send(connection: &mut DohConnection, request: &ControlRequest) -> Result<(ControlResponse, bool)> {
     match connection {
+        DohConnection::H3(session) => session.exchange(request).await.map(|response| (response, true)),
         DohConnection::H1(stream) => exchange_h1(stream, request, true).await,
         DohConnection::H2(connection) => exchange_h2(connection.sender.clone(), request).await.map(|response| (response, true)),
     }
@@ -148,6 +174,20 @@ pub(crate) async fn exchange(upstream: &Upstream, server: &str, query: &[u8]) ->
         }
         return result.map(|(answer, _)| answer);
     }
+    if let Some(DohConnection::H3(shared)) = cached.as_ref() {
+        let shared = shared.clone();
+        drop(cached);
+        let mut result = perform(upstream, server, host, query, &request, DohConnection::H3(shared.clone()), reused).await;
+        let mut cached = slot.lock().await;
+        if matches!(cached.as_ref(), Some(DohConnection::H3(current)) if current.same(&shared)) {
+            match &mut result {
+                Ok((_, replacement)) => { *cached = replacement.take(); }
+                Err(error) if stale_connection_error(error) => { *cached = None; }
+                Err(_) => {},
+            }
+        }
+        return result.map(|(answer, _)| answer);
+    }
     // H1 must remain exclusively owned and is discarded if this future is cancelled.
     let connection = cached.take().expect("initialized DNS slot");
     let (answer, reusable) = perform(upstream, server, host, query, &request, connection, reused).await?;
@@ -155,19 +195,39 @@ pub(crate) async fn exchange(upstream: &Upstream, server: &str, query: &[u8]) ->
     Ok(answer)
 }
 
+async fn send_with_budget(connection: &mut DohConnection, request: &ControlRequest,
+    transport: TransportPreference) -> Result<(ControlResponse, bool)> {
+    let version = match connection { DohConnection::H3(_) => 3, DohConnection::H2(_) => 2, DohConnection::H1(_) => 1 };
+    if transport != TransportPreference::Auto || version == 1 { return send(connection, request).await; }
+    tokio::time::timeout(Duration::from_secs(3), send(connection, request)).await.unwrap_or_else(|_| {
+        Err(if version == 3 { FirefoxError::H3("DNS HTTP/3 request timed out".into()) }
+            else { FirefoxError::H2("DNS HTTP/2 request timed out".into()) })
+    })
+}
+
 async fn perform(upstream: &Upstream, server: &str, host: &str, query: &[u8], request: &ControlRequest,
     mut connection: DohConnection, reused: bool) -> Result<(Vec<u8>, Option<DohConnection>)> {
     let ordinary_query = replay_safe_query(query);
-    let mut result = send(&mut connection, request).await;
+    let mut result = send_with_budget(&mut connection, request, upstream.transport_preference()).await;
     if reused && ordinary_query && result.as_ref().err().is_some_and(stale_connection_error) {
         connection = connect(upstream, server, host, false).await?;
-        result = send(&mut connection, request).await;
+        result = send_with_budget(&mut connection, request, upstream.transport_preference()).await;
     }
     let (response, reusable) = match result {
+        Err(FirefoxError::H3(_)) if ordinary_query && upstream.transport_preference() == TransportPreference::Auto => {
+            connection = connect_tcp(upstream, server, host, false).await?;
+            match send_with_budget(&mut connection, request, upstream.transport_preference()).await {
+                Err(error) if crate::h3::fallback_allowed(&error) => {
+                    connection = connect_tcp(upstream, server, host, true).await?;
+                    send_with_budget(&mut connection, request, upstream.transport_preference()).await?
+                }
+                result => result?,
+            }
+        }
         Err(FirefoxError::H2(_)) if ordinary_query && upstream.transport_preference() == TransportPreference::Auto => {
             log::warn!("[firefox] (h2) DNS-over-HTTPS failed; trying (h1)");
             connection = connect(upstream, server, host, true).await?;
-            send(&mut connection, request).await?
+            send_with_budget(&mut connection, request, upstream.transport_preference()).await?
         }
         result => result?,
     };
@@ -180,7 +240,7 @@ fn replay_safe_query(query: &[u8]) -> bool {
 }
 
 fn stale_connection_error(error: &FirefoxError) -> bool {
-    matches!(error, FirefoxError::Network(_) | FirefoxError::H2(_))
+    matches!(error, FirefoxError::Network(_) | FirefoxError::H2(_) | FirefoxError::H3(_))
         || matches!(error, FirefoxError::Protocol(message) if message == "truncated HTTP/1.1 response head")
 }
 

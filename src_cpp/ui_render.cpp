@@ -2797,9 +2797,9 @@ static void firefox_location_combo() {
 }
 
 static uint64_t firefox_account_submit(const std::string& request) {
-    static const char* const transports[] = {"auto", "h2", "h1"};
+    static const char* const transports[] = {"auto", "h2", "h1", "h3"};
     const int selected = g_app.firefox_transport;
-    const char* transport = transports[(selected >= 0 && selected <= 2) ? selected : 0];
+    const char* transport = transports[(selected >= 0 && selected <= 3) ? selected : 0];
     const size_t end = request.rfind('}');
     if (end == std::string::npos) return 0;
     std::string with_transport = request;
@@ -3945,8 +3945,8 @@ static void render_firefox_settings() {
     listener_row("Firefox SOCKS5", &g_app.firefox_socks_enabled, &g_app.firefox_socks_port, 1, 65535);
     listener_row("Firefox HTTP", &g_app.firefox_http_enabled, &g_app.firefox_http_port, 1, 65535);
     UiText::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
-    static const char* const firefox_transports[] = {"Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"};
-    ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
+    static const char* const firefox_transports[] = {"Auto (H3 → H2 → H1)", "HTTP/2", "HTTP/1.1", "HTTP/3"};
+    ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 4);
     ImGui::EndChild();
     if (ImGui::Button("Close")) {
         if (!g_app.firefox_job && !s_firefox_unblock_required) {

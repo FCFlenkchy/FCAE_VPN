@@ -285,7 +285,7 @@ struct AppState {
     char firefox_account_id[33] = {};
     char firefox_location[128] = {};
     char firefox_server[256] = {};
-    int  firefox_transport = 0; // 0=auto, 1=h2, 2=h1
+    int  firefox_transport = 0; // 0=auto, 1=h2, 2=h1, 3=h3
     char firefox_email[256] = {};
     char firefox_password[1024] = {};
     char firefox_code[256] = {};
@@ -826,8 +826,8 @@ struct AppState {
         c.firefox.account_id = firefox_account_id[0] ? firefox_account_id : nullptr;
         c.firefox.location = firefox_location[0] ? firefox_location : nullptr;
         c.firefox.server = firefox_server[0] ? firefox_server : nullptr;
-        static const char* const kFirefoxTransports[] = {"auto", "h2", "h1"};
-        c.firefox.transport = kFirefoxTransports[(firefox_transport >= 0 && firefox_transport <= 2) ? firefox_transport : 0];
+        static const char* const kFirefoxTransports[] = {"auto", "h2", "h1", "h3"};
+        c.firefox.transport = kFirefoxTransports[(firefox_transport >= 0 && firefox_transport <= 3) ? firefox_transport : 0];
 
         return c;
     }

@@ -18,6 +18,7 @@ boring = "5.3"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 h2 = "0.4.15"
+quiche = { path = "../../aether/quiche/quiche", default-features = false, features = ["boringssl-boring-crate"] }
 hex = "0.4"
 hkdf = "0.12"
 hmac = "0.12"

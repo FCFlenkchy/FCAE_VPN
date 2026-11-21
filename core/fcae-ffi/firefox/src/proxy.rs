@@ -57,41 +57,35 @@ impl LocalProxies {
     }
 
     async fn spawn_accept(self: &Arc<Self>, listener: TcpListener, http: bool) {
-        let this = Arc::downgrade(self);
         let shutdown = self.shutdown.clone();
+        let stopped = self.stopped.clone();
         let upstream = self.upstream.clone();
         let task = tokio::spawn(async move {
+            // Reap completed clients even when no new connection arrives.
+            // Dropping this set also aborts clients on runtime teardown.
+            let mut clients = tokio::task::JoinSet::new();
             loop {
-                let accepted = tokio::select! {
-                    _ = shutdown.notified() => break,
-                    accepted = listener.accept() => accepted,
-                };
-                let Ok((stream, _)) = accepted else { break };
-                let upstream = upstream.clone();
-                let task = tokio::spawn(async move {
-                    if http {
-                        if let Err(error) = handle_http(stream, upstream).await {
-                            log::debug!("[firefox] HTTP proxy connection ended: {error}");
-                        }
-                    } else if let Err(error) = handle_socks(stream, upstream).await {
-                        log::debug!("[firefox] SOCKS connection ended: {error}");
+                let notified = shutdown.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if stopped.load(std::sync::atomic::Ordering::Acquire) { break; }
+                tokio::select! {
+                    _ = &mut notified => break,
+                    _ = clients.join_next(), if !clients.is_empty() => {},
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break };
+                        let upstream = upstream.clone();
+                        clients.spawn(async move {
+                            let result = if http { handle_http(stream, upstream).await }
+                                else { handle_socks(stream, upstream).await };
+                            if let Err(error) = result {
+                                log::debug!("[firefox] local proxy connection ended: {error}");
+                            }
+                        });
                     }
-                });
-                let Some(owner) = this.upgrade() else {
-                    task.abort();
-                    let _ = task.await;
-                    break;
-                };
-                let mut tasks = owner.tasks.lock().await;
-                if owner.stopped.load(std::sync::atomic::Ordering::Acquire) {
-                    drop(tasks);
-                    task.abort();
-                    let _ = task.await;
-                    break;
                 }
-                tasks.retain(|task| !task.is_finished());
-                tasks.push(task);
             }
+            clients.shutdown().await;
         });
         self.tasks.lock().await.push(task);
     }
@@ -102,9 +96,7 @@ impl LocalProxies {
         }
         self.shutdown.notify_waiters();
         let tasks = self.tasks.lock().await.drain(..).collect::<Vec<_>>();
-        for task in &tasks {
-            task.abort();
-        }
+        // Accept loops observe the latched stopped flag and join their clients.
         for task in tasks {
             let _ = task.await;
         }

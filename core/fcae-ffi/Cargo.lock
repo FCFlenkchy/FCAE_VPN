@@ -1835,6 +1835,7 @@ dependencies = [
  "log",
  "parking_lot",
  "pbkdf2",
+ "quiche",
  "rand 0.8.8",
  "serde",
  "serde_json",

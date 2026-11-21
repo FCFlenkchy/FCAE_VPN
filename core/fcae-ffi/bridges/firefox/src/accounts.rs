@@ -26,7 +26,7 @@ impl JobSnapshot {
     }
 }
 
-type Services = Arc<tokio::sync::Mutex<HashMap<String, Arc<OnceCell<Accounts>>>>>;
+type Services = Arc<tokio::sync::Mutex<HashMap<(String, String), Arc<OnceCell<Accounts>>>>>;
 
 /// How long the worker waits for another job before it retires.
 ///
@@ -435,7 +435,6 @@ async fn execute(services: &Services, raw: &str) -> Result<Value> {
     let raw_transport = optional(&request, "transport").unwrap_or_else(|| "auto".into());
     let transport = TransportPreference::parse(&raw_transport)
         .ok_or_else(|| FirefoxError::InvalidConfig("invalid Firefox transport".into()))?;
-    if transport == TransportPreference::H3 { return Err(FirefoxError::H3Unavailable); }
     let accounts = service(services, &data_dir, transport).await?;
     match operation.as_str() {
         "locations" => {
@@ -553,7 +552,7 @@ fn locations_json(mut countries: Vec<fcae_firefox::types::Country>) -> Value {
 async fn service(services: &Services, data_dir: &str, transport: TransportPreference) -> Result<Accounts> {
     let cell = {
         let mut services = services.lock().await;
-        services.entry(data_dir.to_string()).or_insert_with(|| Arc::new(OnceCell::new())).clone()
+        services.entry((data_dir.to_string(), transport.as_str().to_string())).or_insert_with(|| Arc::new(OnceCell::new())).clone()
     };
     let accounts = cell.get_or_try_init(|| async {
         let store = fcae_firefox::AccountStore::new(data_dir)?;
@@ -563,7 +562,6 @@ async fn service(services: &Services, data_dir: &str, transport: TransportPrefer
         let fxa = Fxa::new(control.clone()).with_challenges(challenges);
         Ok::<_, FirefoxError>(Accounts::new(store, control, fxa))
     }).await?;
-    accounts.set_transport(transport);
     Ok(accounts.clone())
 }
 

@@ -133,6 +133,7 @@ impl Cookie {
 #[derive(Clone)]
 pub struct ControlPlane {
     dialer: Dialer,
+    h3: Arc<crate::h3::Pool>,
     timeout: Duration,
     user_agent: String,
     cookies: Arc<Mutex<BTreeMap<String, Cookie>>>,
@@ -144,7 +145,7 @@ pub struct ControlPlane {
 impl ControlPlane {
     pub fn new(dialer: Dialer) -> Self {
         Self {
-            dialer, timeout: Duration::from_secs(20), user_agent: firefox_user_agent(),
+            dialer, h3: Arc::new(crate::h3::Pool::default()), timeout: Duration::from_secs(20), user_agent: firefox_user_agent(),
             cookies: Arc::new(Mutex::new(BTreeMap::new())), challenge_h2: None, relay_store: None,
             transport: Arc::new(RwLock::new(TransportPreference::Auto)),
         }
@@ -158,6 +159,7 @@ impl ControlPlane {
     pub fn fresh_jar(&self) -> Self {
         Self {
             dialer: self.dialer.clone(),
+            h3: self.h3.clone(),
             timeout: self.timeout,
             user_agent: self.user_agent.clone(),
             cookies: Arc::new(Mutex::new(BTreeMap::new())),
@@ -221,14 +223,12 @@ impl ControlPlane {
             None => None,
         }.ok_or_else(|| FirefoxError::InvalidConfig("Firefox relay is not configured".into()))?;
         let transport = *self.transport.read();
-        if transport == TransportPreference::H3 { return Err(FirefoxError::H3Unavailable); }
         tokio::time::timeout(self.timeout, self.exchange_relay(&request, &relay, transport))
             .await.map_err(|_| FirefoxError::Timeout(self.timeout))?
     }
 
     async fn send_inner(&self, request: ControlRequest) -> Result<ControlResponse> {
         let transport = *self.transport.read();
-        if transport == TransportPreference::H3 { return Err(FirefoxError::H3Unavailable); }
         let relay = match &self.relay_store {
             Some(store) if relay_target_allowed(&request) => store.relay_url()?,
             _ => None,
@@ -253,6 +253,8 @@ impl ControlPlane {
             } else {
                 self.exchange_challenge(request.clone(), pool, transport).await
             }
+        } else if let Some(response) = self.try_h3(&request, transport).await? {
+            Ok(response)
         } else {
             // Only the connection is timed here; no request bytes have been sent yet.
             match tokio::time::timeout(Duration::from_secs(4),
@@ -322,7 +324,9 @@ impl ControlPlane {
     async fn exchange_relay(&self, request: &ControlRequest, relay: &Url, transport: TransportPreference) -> Result<ControlResponse> {
         let forwarded = relay_request(request, relay)?;
         let response = async {
-            if forwarded.secure {
+            if let Some(response) = self.try_h3(&forwarded, transport).await? {
+                Ok(response)
+            } else if forwarded.secure {
                 let tls = connect_control(&self.dialer, &forwarded.host, forwarded.port, transport).await?;
                 let is_h2 = tls.ssl().selected_alpn_protocol() == Some(b"h2");
                 if transport == TransportPreference::H2 && !is_h2 {
@@ -418,7 +422,35 @@ impl ControlPlane {
         request
     }
 
+    /// None means Auto may try H2/H1. Never replay a possibly transmitted
+    /// account mutation just because an HTTP/3 stream subsequently failed.
+    async fn try_h3(&self, request: &ControlRequest, transport: TransportPreference) -> Result<Option<ControlResponse>> {
+        if !matches!(transport, TransportPreference::Auto | TransportPreference::H3) { return Ok(None); }
+        let auto = transport == TransportPreference::Auto;
+        if auto && !self.dialer.can_quic() { return Ok(None); }
+        if !request.secure {
+            return if auto { Ok(None) } else { Err(FirefoxError::InvalidConfig("HTTP/3 requires an HTTPS relay URL".into())) };
+        }
+        let session = match self.h3.get(&self.dialer, &request.host, request.port, self.timeout, auto).await {
+            Ok(session) => session,
+            Err(error) if auto && crate::h3::fallback_allowed(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let budget = if auto { (self.timeout / 3).min(Duration::from_secs(3)) } else { self.timeout };
+        match tokio::time::timeout(budget, session.exchange(request)).await
+            .unwrap_or_else(|_| Err(FirefoxError::Timeout(budget))) {
+            Ok(response) => {
+                self.store_cookies(&request.host, &response.headers);
+                Ok(Some(response))
+            }
+            Err(error) if auto && matches!(request.method, Method::GET | Method::HEAD)
+                && crate::h3::fallback_allowed(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn exchange(&self, request: ControlRequest, transport: TransportPreference) -> Result<ControlResponse> {
+        if let Some(response) = self.try_h3(&request, transport).await? { return Ok(response); }
         let tls = connect_control(&self.dialer, &request.host, request.port, transport).await?;
         let response = self.exchange_tls(tls, &request, transport, "direct").await?;
         self.store_cookies(&request.host, &response.headers);
@@ -461,6 +493,7 @@ impl ControlPlane {
         pool: &tokio::sync::Mutex<Option<ReusableH2>>,
         transport: TransportPreference,
     ) -> Result<ControlResponse> {
+        if let Some(response) = self.try_h3(&request, transport).await? { return Ok(response); }
         let mut session = pool.lock().await;
         if session.as_ref().is_some_and(|current| current.host != request.host || current.port != request.port) {
             *session = None;
@@ -717,12 +750,18 @@ pub(crate) fn control_alpn(transport: TransportPreference) -> &'static [u8] {
         TransportPreference::H1 => ALPN_H1,
         TransportPreference::H2 => ALPN_H2,
         TransportPreference::Auto => ALPN_H2_H1,
-        TransportPreference::H3 => ALPN_H2,
+        TransportPreference::H3 => b"\x02h3",
     }
 }
 
 async fn connect_control(dialer: &Dialer, host: &str, port: u16, transport: TransportPreference) -> Result<SslStream<TcpStream>> {
-    match crate::tls::connect(dialer, host, port, control_alpn(transport)).await {
+    if transport == TransportPreference::H3 { return Err(FirefoxError::InvalidConfig("HTTP/3 requires a QUIC connection".into())); }
+    let connect = crate::tls::connect(dialer, host, port, control_alpn(transport));
+    let result = if transport == TransportPreference::Auto {
+        tokio::time::timeout(Duration::from_secs(3), connect).await
+            .unwrap_or_else(|_| Err(FirefoxError::Timeout(Duration::from_secs(3))))
+    } else { connect.await };
+    match result {
         Err(FirefoxError::TlsCertificate { host, message }) => Err(FirefoxError::TlsCertificate { host, message }),
         Err(_) if transport == TransportPreference::Auto => crate::tls::connect(dialer, host, port, ALPN_H1).await,
         result => result,

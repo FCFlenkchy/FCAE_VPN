@@ -52,8 +52,8 @@ pub enum FirefoxError {
     },
     #[error("HTTP/2 session failed: {0}")]
     H2(String),
-    #[error("HTTP/3 is not supported by this build")]
-    H3Unavailable,
+    #[error("HTTP/3 session failed: {0}")]
+    H3(String),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("storage error: {0}")]
@@ -74,6 +74,7 @@ impl FirefoxError {
             | Self::Dns { .. }
             | Self::Tls { .. }
             | Self::H2(_)
+            | Self::H3(_)
             | Self::Network(_)
             | Self::Protocol(_) => true,
             _ => false,
@@ -111,7 +112,7 @@ impl FirefoxError {
             Self::TlsCertificate { .. } => "tls_certificate",
             Self::Http { .. } => "http",
             Self::H2(_) => "h2",
-            Self::H3Unavailable => "h3_unavailable",
+            Self::H3(_) => "h3",
             Self::Protocol(_) => "protocol",
             Self::Storage(_) => "storage",
             Self::Network(_) => "network",

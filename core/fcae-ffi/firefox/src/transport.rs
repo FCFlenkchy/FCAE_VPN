@@ -146,6 +146,7 @@ struct SessionInner {
 impl SessionInner {
     fn kill(&self) {
         self.alive.store(false, Ordering::Release);
+        if let Some(handle) = self.keepalive.lock().take() { handle.abort(); }
         if let Some(handle) = self.driver.lock().take() {
             handle.abort();
         }
@@ -199,12 +200,12 @@ impl H2Session {
             driver: SyncMutex::new(None),
             keepalive: SyncMutex::new(None),
         });
-        let driver_inner = inner.clone();
+        let driver_inner = Arc::downgrade(&inner);
         let driver = tokio::spawn(async move {
             if let Err(error) = connection.await {
                 log::debug!("[firefox] H2 connection ended: {error}");
             }
-            driver_inner.alive.store(false, Ordering::Release);
+            if let Some(inner) = driver_inner.upgrade() { inner.alive.store(false, Ordering::Release); }
         });
         *inner.driver.lock() = Some(driver.abort_handle());
 
@@ -236,8 +237,13 @@ impl H2Session {
                     }
                     pending = true;
                 }
+                // A pending PING must not become the session's last owner.
+                // Otherwise dropping an unused session waits for its heartbeat.
+                drop(inner);
                 let pong = std::future::poll_fn(|cx| ping_pong.poll_pong(cx));
-                match tokio::time::timeout(period, pong).await {
+                let result = tokio::time::timeout(period, pong).await;
+                let Some(inner) = weak.upgrade() else { break };
+                match result {
                     Ok(Ok(_)) => {
                         traffic.record_rtt(started.elapsed());
                         pending = false;
@@ -290,12 +296,7 @@ impl H2Session {
         h2_error(error)
     }
 
-    fn kill(&self) {
-        self.inner.alive.store(false, Ordering::Release);
-        if let Some(handle) = self.inner.driver.lock().take() {
-            handle.abort();
-        }
-    }
+    fn kill(&self) { self.inner.kill(); }
 
     fn update_token(&self, token: &str) {
         *self.inner.token.write() = Zeroizing::new(token.to_string());
@@ -572,7 +573,7 @@ impl UdpTunnel {
         }
     }
 
-    fn new_h1<S>(stream: S, traffic: Arc<Traffic>) -> Self
+    fn new_stream<S>(stream: S, traffic: Arc<Traffic>) -> Self
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -600,7 +601,7 @@ impl UdpTunnel {
                 };
                 writer_state.queued.fetch_sub(length, Ordering::AcqRel);
                 if let Err(error) = result {
-                    log::debug!("[firefox] UDP H1 writer ended: {error}");
+                    log::debug!("[firefox] UDP capsule writer ended: {error}");
                     break;
                 }
             }
@@ -618,7 +619,7 @@ impl UdpTunnel {
                     Ok(Some(packet)) => { let _ = incoming_tx.try_send(packet); }
                     Ok(None) => {}
                     Err(error) => {
-                        log::debug!("[firefox] UDP H1 reader ended: {error}");
+                        log::debug!("[firefox] UDP capsule reader ended: {error}");
                         break;
                     }
                 }
@@ -920,15 +921,15 @@ pub struct Upstream {
     stream_health: SyncMutex<StreamHealth>,
     tcp_session: Mutex<Option<H2Session>>,
     udp_session: Mutex<Option<H2Session>>,
+    h3_session: Mutex<Option<crate::h3::Session>>,
+    h3_retry_at: SyncMutex<[Option<Instant>; 2]>,
     pub(crate) doh_pool: crate::doh::DohPool,
     traffic: Arc<Traffic>,
 }
 
 impl Upstream {
     pub async fn new(candidate: Candidate, preference: TransportPreference, dialer: Dialer, tokens: TokenManager, timeout: Duration) -> Result<Self> {
-        if preference == TransportPreference::H3 {
-            return Err(FirefoxError::H3Unavailable);
-        }
+        if preference == TransportPreference::H3 { dialer.require_direct_quic()?; }
         let pass = tokens.fetch_pass().await?;
         Ok(Self {
             candidate: RwLock::new(candidate.clone()),
@@ -948,6 +949,8 @@ impl Upstream {
             stream_health: SyncMutex::new(StreamHealth::default()),
             tcp_session: Mutex::new(None),
             udp_session: Mutex::new(None),
+            h3_session: Mutex::new(None),
+            h3_retry_at: SyncMutex::new([None; 2]),
             doh_pool: crate::doh::DohPool::default(),
             traffic: Arc::new(Traffic::default()),
         })
@@ -1028,10 +1031,15 @@ impl Upstream {
     }
 
     async fn open_tcp_inner(&self, target: &str) -> Result<BoxedTunnel> {
+        if self.preference == TransportPreference::H3 {
+            return self.open_h3(target, false).await.map(|stream| Box::new(stream) as BoxedTunnel);
+        }
+        if let Some(stream) = self.try_auto_h3(target, false).await? { return Ok(Box::new(stream)); }
         if self.preference == TransportPreference::H1 {
             return self.open_h1_authorized(target).await.map(|stream| Box::new(stream) as BoxedTunnel);
         }
         let mut last_error = None;
+        let stream_budget = if self.preference == TransportPreference::Auto { (self.timeout / 3).min(Duration::from_secs(3)) } else { self.timeout };
         for attempt in 0..2 {
             // Token renewal failures are not transport negotiation failures.
             let token = self.current_token().await?;
@@ -1045,7 +1053,7 @@ impl Upstream {
                 }
             };
             let started = Instant::now();
-            match tokio::time::timeout(self.timeout, session.open_tcp(target)).await {
+            match tokio::time::timeout(stream_budget, session.open_tcp(target)).await {
                 Ok(Ok(stream)) => {
                     self.traffic.record_rtt(started.elapsed());
                     self.report_tunnel_protocol(true);
@@ -1058,7 +1066,11 @@ impl Upstream {
                     self.discard_tcp_session(&session).await;
                     last_error = Some(error);
                 }
+                Ok(Err(error)) if self.preference == TransportPreference::Auto && h1_fallback_allowed(&error) =>
+                    return self.fallback_h1(target, error).await,
                 Ok(Err(error)) => return Err(error),
+                Err(_) if self.preference == TransportPreference::Auto =>
+                    return self.fallback_h1(target, FirefoxError::Timeout(self.timeout)).await,
                 Err(_) => return Err(FirefoxError::Timeout(self.timeout)),
             }
         }
@@ -1068,6 +1080,62 @@ impl Upstream {
         } else {
             Err(error)
         }
+    }
+
+    async fn try_auto_h3(&self, target: &str, udp: bool) -> Result<Option<crate::h3::Tunnel>> {
+        if self.preference != TransportPreference::Auto || !self.dialer.can_quic() { return Ok(None); }
+        let index = usize::from(udp);
+        if self.h3_retry_at.lock()[index].is_some_and(|at| Instant::now() < at) { return Ok(None); }
+        let budget = (self.timeout / 3).min(Duration::from_secs(3));
+        let result = tokio::time::timeout(budget, self.open_h3(target, udp)).await
+            .unwrap_or_else(|_| Err(FirefoxError::Timeout(budget)));
+        match result {
+            Ok(stream) => {
+                self.h3_retry_at.lock()[index] = None;
+                // Retire the fallback's cached owner after a successful upgrade,
+                // without killing tunnels still using it. Their own owners keep
+                // its driver alive until those streams finish.
+                if udp { self.udp_session.lock().await.take(); }
+                else { self.tcp_session.lock().await.take(); }
+                Ok(Some(stream))
+            }
+            Err(error) if crate::h3::fallback_allowed(&error) => {
+                self.h3_retry_at.lock()[index] = Some(Instant::now() + Duration::from_secs(30));
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn open_h3(&self, target: &str, udp: bool) -> Result<crate::h3::Tunnel> {
+        for attempt in 0..2 {
+            let token = self.current_token().await?;
+            let session = {
+                let mut slot = self.h3_session.lock().await;
+                if !slot.as_ref().is_some_and(crate::h3::Session::alive) {
+                    *slot = None;
+                    let candidate = self.candidate();
+                    *slot = Some(tokio::time::timeout(self.timeout,
+                        crate::h3::Session::connect(&self.dialer, &candidate, self.timeout.min(Duration::from_secs(10))))
+                        .await.map_err(|_| FirefoxError::Timeout(self.timeout))??);
+                }
+                slot.as_ref().unwrap().clone()
+            };
+            let started = Instant::now();
+            let result = tokio::time::timeout(self.timeout, session.open(target, &token, udp))
+                .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
+            match result {
+                Ok(stream) => { self.traffic.record_rtt(started.elapsed()); return Ok(stream); }
+                Err(FirefoxError::PassRejected) if attempt == 0 => { self.renew(true).await?; }
+                Err(error) if attempt == 0 && !session.alive() => {
+                    let mut slot = self.h3_session.lock().await;
+                    if slot.as_ref().is_some_and(|current| current.same(&session)) { *slot = None; }
+                    log::debug!("[firefox] reconnecting closed H3 carrier: {error}");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(FirefoxError::PassRejected)
     }
 
     async fn discard_tcp_session(&self, failed: &H2Session) {
@@ -1093,8 +1161,9 @@ impl Upstream {
         }
         *slot = None;
         let candidate = self.candidate();
-        let result = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
-            .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
+        let budget = if self.preference == TransportPreference::Auto { (self.timeout / 3).min(Duration::from_secs(3)) } else { self.timeout };
+        let result = tokio::time::timeout(budget, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
+            .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(budget)));
         let session = result.map_err(|error| {
             log::warn!("[firefox] (h2) proxy connection failed reason={}", crate::control::direct_failure_detail(&error));
             error
@@ -1201,13 +1270,26 @@ impl Upstream {
     }
 
     async fn open_udp_inner(&self, target: &str) -> Result<UdpTunnel> {
+        if self.preference == TransportPreference::H3 {
+            let stream = self.open_h3(target, true).await?;
+            return Ok(UdpTunnel::new_stream(stream, self.traffic.clone()));
+        }
+        if let Some(stream) = self.try_auto_h3(target, true).await? {
+            return Ok(UdpTunnel::new_stream(stream, self.traffic.clone()));
+        }
         if self.preference == TransportPreference::H1 {
             return self.open_h1_udp_authorized(target).await;
         }
         let mut last_error = None;
+        let stream_budget = if self.preference == TransportPreference::Auto { (self.timeout / 3).min(Duration::from_secs(3)) } else { self.timeout };
         for attempt in 0..2 {
-            let session = self.get_udp_session().await?;
-            match tokio::time::timeout(self.timeout, session.open_udp(target, self.traffic.clone())).await {
+            let session = match self.get_udp_session().await {
+                Ok(session) => session,
+                Err(error) if self.preference == TransportPreference::Auto && h1_fallback_allowed(&error) =>
+                    return self.open_h1_udp_authorized(target).await,
+                Err(error) => return Err(error),
+            };
+            match tokio::time::timeout(stream_budget, session.open_udp(target, self.traffic.clone())).await {
                 Ok(Ok(tunnel)) => {
                     self.report_tunnel_protocol(true);
                     return Ok(tunnel);
@@ -1219,11 +1301,17 @@ impl Upstream {
                     self.discard_udp_session(&session).await;
                     last_error = Some(error);
                 }
+                Ok(Err(error)) if self.preference == TransportPreference::Auto && h1_fallback_allowed(&error) =>
+                    return self.open_h1_udp_authorized(target).await,
                 Ok(Err(error)) => return Err(error),
+                Err(_) if self.preference == TransportPreference::Auto => return self.open_h1_udp_authorized(target).await,
                 Err(_) => return Err(FirefoxError::Timeout(self.timeout)),
             }
         }
-        Err(last_error.unwrap_or_else(|| FirefoxError::H2("could not open UDP proxy stream".into())))
+        let error = last_error.unwrap_or_else(|| FirefoxError::H2("could not open UDP proxy stream".into()));
+        if self.preference == TransportPreference::Auto && h1_fallback_allowed(&error) {
+            self.open_h1_udp_authorized(target).await
+        } else { Err(error) }
     }
 
     async fn discard_udp_session(&self, failed: &H2Session) {
@@ -1247,7 +1335,7 @@ impl Upstream {
                     if !self.h1_udp_reported.swap(true, Ordering::Relaxed) {
                         log::info!("[firefox] (h1) UDP CONNECT-UDP upgrade established");
                     }
-                    return Ok(UdpTunnel::new_h1(stream, self.traffic.clone()));
+                    return Ok(UdpTunnel::new_stream(stream, self.traffic.clone()));
                 }
                 Err(error) => return Err(error),
             }
@@ -1272,8 +1360,9 @@ impl Upstream {
         }
         *slot = None;
         let candidate = self.candidate();
-        let result = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
-            .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
+        let budget = if self.preference == TransportPreference::Auto { (self.timeout / 3).min(Duration::from_secs(3)) } else { self.timeout };
+        let result = tokio::time::timeout(budget, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
+            .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(budget)));
         let session = result.map_err(|error| {
             log::warn!("[firefox] (h2) proxy connection failed reason={}", crate::control::direct_failure_detail(&error));
             error
@@ -1319,14 +1408,16 @@ impl Upstream {
             // A stream timeout or reset alone does not establish that its shared carrier failed.
             let live_h2 = matches!(error, FirefoxError::Timeout(_) | FirefoxError::H2(_) | FirefoxError::Network(_))
                 && self.tcp_session.lock().await.as_ref().is_some_and(H2Session::alive);
-            if !live_h2 { self.note_error(error).await; }
+            let live_h3 = matches!(error, FirefoxError::Timeout(_) | FirefoxError::H3(_))
+                && self.h3_session.lock().await.as_ref().is_some_and(crate::h3::Session::alive);
+            if !live_h2 && !live_h3 { self.note_error(error).await; }
         }
     }
 
     pub async fn note_error(&self, error: &FirefoxError) {
         let transient = match error {
             FirefoxError::Timeout(_) | FirefoxError::Dns { .. } | FirefoxError::Tls { .. }
-            | FirefoxError::H2(_) | FirefoxError::Network(_) => true,
+            | FirefoxError::H2(_) | FirefoxError::H3(_) | FirefoxError::Network(_) => true,
             FirefoxError::Http { status, .. } => *status == 408 || *status >= 500,
             _ => false,
         };
@@ -1345,6 +1436,7 @@ impl Upstream {
     }
 
     async fn rotate_proxy(&self) {
+        *self.h3_retry_at.lock() = [None; 2];
         self.stream_health.lock().clear_ambiguous();
         let candidates = self.candidates.read().clone();
         if candidates.len() < 2 {
@@ -1370,6 +1462,7 @@ impl Upstream {
         if let Some(session) = self.udp_session.lock().await.take() {
             session.kill();
         }
+        if let Some(session) = self.h3_session.lock().await.take() { session.close(); }
         log::warn!("[firefox] rotating Mozilla proxy after carrier failures: {}", replacement.address);
     }
 
@@ -1384,6 +1477,7 @@ impl Upstream {
         if let Some(session) = self.udp_session.lock().await.take() {
             session.kill();
         }
+        if let Some(session) = self.h3_session.lock().await.take() { session.close(); }
     }
 }
 
@@ -1396,6 +1490,7 @@ impl Drop for Upstream {
         if let Some(session) = self.udp_session.get_mut().take() {
             session.kill();
         }
+        if let Some(session) = self.h3_session.get_mut().take() { session.close(); }
     }
 }
 
@@ -1468,7 +1563,7 @@ fn log_proxy_failure(http: &str, protocol: &str, target: &str, host: &str, statu
     }
 }
 
-fn proxy_status_error(host: &str, status: u16, headers: &http::HeaderMap) -> FirefoxError {
+pub(crate) fn proxy_status_error(host: &str, status: u16, headers: &http::HeaderMap) -> FirefoxError {
     match status {
         401 | 407 => FirefoxError::PassRejected,
         403 => FirefoxError::NotEntitled,
@@ -1616,7 +1711,7 @@ fn append_quic_varint(output: &mut Vec<u8>, value: u64) {
     }
 }
 
-fn path_segment(input: &str) -> String {
+pub(crate) fn path_segment(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     for byte in input.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
@@ -1728,7 +1823,7 @@ mod traffic_tests {
         });
         let stream = h1_udp_upgrade(client, "proxy.example:443", "proxy.example", "[2001:db8::1]:53", "test-pass").await.unwrap();
         let traffic = Arc::new(Traffic::default());
-        let tunnel = UdpTunnel::new_h1(stream, traffic.clone());
+        let tunnel = UdpTunnel::new_stream(stream, traffic.clone());
         assert_eq!(tokio::time::timeout(Duration::from_secs(1), tunnel.recv()).await.unwrap().unwrap(), b"reply");
         tunnel.try_send(b"hello").unwrap();
         remote.await.unwrap();

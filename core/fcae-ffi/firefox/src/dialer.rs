@@ -186,7 +186,18 @@ impl Dialer {
         Ok(stream)
     }
 
-    async fn udp_address(&self, address: SocketAddr) -> Result<UdpSocket> {
+    pub(crate) fn can_quic(&self) -> bool { self.upstream.is_none() }
+
+    pub(crate) fn require_direct_quic(&self) -> Result<()> {
+        if self.upstream.is_some() {
+            return Err(FirefoxError::InvalidConfig(
+                "Firefox HTTP/3 cannot bypass an upstream proxy; select auto, h2 or h1 for chained routes".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn udp_address(&self, address: SocketAddr) -> Result<UdpSocket> {
         let socket = Socket::new(Domain::for_address(address), Type::DGRAM, Some(Protocol::UDP)).map_err(io)?;
         socket.set_nonblocking(true).map_err(io)?;
         self.protect(&socket)?;

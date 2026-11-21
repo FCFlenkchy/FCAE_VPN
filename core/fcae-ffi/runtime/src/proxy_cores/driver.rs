@@ -483,9 +483,12 @@ pub async fn halt(ffi: CoreFfi, handle: u64) {
 /// Stop every instance of one core: the net a session teardown leaves under the
 /// paths that could not stop what they started.
 pub async fn halt_all(ffi: CoreFfi, backend: FcaeBackend) {
-    let _ = tokio::task::spawn_blocking(move || unsafe { (ffi.stop_all)() }).await;
-    // Every instance of that core is closed above, so none of them is live.
-    retire_all(backend);
+    let _ = tokio::task::spawn_blocking(move || {
+        unsafe { (ffi.stop_all)() };
+        // Retirement belongs to the work, not the cancellable awaiter.
+        retire_all(backend);
+    })
+    .await;
 }
 
 /// Stop one instance from a caller that cannot await -- a `Drop`, which is where
@@ -1353,14 +1356,11 @@ impl BackendHandle for Running {
 
     async fn stop(&self, timeout: Duration) -> CoreResult<()> {
         self.rtt_stop.store(true, Ordering::Release);
-        self.halt().await;
-        let deadline = tokio::time::Instant::now() + timeout;
-        while self.alive() {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(CoreError::Timeout(timeout));
-            }
-            tokio::time::sleep(POLL).await;
-        }
+        // The deadline includes the blocking native stop, not just the poll
+        // after it. A timed-out await does not cancel that cleanup work.
+        tokio::time::timeout(timeout, self.halt())
+            .await
+            .map_err(|_| CoreError::Timeout(timeout))?;
         Ok(())
     }
 }
@@ -1369,9 +1369,21 @@ impl Running {
     /// Stop the core and record that this handle asked for it, so its [`Drop`]
     /// does not stop it twice.
     async fn halt(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
-        halt(self.ffi, self.handle).await;
-        retire_live(self.backend, self.handle);
+        if !self.stopping.swap(true, Ordering::SeqCst) {
+            let ffi = self.ffi;
+            let handle = self.handle;
+            let backend = self.backend;
+            let _ = tokio::task::spawn_blocking(move || {
+                unsafe { (ffi.stop)(handle) };
+                retire_live(backend, handle);
+            })
+            .await;
+        } else {
+            // Another stop owns the native work, including registry cleanup.
+            while self.alive() {
+                tokio::time::sleep(POLL).await;
+            }
+        }
     }
 }
 

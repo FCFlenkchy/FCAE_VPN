@@ -1,4 +1,4 @@
-use boring::ssl::{ConnectConfiguration, SslConnector, SslMethod, SslVerifyMode};
+use boring::ssl::{ConnectConfiguration, SslConnector, SslMethod, SslVerifyMode, SslContextBuilder, SslVersion};
 use boring::x509::{store::{X509Store, X509StoreBuilder}, X509VerifyError, X509VerifyResult, X509};
 #[cfg(target_os = "android")]
 use std::path::Path;
@@ -80,6 +80,21 @@ fn configuration(alpn: &[u8], host: &str) -> Result<ConnectConfiguration> {
     fingerprint
         .apply(&mut builder, alpn)
         .map_err(|error| FirefoxError::Protocol(format!("configuring Firefox TLS fingerprint: {error}")))?;
+    configure_trust(&mut builder, host)?;
+    let mut configuration = builder
+        .build()
+        .configure()
+        .map_err(|error| FirefoxError::Protocol(format!("creating TLS connection: {error}")))?;
+    configuration.set_verify_hostname(true);
+    configuration.set_use_server_name_indication(true);
+    fingerprint
+        .prepare(&mut configuration, alpn)
+        .map_err(|error| FirefoxError::Protocol(format!("preparing Firefox TLS handshake: {error}")))?;
+    Ok(configuration)
+}
+
+// Keep the same trust policy for TCP/TLS and QUIC. Never disable verification.
+fn configure_trust(builder: &mut SslContextBuilder, host: &str) -> Result<()> {
     if cfg!(any(target_os = "windows", target_os = "macos", target_os = "ios")) || is_fastly_proxy(host) || is_mozilla_service(host) {
         // BoringSSL default paths do not load native Windows or macOS stores.
         // Use Mozilla roots for its services and retain certificate and hostname checks.
@@ -95,16 +110,49 @@ fn configuration(alpn: &[u8], host: &str) -> Result<ConnectConfiguration> {
             .map_err(|error| FirefoxError::Protocol(format!("loading system trust roots: {error}")))?;
     }
     builder.set_verify(SslVerifyMode::PEER);
-    let mut configuration = builder
-        .build()
-        .configure()
-        .map_err(|error| FirefoxError::Protocol(format!("creating TLS connection: {error}")))?;
-    configuration.set_verify_hostname(true);
-    configuration.set_use_server_name_indication(true);
-    fingerprint
-        .prepare(&mut configuration, alpn)
-        .map_err(|error| FirefoxError::Protocol(format!("preparing Firefox TLS handshake: {error}")))?;
-    Ok(configuration)
+    Ok(())
+}
+
+pub(crate) fn quic_config(host: &str) -> Result<quiche::Config> {
+    let mut builder = SslContextBuilder::new(SslMethod::tls())
+        .map_err(|error| FirefoxError::Protocol(error.to_string()))?;
+    fingerprint().apply(&mut builder, b"\x02h3")
+        .map_err(|error| FirefoxError::Protocol(error.to_string()))?;
+    builder.set_min_proto_version(Some(SslVersion::TLS1_3))
+        .map_err(|error| FirefoxError::Protocol(error.to_string()))?;
+    builder.set_max_proto_version(Some(SslVersion::TLS1_3))
+        .map_err(|error| FirefoxError::Protocol(error.to_string()))?;
+    configure_trust(&mut builder, host)?;
+    let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, builder)
+        .map_err(|error| FirefoxError::H3(error.to_string()))?;
+    config.set_application_protos(&[b"h3"])
+        .map_err(|error| FirefoxError::H3(error.to_string()))?;
+    config.set_max_idle_timeout(120_000);
+    config.set_max_recv_udp_payload_size(1350);
+    config.set_max_send_udp_payload_size(1350);
+    config.set_initial_max_data(4 * 1024 * 1024);
+    config.set_initial_max_stream_data_bidi_local(256 * 1024);
+    config.set_initial_max_stream_data_bidi_remote(256 * 1024);
+    config.set_initial_max_stream_data_uni(64 * 1024);
+    config.set_initial_max_streams_bidi(256);
+    config.set_initial_max_streams_uni(16);
+    config.set_disable_active_migration(true);
+    // UDP uses reliable DATAGRAM capsules. Do not advertise QUIC datagrams
+    // until there is a negotiated, demultiplexed unreliable datagram path.
+    config.enable_dgram(false, 0, 0);
+    Ok(config)
+}
+
+pub(crate) fn quic_error(conn: &mut quiche::Connection, host: &str, error: quiche::Error) -> FirefoxError {
+    let ssl: &mut boring::ssl::SslRef = conn.as_mut();
+    if certificate_verification_failed(Some(ssl.verify_result())) {
+        FirefoxError::TlsCertificate { host: host.into(), message: error.to_string() }
+    } else { FirefoxError::H3(error.to_string()) }
+}
+
+pub(crate) fn prepare_quic(conn: &mut quiche::Connection) -> Result<()> {
+    fingerprint().prepare(conn.as_mut(), b"\x02h3")
+        .map_err(|e| FirefoxError::Protocol(e.to_string()))
 }
 
 pub async fn connect(dialer: &Dialer, host: &str, port: u16, alpn: &[u8]) -> Result<SslStream<TcpStream>> {
