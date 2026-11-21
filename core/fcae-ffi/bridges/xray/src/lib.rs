@@ -3,7 +3,7 @@
 //! Xray-core is compiled from source at build time into the app's single Go
 //! archive and started in this process. This crate is its bridge: the Xray
 //! dialect (config grammar) plus the C entry points of its shim, on top of the
-//! shared planning, supervision and teardown in [`fcae_runtime::sing_xray`].
+//! shared planning, supervision and teardown in [`fcae_runtime::proxy_cores`].
 
 pub mod config;
 
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fcae_abi::FcaeBackend;
 use fcae_runtime::backend::{Backend, BackendContext, BackendHandle, BackendId, Capabilities};
-use fcae_runtime::sing_xray::{CoreFfi, Dialect, Plan, halt_all, start};
+use fcae_runtime::proxy_cores::{CoreFfi, Dialect, Plan, halt_all, start};
 use fcae_runtime::Result;
 
 // Exported by `bridges/xray/go/bridge.go` through the shared archive. The
@@ -34,7 +34,7 @@ type LogSink = Option<unsafe extern "C" fn(c_int, *const c_char)>;
 
 /// Receives the core's log lines and hands them to the app console.
 unsafe extern "C" fn log_sink(level: c_int, message: *const c_char) {
-    fcae_runtime::sing_xray::forward_log("xray", level, message);
+    fcae_runtime::proxy_cores::forward_log("xray", level, message);
 }
 
 pub struct XrayDialect;
@@ -116,7 +116,7 @@ impl Backend for XrayBackend {
         unsafe { xray_stop_all() };
         // Closed, so none of them is live: a teardown that could not await the
         // drain must not leave the connection info listing cores that are gone.
-        fcae_runtime::sing_xray::retire_all(FcaeBackend::Xray);
+        fcae_runtime::proxy_cores::retire_all(FcaeBackend::Xray);
     }
 }
 
@@ -126,8 +126,8 @@ impl Backend for XrayBackend {
 /// The settings name one port for a session that may run several instances --
 /// a chained hop, or a native config with more than one inbound -- so the app
 /// asks the core what is actually listening instead of deciding for it.
-pub fn listeners() -> Vec<fcae_runtime::sing_xray::CoreListener> {
-    fcae_runtime::sing_xray::live_listeners(XrayDialect::FFI)
+pub fn listeners() -> Vec<fcae_runtime::proxy_cores::CoreListener> {
+    fcae_runtime::proxy_cores::live_listeners(XrayDialect::FFI)
 }
 
 pub fn register() {

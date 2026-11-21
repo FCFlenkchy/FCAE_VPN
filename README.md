@@ -95,6 +95,63 @@ Targets: `LINUX_X64`, `WIN_X64`, `MACOS_ARM64`, `MACOS_X64`, `ANDROID_ARM64`.
 
 Open `android/` in Android Studio and build. The Gradle config invokes CMake with `ANDROID_ARM64` automatically.
 
+### iOS
+
+Build on macOS with full Xcode (including the iPhoneOS SDK), Homebrew, and
+Rust installed. This produces an **unsigned arm64 iPhone/iPad app for iOS 16+**,
+not a simulator build. Run the following from the repository root; the iOS
+scripts build the Rust core themselves, so the generic engine/GUI commands
+above are not prerequisites.
+
+```bash
+# Select your full Xcode installation if it is not already active.
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -runFirstLaunch
+
+brew install cmake ninja nasm protobuf xcodegen llvm pkg-config go
+rustup target add aarch64-apple-ios
+rustup component add rust-src llvm-tools-preview
+git submodule update --init --recursive
+
+# Run the same iOS build steps as CI in an isolated shell.
+(
+  set -euo pipefail
+  export FCAE_MATRIX_NAME=ios-arm64
+  export IPHONEOS_DEPLOYMENT_TARGET=16.0
+  export CARGO_TARGET_DIR="$PWD/target"
+  export GO_BIN="$(command -v go)"
+  export GOTOOLCHAIN=auto
+
+  # Install the exact Zig version pinned by the repository.
+  export RUNNER_TOOL_CACHE="$HOME/Library/Caches/fcae-tools"
+  export RUNNER_TEMP="$(mktemp -d)"
+  trap 'rm -rf "$RUNNER_TEMP"' EXIT
+  export GITHUB_PATH="$RUNNER_TEMP/tool-paths"
+  bash -e scripts/ci/build_steps/setup-zig.sh
+  export PATH="$(cat "$GITHUB_PATH"):$PATH"
+
+  bash -e scripts/ci/build_steps/build-zeptun-engine-libzeptun.sh
+  bash -e scripts/ci/build_steps/build-hev-socks5-tunnel-engine-libhev-socks5-tunnel.sh
+  bash -e scripts/ci/build_steps/build-rust-engine-ffi-in-process.sh
+  bash -e scripts/ci/build_steps/build-frontend-ios.sh
+  bash -e scripts/ci/build_steps/package-ios.sh
+)
+```
+
+Outputs:
+- App: `build/ios/Build/Products/Release-iphoneos/FCAE.app`
+- IPA: `package/FCAE_VPN-ios-arm64.ipa`
+
+The app embeds its VPN extension and the in-process tun2socks, Zeptun, and HEV
+engines. Mihomo and PROXY-only mode are not included on iOS. DNS currently
+requires a numeric UDP resolver on port 53.
+
+The unsigned IPA is a build artifact, **not directly installable**. To run the
+VPN on a device, sign both the app and embedded extension with provisioning
+profiles that permit their NetworkExtension and matching App Group entitlements.
+The identifiers and entitlements are in `ios/project.yml`,
+`ios/App.entitlements`, and `ios/Tunnel.entitlements`.
+
 ## Credits
 
 - **Firefox IP Protection** — Implemented in Rust. See the [Firefox IP Protection source code](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/) (used [Arman VPN](https://github.com/armanlife/arman-vpn-client) and [FoxyVPN](https://github.com/Vauth/FoxyVPN) as references).
@@ -171,16 +228,3 @@ If this project helped you bypass censorship or just saved you some time, consid
 **Other languages:** [فارسی](READMEFA.md) | [中文](READMECH.md)
 
 </div>
-
-### iOS build
-
-CI builds an unsigned arm64 iPhone/iPad app and embedded PacketTunnel extension
-(iOS 16+). The shared ImGui UI selects tun2socks, Zeptun, or HEV; all three run
-in-process in the extension. NetworkExtension owns the virtual interface, routes,
-and DNS. Its public packetFlow API is adapted to an injected datagram descriptor
-with Darwin address-family framing; the selected engine processes those packets.
-Zeptun and HEV archives are built from the pinned submodules, not downloaded binaries.
-Mihomo and PROXY-only mode are not included in the iOS build. DNS currently requires
-a numeric UDP resolver on port 53. Installable VPN use requires signing both targets
-with matching NetworkExtension and App Group entitlements and provisioning profiles;
-the unsigned IPA is a build artifact, not a directly installable App Store package.

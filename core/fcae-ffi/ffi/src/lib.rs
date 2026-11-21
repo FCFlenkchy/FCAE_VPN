@@ -25,7 +25,7 @@ use fcae_runtime::config;
 use fcae_runtime::error::CoreError;
 use fcae_runtime::session::{Supervisor, SupervisorConfig, TunBridge};
 #[cfg(any(feature = "xray", feature = "singbox", feature = "mihomo"))]
-use fcae_runtime::sing_xray::CoreListener;
+use fcae_runtime::proxy_cores::CoreListener;
 use fcae_runtime::telemetry::{self, TelemetryCell};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
@@ -1381,7 +1381,7 @@ fn core_record(core: &str, position: u64, name: &str, listener: &CoreListener) -
 /// `#1, #2, #1`.
 #[cfg(any(feature = "xray", feature = "singbox", feature = "mihomo"))]
 fn listener_records() -> Vec<String> {
-    let live = fcae_runtime::sing_xray::live_instances();
+    let live = fcae_runtime::proxy_cores::live_instances();
     if live.is_empty() {
         return Vec::new();
     }

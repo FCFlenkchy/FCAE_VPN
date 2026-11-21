@@ -20,7 +20,7 @@
 //! Entries are referenced by position (`"#0"`) or by name, because that is
 //! what the UIs already have: a protocol-list position and a label.
 //!
-//! Parsing a profile and knowing which core reads it is [`crate::sing_xray`]'s
+//! Parsing a profile and knowing which core reads it is [`crate::proxy_cores`]'s
 //! job; this module owns the list around those profiles — the limits, the
 //! unique names, and the references that point into it.
 
@@ -28,7 +28,7 @@ use fcae_abi::FcaeBackend;
 use serde_json::Value;
 
 use crate::config::backend_label;
-use crate::sing_xray::{native_dialect_value, CoreProfile};
+use crate::proxy_cores::{native_dialect_value, CoreProfile};
 
 /// Upper bound on saved configs, and the only place a count is checked: the
 /// UIs neither show nor enforce it, because a library is the user's own list.
@@ -183,7 +183,7 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
             text.len()
         ));
     }
-    let profile = CoreProfile::parse(text)?;
+    let profile = CoreProfile::parse_for_backend(text, backend)?;
     if backend == FcaeBackend::Mihomo {
         crate::mihomo::validate(&profile)?;
     }
@@ -215,8 +215,8 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
 ///
 /// A share link is a single outbound and the bridge builds the session's
 /// listeners around it, so it serves both and pins neither. A native config
-/// brings its own inbounds and the bridge only rewrites the types it declares,
-/// so one that carries nothing but a SOCKS5 inbound cannot answer an HTTP proxy
+/// brings its own inbounds; the bridge rewrites managed listeners and supplies
+/// a SOCKS listener when missing. A lone SOCKS5 inbound cannot answer an HTTP proxy
 /// however the toggle is set — and where it names a port, that port is the
 /// config's own opinion, not the app default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -230,7 +230,7 @@ pub struct Listeners {
 }
 
 pub fn listeners(backend: FcaeBackend, text: &str) -> Listeners {
-    let config = match CoreProfile::parse(text.trim()) {
+    let config = match CoreProfile::parse_for_backend(text.trim(), backend) {
         Ok(CoreProfile::Link(_)) => {
             return Listeners {
                 kinds: fcae_abi::FCAE_CORE_LISTENER_SOCKS | fcae_abi::FCAE_CORE_LISTENER_HTTP,
@@ -292,6 +292,8 @@ pub fn listeners(backend: FcaeBackend, text: &str) -> Listeners {
             listeners.socks_port = listeners.socks_port.or(port);
         }
     }
+    // Native outbound-only and TUN-only profiles use a managed SOCKS listener.
+    if listeners.kinds == 0 { listeners.kinds = fcae_abi::FCAE_CORE_LISTENER_SOCKS; }
     listeners
 }
 
@@ -457,12 +459,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sing_box_only_link_is_refused_for_xray_and_accepted_for_sing_box() {
+    fn hysteria2_links_are_accepted_for_all_three_cores() {
         let link = "hysteria2://secret@example.com:443?sni=www.example.com#fast";
         assert!(check_config(FcaeBackend::SingBox, link).is_ok());
-        let error = check_config(FcaeBackend::Xray, link).expect_err("xray cannot carry it");
-        assert!(error.contains("hysteria2"), "{error}");
-        assert!(error.contains("sing-box"), "{error}");
+        assert!(check_config(FcaeBackend::Xray, link).is_ok());
+        assert!(check_config(FcaeBackend::Mihomo, link).is_ok());
     }
 
     #[test]

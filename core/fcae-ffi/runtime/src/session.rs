@@ -1694,7 +1694,7 @@ mod tests {
         let entry = |name: &str, backend: FcaeBackend| crate::saved_configs::SavedConfig {
             name: name.into(),
             backend,
-            profile: crate::sing_xray::CoreProfile::parse("socks5://127.0.0.1:1080").unwrap(),
+            profile: crate::proxy_cores::CoreProfile::parse("socks5://127.0.0.1:1080").unwrap(),
         };
         let mut cfg = SessionConfig {
             backend: FcaeBackend::Xray,
@@ -1760,7 +1760,7 @@ mod tests {
             // switched on is opened next to it instead of being dropped.
             assert!(cfg.internal_socks, "{backend:?}");
             assert!(cfg.internal_http, "{backend:?}");
-            let (socks, http) = crate::sing_xray::plan_listeners(&cfg).unwrap();
+            let (socks, http) = crate::proxy_cores::plan_listeners(&cfg).unwrap();
             assert!(socks.is_some(), "{backend:?}");
             assert_eq!(http.expect("http listener").ip(), std::net::Ipv4Addr::LOCALHOST, "{backend:?}");
 
@@ -1804,7 +1804,7 @@ mod tests {
         // makes it addressable instead of ephemeral.
         assert_eq!(cfg.socks_port, port);
         assert!(!cfg.internal_socks);
-        let (socks, _) = crate::sing_xray::plan_listeners(&cfg).unwrap();
+        let (socks, _) = crate::proxy_cores::plan_listeners(&cfg).unwrap();
         assert_eq!(socks.unwrap().port(), port);
 
         // The same port held by something else: the hop stays internal rather

@@ -1,8 +1,15 @@
 //! Mihomo profile validation and managed config generation.
-use crate::sing_xray::{
+use crate::proxy_cores::profile::share_links::{native, only, pairs};
+use crate::proxy_cores::profile::{
+    b64_decode, checked_host, parse_port, percent_decode, split_fragment, split_host_port,
+    split_list, split_query, trim_trailing_path, Query,
+};
+use crate::proxy_cores::{
     CoreProfile, Outbound, PacketEncoding, Plan, Protocol, Rules, Security, Transport,
 };
 use crate::upstream::ProxyKind;
+use base64::Engine as _;
+use fcae_abi::FcaeBackend;
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -161,8 +168,12 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
             hop_interval,
             pin,
         } => {
-            if pin.is_some() {
-                return Err(refuse("Hysteria2 public-key pin"));
+            if let Some(pin) = pin {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(pin)
+                    .map_err(|_| refuse("malformed certificate pin"))?;
+                result["fingerprint"] =
+                    json!(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
             result["type"] = json!("hysteria2");
             result["password"] = json!(password);
@@ -173,7 +184,11 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
                 result["down"] = json!(down);
             }
             if !ports.is_empty() {
-                result["ports"] = json!(ports.join(","));
+                result["ports"] = json!(ports
+                    .iter()
+                    .map(|p| p.replace(':', "-"))
+                    .collect::<Vec<_>>()
+                    .join(","));
             }
             if let Some(interval) = hop_interval {
                 result["hop-interval"] = json!(interval.to_string());
@@ -198,8 +213,10 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
             congestion_control,
             udp_relay_mode,
             zero_rtt,
+            disable_sni,
         } => {
             result["type"] = json!("tuic");
+            result["disable-sni"] = json!(disable_sni);
             result["uuid"] = json!(uuid);
             result["password"] = json!(password);
             result["reduce-rtt"] = json!(zero_rtt);
@@ -257,8 +274,12 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
             hop_interval,
             pin,
         } => {
-            if pin.is_some() {
-                return Err(refuse("Hysteria public-key pin (not a certificate digest)"));
+            if let Some(pin) = pin {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(pin)
+                    .map_err(|_| refuse("malformed certificate pin"))?;
+                result["fingerprint"] =
+                    json!(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
             result["type"] = json!("hysteria");
             result["up"] = json!(format!("{up_mbps} Mbps"));
@@ -270,7 +291,11 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
                 result["obfs"] = json!(obfs);
             }
             if !ports.is_empty() {
-                result["ports"] = json!(ports.join(","));
+                result["ports"] = json!(ports
+                    .iter()
+                    .map(|p| p.replace(':', "-"))
+                    .collect::<Vec<_>>()
+                    .join(","));
             }
             if let Some(interval) = hop_interval {
                 result["hop-interval"] = json!(interval);
@@ -690,10 +715,10 @@ pub fn generate(plan: &Plan<'_>) -> std::result::Result<Value, String> {
     value["allow-lan"] = json!(!bind.is_loopback());
     value["bind-address"] = json!(bind.to_string());
     value["log-level"] = json!(match plan.level {
-        crate::sing_xray::Level::Off => "silent",
-        crate::sing_xray::Level::Error => "error",
-        crate::sing_xray::Level::Warn => "warning",
-        crate::sing_xray::Level::Info => "info",
+        crate::proxy_cores::Level::Off => "silent",
+        crate::proxy_cores::Level::Error => "error",
+        crate::proxy_cores::Level::Warn => "warning",
+        crate::proxy_cores::Level::Info => "info",
         _ => "debug",
     });
     value["geo-auto-update"] = json!(false);
@@ -851,4 +876,204 @@ pub fn generate(plan: &Plan<'_>) -> std::result::Result<Value, String> {
         *existing = prepend;
     }
     Ok(value)
+}
+
+pub(crate) fn parse_link(scheme: &str, rest: &str) -> Result<Value, String> {
+    let mut proxy = serde_json::json!({"name":"FCAE-PROXY","type":scheme});
+    if scheme == "ssr" {
+        let decoded =
+            b64_decode(rest.trim_end_matches('/')).ok_or("SSR payload is not base64 UTF-8")?;
+        let (body, params) = decoded.split_once("/?").unwrap_or((&decoded, ""));
+        let fields: Vec<_> = body.rsplitn(6, ':').collect();
+        if fields.len() != 6 {
+            return Err("SSR needs server:port:protocol:cipher:obfs:password".into());
+        }
+        proxy["server"] = serde_json::json!(checked_host(
+            fields[5].trim_start_matches('[').trim_end_matches(']')
+        )?);
+        proxy["port"] = serde_json::json!(parse_port(fields[4])?);
+        proxy["protocol"] = serde_json::json!(fields[3]);
+        proxy["cipher"] = serde_json::json!(fields[2]);
+        proxy["obfs"] = serde_json::json!(fields[1]);
+        proxy["password"] = serde_json::json!(if fields[0].is_empty() {
+            String::new()
+        } else {
+            b64_decode(fields[0]).ok_or("invalid SSR password encoding")?
+        });
+        proxy["udp"] = serde_json::json!(true);
+        let query = Query::parse(params);
+        for (key, value) in &query.0 {
+            let target = match key.as_str() {
+                "protoparam" => "protocol-param",
+                "obfsparam" => "obfs-param",
+                "remarks" | "group" => continue,
+                _ => {
+                    return Err(format!(
+                        "unsupported SSR parameter {key:?}; use a native Mihomo config"
+                    ))
+                }
+            };
+            proxy[target] = serde_json::json!(if value.is_empty() {
+                String::new()
+            } else {
+                b64_decode(value).ok_or_else(|| format!("invalid SSR {key} encoding"))?
+            });
+        }
+    } else {
+        let (body, _) = split_fragment(rest);
+        let (authority, params) = split_query(body);
+        let (credentials, target) = authority
+            .rsplit_once('@')
+            .ok_or("SSH needs username@server")?;
+        let (user, password) = credentials
+            .split_once(':')
+            .map_or((credentials, None), |(u, p)| (u, Some(p)));
+        let user = percent_decode(user);
+        if user.is_empty() {
+            return Err("SSH username is empty".into());
+        }
+        let (server, port) = split_host_port(trim_trailing_path(target), Some(22))?;
+        proxy["server"] = serde_json::json!(server);
+        proxy["port"] = serde_json::json!(port);
+        proxy["username"] = serde_json::json!(user);
+        if let Some(password) = password {
+            proxy["password"] = serde_json::json!(percent_decode(password));
+        }
+        let query = Query::parse(params);
+        for (key, value) in &query.0 {
+            match key.as_str() {
+                "private-key" | "private-key-passphrase" => proxy[key] = serde_json::json!(value),
+                "host-key" | "host-key-algorithms" => {
+                    proxy[key] = serde_json::json!(split_list(Some(value)))
+                }
+                _ => {
+                    return Err(format!(
+                        "unsupported SSH parameter {key:?}; use a native Mihomo config"
+                    ))
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({"mode":"rule","proxies":[proxy],"rules":["MATCH,FCAE-PROXY"]}))
+}
+
+pub(crate) fn parse_mieru(rest: &str, backend: FcaeBackend) -> Result<Value, String> {
+    if backend != FcaeBackend::Mihomo {
+        return Err("mierus share links require Mihomo".into());
+    }
+    let (body, _) = split_fragment(rest);
+    let (authority, params) = split_query(body);
+    let params = pairs(params, &["port", "protocol"])?;
+    only(
+        &params,
+        &[
+            "port",
+            "protocol",
+            "profile",
+            "multiplexing",
+            "handshake-mode",
+            "traffic-pattern",
+        ],
+    )?;
+    let (credentials, target) = authority
+        .rsplit_once('@')
+        .ok_or("mierus needs username:password@server")?;
+    let (username, password) = credentials
+        .split_once(':')
+        .ok_or("mierus needs username:password")?;
+    // The URI's port/protocol pairs, not an authority port, select endpoints.
+    let server = target
+        .trim_end_matches('/')
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    checked_host(server)?;
+    let ports: Vec<_> = params
+        .iter()
+        .filter(|(k, _)| k == "port")
+        .map(|(_, v)| v)
+        .collect();
+    let protocols: Vec<_> = params
+        .iter()
+        .filter(|(k, _)| k == "protocol")
+        .map(|(_, v)| v)
+        .collect();
+    if ports.is_empty() || ports.len() != protocols.len() {
+        return Err("mierus needs matching port and protocol parameters".into());
+    }
+    let mut proxies = Vec::new();
+    for (index, (port, protocol)) in ports.iter().zip(protocols).enumerate() {
+        if !matches!(protocol.as_str(), "TCP" | "UDP") {
+            return Err("Mieru protocol must be TCP or UDP".into());
+        }
+        let mut proxy = json!({"name":format!("FCAE-MIERU-{index}"),"type":"mieru","server":server,"transport":protocol,"udp":true,"username":percent_decode(username),"password":percent_decode(password)});
+        if let Some((start, end)) = port.split_once('-') {
+            if parse_port(start)? > parse_port(end)? {
+                return Err("reversed Mieru port range".into());
+            }
+            proxy["port-range"] = json!(port);
+        } else {
+            proxy["port"] = json!(parse_port(port)?);
+        }
+        for (key, value) in &params {
+            if matches!(
+                key.as_str(),
+                "multiplexing" | "handshake-mode" | "traffic-pattern"
+            ) {
+                proxy[key] = json!(value);
+            }
+        }
+        proxies.push(proxy);
+    }
+    let names: Vec<_> = proxies.iter().map(|p| p["name"].clone()).collect();
+    Ok(
+        json!({"proxies":proxies,"proxy-groups":[{"name":"FCAE-PROXY","type":"select","proxies":names}],"rules":["MATCH,FCAE-PROXY"]}),
+    )
+}
+
+pub(crate) fn parse_tuic_v4(rest: &str, backend: FcaeBackend) -> Result<Value, String> {
+    if backend != FcaeBackend::Mihomo {
+        return Err(
+            "TUIC token/v4 links require Mihomo; sing-box supports UUID/password v5".into(),
+        );
+    }
+    let (body, _) = split_fragment(rest);
+    let (authority, params) = split_query(body);
+    let params = pairs(params, &[])?;
+    only(
+        &params,
+        &[
+            "congestion_control",
+            "alpn",
+            "sni",
+            "disable_sni",
+            "udp_relay_mode",
+        ],
+    )?;
+    let q = Query(params.iter().cloned().collect());
+    let (token, target) = authority
+        .rsplit_once('@')
+        .ok_or("TUIC v4 needs token@server:port")?;
+    let token = percent_decode(token);
+    if token.is_empty() {
+        return Err("TUIC v4 token is empty".into());
+    }
+    let (server, port) = split_host_port(trim_trailing_path(target), None)?;
+    let mut proxy = json!({"type":"tuic","name":"FCAE-PROXY","server":server,"port":port,"token":token,"udp":true});
+    for (source, target) in [
+        ("congestion_control", "congestion-controller"),
+        ("sni", "sni"),
+        ("udp_relay_mode", "udp-relay-mode"),
+    ] {
+        if let Some(value) = q.get(source) {
+            proxy[target] = json!(value);
+        }
+    }
+    if let Some(disable) = q.boolean("disable_sni")? {
+        proxy["disable-sni"] = json!(disable);
+    }
+    let alpn = q.list("alpn");
+    if !alpn.is_empty() {
+        proxy["alpn"] = json!(alpn);
+    }
+    Ok(native(proxy, backend))
 }

@@ -27,7 +27,7 @@ impl log::Log for FcaeLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         let max = MAX_LEVEL.load(Ordering::Relaxed);
         // Core shims already apply the separately selected route-core gate.
-        metadata.target() == fcae_runtime::sing_xray::CORE_LOG_TARGET
+        metadata.target() == fcae_runtime::proxy_cores::CORE_LOG_TARGET
             || level_to_u8(metadata.level()) <= max
     }
 

@@ -5,7 +5,7 @@
 //!
 //! * [`config`]  — typed [`SessionConfig`](config::SessionConfig) parsed once
 //!   from the ABI struct, with validation.
-//! * [`sing_xray`] — everything the Xray-core and sing-box backends share: the
+//! * [`proxy_cores`] — everything the Xray-core and sing-box backends share: the
 //!   outbound profile (share link or native config), listener planning,
 //!   split-routing rules, and driving the in-process core.
 //! * [`saved_configs`] — the list of Xray/sing-box configs the user saved,
@@ -29,10 +29,14 @@
 //! which keeps this one unit-testable as ordinary Rust.
 
 pub mod backend;
+pub mod native_chain;
 pub mod config;
 pub mod saved_configs;
 pub mod cronet;
-pub mod sing_xray;
+pub mod proxy_cores;
+pub mod xray;
+#[path = "sing-box.rs"]
+pub mod singbox;
 pub mod deps;
 pub mod error;
 pub mod exit_adapter;

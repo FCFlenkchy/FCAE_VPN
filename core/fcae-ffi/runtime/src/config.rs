@@ -20,7 +20,7 @@ use std::time::Duration;
 use fcae_abi::*;
 
 use crate::saved_configs::{SavedConfig, SavedConfigs};
-use crate::sing_xray::CoreProfile;
+use crate::proxy_cores::CoreProfile;
 use crate::error::{CoreError, Result};
 use crate::upstream::UpstreamProxy;
 
@@ -848,6 +848,7 @@ unsafe fn parse_saved_configs(raw: &FcaeCore) -> Result<(SavedConfigs, Option<Sa
 /// the bridge reports the offending field with the same `InvalidConfig` status.
 unsafe fn parse_core(
     raw: &FcaeCore,
+    backend: FcaeBackend,
     required: bool,
     saved: SavedConfigs,
     selection: Option<SavedConfig>,
@@ -861,7 +862,7 @@ unsafe fn parse_core(
     let mut profile = selection.as_ref().map(|entry| entry.profile.clone());
     if profile.is_none() {
         profile = match cstr_opt(raw.profile).as_deref() {
-            Some(text) => match CoreProfile::parse(text) {
+            Some(text) => match CoreProfile::parse_for_backend(text, backend) {
                 Ok(profile) => Some(profile),
                 // A stale profile must not block a session that never dials a
                 // core, but on a core route it is the difference between a
@@ -1266,7 +1267,11 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             .chain
             .iter()
             .any(|hop| is_core_backend(hop.backend) && hop.core.is_none());
-    cfg.core = parse_core(&raw.core, core_in_path, saved, main_core)?;
+    let profile_backend = if is_core_backend(cfg.backend) { cfg.backend } else {
+        cfg.chain.iter().find(|hop| is_core_backend(hop.backend) && hop.core.is_none())
+            .map(|hop| hop.backend).unwrap_or(cfg.backend)
+    };
+    cfg.core = parse_core(&raw.core, profile_backend, core_in_path, saved, main_core)?;
 
     // Tor
     let t = &raw.tor;
