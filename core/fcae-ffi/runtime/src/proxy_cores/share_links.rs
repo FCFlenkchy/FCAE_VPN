@@ -67,6 +67,7 @@ pub(crate) fn only(params: &[(String, String)], allowed: &[&str]) -> Result<(), 
 }
 
 const HY2: &[&str] = &[
+    "auth",
     "obfs",
     "obfs-password",
     "obfs_password",
@@ -169,6 +170,19 @@ pub(super) fn native_link(text: &str, backend: FcaeBackend) -> Option<Result<Val
     }
     let scheme = scheme.to_ascii_lowercase();
     let result = match scheme.as_str() {
+        "socks4" | "socks4a" => Some((|| {
+            if backend != FcaeBackend::SingBox { return Err("SOCKS4/4a share links require sing-box; Xray and Mihomo expose SOCKS5 only".into()); }
+            let (body, _) = split_fragment(rest);
+            let (address, query) = split_query(body);
+            only(&pairs(query, &[])?, &[])?;
+            let (auth, target) = address.rsplit_once('@').map_or((None, address), |(auth,target)| (Some(auth),target));
+            let (server, port) = split_host_port(trim_trailing_path(target), Some(1080))?;
+            if auth.is_some_and(|user| user.contains(':')) { return Err("SOCKS4/4a carries a user ID, not a password".into()); }
+            let user = auth.map(percent_decode);
+            let mut proxy = json!({"type":"socks","tag":"FCAE-PROXY","server":server,"server_port":port,"version":if scheme == "socks4a" {"4a"} else {"4"}});
+            if let Some(user) = user { proxy["username"] = json!(user); }
+            Ok(native(proxy, backend))
+        })()),
         "ssh" => Some((|| {
             let params = pairs(split_query(split_fragment(rest).0).1, &[])?;
             only(
@@ -539,7 +553,10 @@ pub(super) fn check_query(scheme: &str, rest: &str) -> Result<(), String> {
             allowed.extend(["encryption", "flow"]);
         }
         if scheme == "vmess" {
-            allowed.extend(["scy", "aid"]);
+            allowed.extend(["scy", "encryption", "aid"]);
+            if q.get("scy").zip(q.get("encryption")).is_some_and(|(a,b)| a != b) {
+                return Err("VMess scy and encryption specify different ciphers".into());
+            }
         }
     }
     let tls_contract = matches!(
@@ -596,6 +613,12 @@ pub(super) fn check_query(scheme: &str, rest: &str) -> Result<(), String> {
             if scheme != "tuic" {
                 allowed.push("peer");
             }
+        }
+    }
+    if scheme == "anytls" {
+        allowed.push("hpkp");
+        if q.get("hpkp").is_some() && q.get("pcs").is_some() {
+            return Err("use either AnyTLS hpkp or pcs, not both".into());
         }
     }
     match scheme {

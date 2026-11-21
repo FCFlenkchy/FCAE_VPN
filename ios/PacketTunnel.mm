@@ -105,7 +105,14 @@ static void core_log(FcaeLogLevel level,const char* message,void*) {
     dispatch_async(_queue, ^{
         if (self->_active) {completionHandler(FCAEError(@"VPN is already starting or running."));return;}
         self->_completion=[completionHandler copy];
-        self->_config=[[FCAEConfig alloc] initWithDictionary:[NSDictionary dictionaryWithContentsOfURL:FCAESessionURL()]];
+        NETunnelProviderProtocol* proto=(NETunnelProviderProtocol*)self.protocolConfiguration;
+        NSDictionary* payload=proto.providerConfiguration[@"session"];
+        if (!payload) payload=[NSDictionary dictionaryWithContentsOfURL:FCAESessionURL()];
+        NSError* stateError=nil;
+        if (![payload isKindOfClass:NSDictionary.class] || !FCAEImportState(payload[@"state"],&stateError)) {
+            [self reject:stateError ?: FCAEError(@"Missing VPN session; open FCAE and connect again.")];return;
+        }
+        self->_config=[[FCAEConfig alloc] initWithDictionary:payload];
         if (!FCAEContainer() || !self->_config || self->_config->value.mode!=FCAE_MODE_TUN ||
                 self->_config->value.tun_engine>FCAE_TUN_ENGINE_HEV) {
             [self reject:FCAEError(@"Missing/incompatible session; open FCAE and connect again.")];return;
@@ -227,8 +234,9 @@ static void core_log(FcaeLogLevel level,const char* message,void*) {
         std::vector<char> listeners(needed && needed<=65536?needed:1,0);
         if (needed<=listeners.size()) fcae_live_listeners(listeners.data(),(uint32_t)listeners.size());
         char regions[4096]{};fcae_psiphon_regions(regions,sizeof(regions));
-        NSDictionary* result=@{@"listeners":[NSString stringWithUTF8String:listeners.data()] ?: @"",
-            @"regions":[NSString stringWithUTF8String:regions] ?: @"", @"abi":@(FCAE_ABI_VERSION),@"telemetry":[NSData dataWithBytes:&telemetry length:sizeof(telemetry)],@"logs":entries};
+        NSMutableDictionary* result=[@{@"listeners":[NSString stringWithUTF8String:listeners.data()] ?: @"",
+            @"regions":[NSString stringWithUTF8String:regions] ?: @"", @"abi":@(FCAE_ABI_VERSION),@"telemetry":[NSData dataWithBytes:&telemetry length:sizeof(telemetry)],@"logs":entries} mutableCopy];
+        if (self->_config && [cursor hasSuffix:@":state"]) result[@"state"]=FCAEExportState(self->_config->value);
         completionHandler([NSPropertyListSerialization dataWithPropertyList:result format:NSPropertyListBinaryFormat_v1_0 options:0 error:nullptr]);
     });
 }

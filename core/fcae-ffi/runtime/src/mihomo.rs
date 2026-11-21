@@ -52,9 +52,13 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
     }
     let mut result = json!({"name":PROXY,"server":outbound.server,"port":outbound.port,"udp":true,"tfo":outbound.dial.tfo});
     if let Some(encoding) = &outbound.dial.packet_encoding {
+        if *encoding == PacketEncoding::Disabled && matches!(outbound.protocol, Protocol::Vless { .. }) {
+            return Err(refuse("packetEncoding=none for VLESS (the pinned core enables XUDP by default)"));
+        }
         result["packet-encoding"] = json!(match encoding {
             PacketEncoding::PacketAddr => "packetaddr",
             PacketEncoding::Xudp => "xudp",
+            PacketEncoding::Disabled => "none",
         });
     }
     if let Some(uot) = &outbound.dial.uot {

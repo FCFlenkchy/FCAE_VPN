@@ -3,6 +3,9 @@
 #include "fcae.h"
 #include <vector>
 NSURL* FCAEContainer();
+NSString* FCAETunnelIdentifier();
+NSDictionary* FCAEExportState(const FcaeConfig& config);
+BOOL FCAEImportState(NSDictionary* state, NSError** error);
 NSURL* FCAESessionURL();
 NSURL* FCAEErrorURL();
 NSError* FCAEError(NSString* message);

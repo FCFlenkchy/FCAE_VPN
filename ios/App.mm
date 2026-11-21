@@ -174,14 +174,8 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint
 @end
 @implementation FCAEApp
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)options {
-    // App Group access is intentionally mandatory: app and VPN must share credentials/configs.
-    if (ios_data_dir().empty()) {
-        self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-        UIViewController* controller=[UIViewController new];self.window.rootViewController=controller;[self.window makeKeyAndVisible];
-        UIAlertController* error=[UIAlertController alertControllerWithTitle:@"Signing required" message:@"Sign the app and PacketTunnel extension with Network Extension and the configured App Group entitlements." preferredStyle:UIAlertControllerStyleAlert];
-        [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [controller presentViewController:error animated:YES completion:nil];return YES;
-    }
+    // App Group access is optional after re-signing. The regular sandbox
+    // stores UI settings; the VPN profile transfers a bounded session snapshot.
     self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController=[FCAEController new];[self.window makeKeyAndVisible];
     [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer*){ios_vpn_poll();}];

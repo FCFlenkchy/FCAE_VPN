@@ -22,8 +22,6 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>FCAEAppGroup</key>
 	<string>$(FCAE_APP_GROUP)</string>
-	<key>FCAETunnelIdentifier</key>
-	<string>$(FCAE_BUNDLE_ID).PacketTunnel</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>

@@ -11,11 +11,16 @@ static std::string live_listeners, regions;
 static NETunnelProviderManager* manager;
 static NSUInteger generation;
 static uint64_t last_log;
+static CFAbsoluteTime last_state_sync;
 static bool requesting;
 static NSUInteger poll_sequence;
 static void report(NSError* error) {
     if (!error) return;
-    const char* message=error.localizedDescription.UTF8String;
+    NSString* detail=error.localizedDescription;
+    if ([error.domain hasPrefix:@"NEVPN"] || [error.domain hasPrefix:@"NEConfiguration"]) {
+        detail=[detail stringByAppendingString:@" Verify that both the app and its tunnel extension were signed with profiles granting packet-tunnel-provider. Free Apple ID/SideStore signing cannot grant the VPN entitlement."];
+    }
+    const char* message=detail.UTF8String;
     g_app.add_log(FCAE_LOG_ERROR,message);
     { std::lock_guard<std::mutex> lock(telemetry_mutex);
       telemetry.state=FCAE_STATE_ERROR;
@@ -46,7 +51,8 @@ bool ios_open_url(const char* url) {
     [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager*>* managers,NSError* error){
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) { report(error); return; }
-            NSString* identifier=NSBundle.mainBundle.infoDictionary[@"FCAETunnelIdentifier"];
+            NSString* identifier=FCAETunnelIdentifier();
+            if (!identifier) {report(FCAEError(@"The signed app has no unambiguous embedded Packet Tunnel extension."));return;}
             for (NETunnelProviderManager* candidate in managers) {
                 NETunnelProviderProtocol* proto=(NETunnelProviderProtocol*)candidate.protocolConfiguration;
                 if ([proto isKindOfClass:NETunnelProviderProtocol.class] && [proto.providerBundleIdentifier isEqualToString:identifier]) {manager=candidate;break;}
@@ -82,7 +88,8 @@ bool ios_open_url(const char* url) {
     });
     NETunnelProviderSession* session=(NETunnelProviderSession*)manager.connection;
     NSError* error=nil;
-    NSString* cursor=[NSString stringWithFormat:@"%llu",(unsigned long long)last_log];
+    const bool sync_state=last_state_sync==0 || CFAbsoluteTimeGetCurrent()-last_state_sync>=30;
+    NSString* cursor=[NSString stringWithFormat:@"%llu%@",(unsigned long long)last_log,sync_state?@":state":@""];
     [session sendProviderMessage:[cursor dataUsingEncoding:NSUTF8StringEncoding] returnError:&error responseHandler:^(NSData* data){
         dispatch_async(dispatch_get_main_queue(), ^{
             if (token!=generation || sequence!=poll_sequence) return;
@@ -90,6 +97,9 @@ bool ios_open_url(const char* url) {
             if (!data) return;
             NSDictionary* snapshot=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:nullptr error:nullptr];
             if (![snapshot isKindOfClass:NSDictionary.class] || [snapshot[@"abi"] unsignedIntValue]!=FCAE_ABI_VERSION) return;
+            NSError* stateError=nil;
+            if (!FCAEImportState(snapshot[@"state"],&stateError)) {report(stateError);return;}
+            if (snapshot[@"state"]) last_state_sync=CFAbsoluteTimeGetCurrent();
             NSData* bytes=snapshot[@"telemetry"];
             if ([bytes isKindOfClass:NSData.class] && bytes.length==sizeof(FcaeTelemetry)) {
                 std::lock_guard<std::mutex> lock(telemetry_mutex);
@@ -119,7 +129,7 @@ FcaeStatus ios_start(const FcaeConfig* config) {
         report(FCAEError(@"iOS requires TUN mode with tun2socks, Zeptun or HEV; PROXY-only mode is not supported."));
         return FCAE_INVALID_CONFIG;
     }
-    if (!FCAEContainer()) {report(FCAEError(@"The signed app must have the configured App Group entitlement."));return FCAE_PERMISSION_DENIED;}
+    if (!FCAEContainer()) {report(FCAEError(@"Cannot open the app data directory."));return FCAE_PERMISSION_DENIED;}
     NSDictionary* payload=FCAEEncode(*config); // Deep copy before the UI worker's config expires.
     if (!payload) {report(FCAEError(@"Configuration text must be valid UTF-8."));return FCAE_INVALID_CONFIG;}
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -133,7 +143,9 @@ FcaeStatus ios_start(const FcaeConfig* config) {
             requesting=false;report(error ?: FCAEError(@"Cannot save VPN session."));return;
         }
         NETunnelProviderProtocol* proto=[NETunnelProviderProtocol new];
-        proto.providerBundleIdentifier=NSBundle.mainBundle.infoDictionary[@"FCAETunnelIdentifier"];
+        proto.providerBundleIdentifier=FCAETunnelIdentifier();
+        if (!proto.providerBundleIdentifier.length) {requesting=false;report(FCAEError(@"The embedded VPN extension is missing after re-signing."));return;}
+        proto.providerConfiguration=@{@"session":payload};
         proto.serverAddress=@"FCAE VPN";
         manager.protocolConfiguration=proto;
         manager.localizedDescription=@"FCAE VPN";
@@ -149,7 +161,7 @@ FcaeStatus ios_start(const FcaeConfig* config) {
                         requesting=false;
                         if (loadError) {report(loadError);return;}
                         NSError* startError=nil;
-                        last_log=0;
+                        last_log=0;last_state_sync=0;
                         [manager.connection startVPNTunnelAndReturnError:&startError];
                         report(startError);
                     });
