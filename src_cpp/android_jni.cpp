@@ -789,7 +789,13 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     FcaeConfig cfg;
     fcae_config_default(&cfg);
 
-    cfg.backend = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+    // Preserve every ABI backend, including Xray/sing-box/Mihomo. The runtime
+    // validates it before starting anything; never substitute Aether here.
+    if (backend < FCAE_BACKEND_AETHER || backend > FCAE_BACKEND_MIHOMO) {
+        LOGE("invalid session backend: %d", backend);
+        return JNI_FALSE;
+    }
+    cfg.backend = static_cast<FcaeBackend>(backend);
     const jsize chain_count = chainTransports ? env->GetArrayLength(chainTransports) : 0;
     std::vector<FcaeChainHop> chain_hops((size_t)chain_count);
     // A saved-config hop holds a pointer to its reference, so the references
@@ -802,6 +808,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
         for (jsize i = 0; i < chain_count; ++i) {
             const int transport = transports[i];
             FcaeChainHop& hop = chain_hops[(size_t)i];
+            if (transport < 0) {
+                env->ReleaseIntArrayElements(chainTransports, transports, JNI_ABORT);
+                LOGE("invalid chain transport: %d", transport);
+                return JNI_FALSE;
+            }
             if (transport >= FCAE_CORE_TRANSPORT_BASE) {
                 // A saved config: the engine resolves this position in
                 // coreConfigs and takes the hop's backend from the entry, so the

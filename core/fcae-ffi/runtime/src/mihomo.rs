@@ -362,6 +362,7 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
             short_id,
             spider_x,
             mldsa65_verify,
+            support_x25519mlkem768,
         } => {
             if !matches!(
                 outbound.protocol,
@@ -376,6 +377,9 @@ pub fn proxy(outbound: &Outbound) -> std::result::Result<Value, String> {
             result["servername"] = json!(sni);
             result["client-fingerprint"] = json!(fingerprint);
             result["reality-opts"] = json!({"public-key":public_key,"short-id":short_id});
+            if let Some(enabled) = support_x25519mlkem768 {
+                result["reality-opts"]["support-x25519mlkem768"] = json!(enabled);
+            }
         }
     }
     if !matches!(outbound.transport, Transport::Tcp) {

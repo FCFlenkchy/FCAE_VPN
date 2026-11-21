@@ -1348,6 +1348,12 @@ pub(crate) fn link_blocker(outbound: &Outbound) -> Option<String> {
     }
     match &outbound.security {
         Security::Reality {
+            support_x25519mlkem768: Some(_),
+            ..
+        } => {
+            return Some("the explicit REALITY support-x25519mlkem768 toggle has no mapping in the pinned sing-box core; use Xray for true or Mihomo for this option".into());
+        }
+        Security::Reality {
             mldsa65_verify: Some(_),
             ..
         } => return refuse("the REALITY ML-DSA-65 key is an Xray-core setting"),

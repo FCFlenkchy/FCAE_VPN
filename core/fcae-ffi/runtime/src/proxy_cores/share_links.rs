@@ -578,7 +578,9 @@ pub(super) fn check_query(scheme: &str, rest: &str) -> Result<(), String> {
     }
     if reads_security && (tls_contract || !security.eq_ignore_ascii_case("none")) {
         if security.eq_ignore_ascii_case("reality") {
-            allowed.extend(["sni", "peer", "fp", "pbk", "sid", "spx", "pqv"]);
+            allowed.extend([
+                "sni", "peer", "fp", "pbk", "sid", "spx", "pqv", "support-x25519mlkem768",
+            ]);
         } else {
             allowed.extend([
                 "security",
@@ -647,6 +649,7 @@ pub(super) fn check_query(scheme: &str, rest: &str) -> Result<(), String> {
                 | "zero-rtt-handshake"
                 | "reduce_rtt"
                 | "disable_sni"
+                | "support-x25519mlkem768"
         ) && !matches!(
             value.to_ascii_lowercase().as_str(),
             "0" | "1" | "true" | "false" | "yes" | "no" | "on" | "off"

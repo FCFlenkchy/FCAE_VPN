@@ -1675,33 +1675,10 @@ static bool load_config_from(const std::string& path) {
         if (repaired)
             g_app.add_log(4, "[ui] the saved Tor/Psiphon route was rewritten as a chain");
     }
-    // A saved config only counts when it has a name and a body: the per-field
-    // keys of a half-written file must not become anonymous protocol entries.
-    g_app.core_configs.erase(
-        std::remove_if(g_app.core_configs.begin(), g_app.core_configs.end(),
-                       [](const AppState::CoreConfigEntry& entry) {
-                           return entry.name.empty() || entry.text.empty();
-                       }),
-        g_app.core_configs.end());
-    // What each config can answer on, and the ports it pins, are cached for the
-    // listener switches; the library only settles here.
+    // Saved config references are persistent positions. Keep incomplete slots
+    // and dangling selections intact so a damaged file cannot shift a choice
+    // onto a different config or silently replace a route with Aether.
     g_app.refresh_core_listeners();
-    // Every reference to a saved config is a position, so a config that did not
-    // survive above takes its references with it.
-    if (g_app.core_selected < 0 || g_app.core_selected >= (int)g_app.core_configs.size()) {
-        g_app.core_selected = -1;
-        if (g_app.backend >= 3) {
-            g_app.backend = 0;
-            // Auto is the saved config's own transport talking; without one the
-            // file's protocol field would claim it still has a profile.
-            if (g_app.protocol == 3) g_app.protocol = 0;
-        }
-    }
-    const int positions = transport_count();
-    g_app.chain_transports.erase(
-        std::remove_if(g_app.chain_transports.begin(), g_app.chain_transports.end(),
-                       [positions](int transport) { return transport < 0 || transport >= positions; }),
-        g_app.chain_transports.end());
     g_app.add_log(4, ("[ui] config loaded (" + std::to_string(applied) + " keys): " + path).c_str());
     return true;
 }
@@ -3329,7 +3306,7 @@ static int current_transport() {
     if (g_app.backend >= 3) {
         if (g_app.core_selected >= 0 && g_app.core_selected < (int)g_app.core_configs.size())
             return kCoreTransportBase + g_app.core_selected;
-        return 0;
+        return kCoreTransportBase + (int)g_app.core_configs.size();
     }
     if (g_app.backend == 2) return 10;
     if (g_app.backend == 1) return 5;
@@ -3849,7 +3826,8 @@ static void render_protocol_editor() {
     transport_labels(labels);
     const char* const* names = labels.pointers.data();
     const int transport_choices = (int)labels.pointers.size();
-    if (s_protocol_draft < 0 || s_protocol_draft >= transport_choices) s_protocol_draft = 0;
+    // A dangling saved selection remains unresolved until the user chooses a
+    // replacement; opening this popup must not reset it to MASQUE.
     const int protocol_before = s_protocol_draft;
     for (int i = 0; i < transport_choices; ++i) {
         // The position is the row's identity here: two saved configs may well
@@ -3866,7 +3844,6 @@ static void render_protocol_editor() {
         ImGui::Text("Exit %d", (int)i + 1);
         const float remove_width = ImGui::CalcTextSize("Remove").x + 2.0f * ImGui::GetStyle().FramePadding.x;
         ImGui::SetNextItemWidth(std::max(1.0f, ImGui::GetContentRegionAvail().x - remove_width - ImGui::GetStyle().ItemSpacing.x));
-        if (s_chain_draft[i] < 0 || s_chain_draft[i] >= transport_choices) s_chain_draft[i] = 0;
         changed |= ImGui::Combo("##transport", &s_chain_draft[i], names, transport_choices);
         ImGui::SameLine();
         if (ImGui::Button("Remove")) remove_index = (int)i;
@@ -3878,7 +3855,7 @@ static void render_protocol_editor() {
     if (!compact_footer) ImGui::SameLine();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     if (changed) {
-        apply_transport(s_protocol_draft);
+        if (s_protocol_draft != protocol_before) apply_transport(s_protocol_draft);
         // A carrier of Tor or Psiphon has to carry something: picking one for an
         // otherwise empty route adds the WARP transport as its exit rather than
         // leaving a session that is only the hop. Any exit can be swapped or
@@ -4362,9 +4339,13 @@ void render_ui() {
                 // endpoint, and the exit has to answer on a listener the session
                 // actually opened. The runtime refuses the session for the same
                 // reasons -- this says which switch before anything is torn down.
-                const bool core_final = g_app.final_listener_is_core();
+                // If parsing failed, let runtime validation report the profile
+                // error instead of misdiagnosing it as a disabled listener.
+                const AppState::CoreConfigEntry* final_entry = g_app.final_core_config();
+                const bool core_final = g_app.final_listener_is_core() && final_entry && final_entry->kinds;
+                const int final_core = g_app.final_listener_core();
                 const std::string core_socks_name =
-                    std::string(g_app.final_listener_core() == 4 ? "sing-box" : "Xray") + " SOCKS5";
+                    std::string(final_core == 5 ? "Mihomo" : final_core == 4 ? "sing-box" : "Xray") + " SOCKS5";
                 const std::string core_listener_name = core_socks_name + " or HTTP";
                 const bool psi_carrier = !g_app.chain_transports.empty() &&
                     (g_app.backend == 1 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end() - 1, 5) != g_app.chain_transports.end() - 1);

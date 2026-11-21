@@ -300,8 +300,7 @@ void android_ui_save_session(bool connect) {
     json.value += '[';
     bool first_hop = true;
     for (int transport : g_app.chain_transports) {
-        const int doc = g_app.core_doc_index(transport);
-        if (transport >= kCoreTransportBase && doc < 0) continue;
+        const int doc = g_app.core_session_index(transport);
         if (!first_hop) json.value += ',';
         first_hop = false;
         json.value += std::to_string(transport >= kCoreTransportBase

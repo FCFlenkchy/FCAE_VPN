@@ -110,13 +110,12 @@ struct AppState {
     // and one reference per saved-config chain hop. FcaeConfig points into
     // these, so they have to outlive the call.
     std::string core_library_built;
+    std::string core_library_error;
     std::string core_ref_built;
     std::vector<std::string> chain_core_refs_built;
     // Position in core_library_built for each entry of core_configs, or -1 when
-    // the entry is not sent: the engine refuses the whole library over one bad
-    // entry, so a draft that does not validate is kept on disk and left out
-    // here. References are document positions, which is why this mapping
-    // exists at all.
+    // the entry is not used by this route. References are document positions,
+    // not positions in the full saved library.
     std::vector<int> core_config_doc_index;
     // 0 = Proxy, 1 = TUN. TUN is the product default on every desktop
     // platform (and Android): full-system tunneling out of the box. The
@@ -400,16 +399,6 @@ struct AppState {
 
     static int core_backend_id(int selection) { return selection == 2 ? FCAE_BACKEND_MIHOMO : selection == 1 ? FCAE_BACKEND_SINGBOX : FCAE_BACKEND_XRAY; }
     static const char* core_backend_name(int selection) { return selection == 2 ? "Mihomo" : selection == 1 ? "sing-box" : "Xray"; }
-    /// Whether the engine may be handed this entry. Its parser rejects the
-    /// whole library over one bad entry (that is what makes a config that
-    /// saves a config that starts), so the check here is the same one the
-    /// editor shows the user.
-    static bool core_config_usable(const CoreConfigEntry& entry) {
-        if (entry.name.empty() || entry.text.empty()) return false;
-        const int32_t target = core_backend_id(entry.backend);
-        return fcae_core_check_profile(entry.text.c_str(), target, nullptr, 0);
-    }
-
     /// Where the entry at `transport` ends up in the serialised library, or -1
     /// when nothing is sent for it. Valid only after `build_core_library()`.
     int core_doc_index(int transport) const {
@@ -418,35 +407,27 @@ struct AppState {
         return index < core_config_doc_index.size() ? core_config_doc_index[(size_t)index] : -1;
     }
 
-    /// Serialise `core_configs` into the document the engine parses. Every
-    /// reference in the config is a position in this array, so it is built
-    /// from the same vector the positions index.
+    /// Send only the configs the route uses. Never omit an invalid selected
+    /// profile: the runtime must report its validation error, not run another
+    /// transport. Unrelated drafts and large libraries cannot displace it.
     void build_core_library() {
         core_library_built.clear();
+        core_library_error.clear();
         core_config_doc_index.assign(core_configs.size(), -1);
-        if (core_configs.empty()) return;
+        std::vector<size_t> selected;
+        const auto include = [&](int transport) {
+            if (!core_config_at(transport)) return;
+            const size_t index = (size_t)(transport - kCoreTransportBase);
+            if (std::find(selected.begin(), selected.end(), index) == selected.end())
+                selected.push_back(index);
+        };
+        if (backend >= 3) include(kCoreTransportBase + core_selected);
+        for (int transport : chain_transports) include(transport);
+        if (selected.empty()) return;
         core_library_built += '[';
         int written = 0;
-        for (size_t i = 0; i < core_configs.size(); ++i) {
-            const CoreConfigEntry& entry = core_configs[i];
-            if (!core_config_usable(entry)) continue;
-            // Names are references in their own right, so the engine rejects a
-            // duplicate and would take the whole library with it. The first
-            // entry keeps the name; the editor already flags the rest.
-            bool duplicate = false;
-            for (size_t j = 0; j < i && !duplicate; ++j) {
-                const CoreConfigEntry& other = core_configs[j];
-                duplicate = core_config_usable(other) && other.name.size() == entry.name.size()
-                    && std::equal(other.name.begin(), other.name.end(), entry.name.begin(),
-                                  [](char a, char b) {
-                                      return std::tolower((unsigned char)a) == std::tolower((unsigned char)b);
-                                  });
-            }
-            if (duplicate) continue;
-            // The document as a whole is bounded, and the engine rejects an
-            // oversized one outright: leave out the entry that would cross the
-            // limit rather than fail the session over a config nobody runs.
-            const size_t mark = core_library_built.size();
+        for (size_t index : selected) {
+            const CoreConfigEntry& entry = core_configs[index];
             if (written) core_library_built += ',';
             core_library_built += "{\"name\":\"";
             core_json_escape_into(core_library_built, entry.name);
@@ -456,17 +437,27 @@ struct AppState {
             core_json_escape_into(core_library_built, entry.text);
             core_library_built += "\"}";
             if (core_library_built.size() + 1 > kMaxCoreDocument) {
-                core_library_built.resize(mark);
-                continue;
+                // Keep the Android parcel bounded, but make the runtime refuse
+                // the entire route rather than silently omit one of its hops.
+                core_library_error = "selected saved configs exceed the 512 KiB session document limit";
+                core_library_built.clear();
+                std::fill(core_config_doc_index.begin(), core_config_doc_index.end(), -1);
+                return;
             }
-            core_config_doc_index[i] = written++;
+            core_config_doc_index[index] = written++;
         }
-        if (written) core_library_built += ']';
-        else core_library_built.clear();
+        core_library_built += ']';
+    }
+
+    /// An absent config is a dangling reference, never a built-in transport.
+    /// Both desktop and Android hand it to the runtime for fail-closed validation.
+    int core_session_index(int transport) const {
+        const int doc = core_doc_index(transport);
+        return doc >= 0 ? doc : (int)core_configs.size();
     }
 
     /// The core the session's final listener belongs to: 3 = Xray, 4 =
-    /// sing-box, 0 for every other backend. A chain's last exit decides, and
+    /// sing-box, 5 = Mihomo, 0 for every other backend. A chain's last exit decides, and
     /// without a chain the main protocol does.
     int final_listener_core() const {
         int core = 0;
@@ -477,14 +468,13 @@ struct AppState {
             if (!entry) return 0;
             core = core_backend_id(entry->backend);
         } else if (backend >= 3) {
-            core = backend;
+            const CoreConfigEntry* entry = final_core_config();
+            core = entry ? core_backend_id(entry->backend) : backend;
         } else {
             return 0;
         }
-        // A config the engine cannot read is not run at all — to_config() starts
-        // the default transport instead — and the listener goes with it.
-        const CoreConfigEntry* entry = final_core_config();
-        return entry && entry->kinds ? core : 0;
+        // Listener availability does not change which core the user selected.
+        return core;
     }
 
     bool final_listener_is_core() const { return final_listener_core() >= 3; }
@@ -596,43 +586,30 @@ struct AppState {
         c.core.library    = core_library_built.empty() ? nullptr : core_library_built.c_str();
         c.core.log_level  = (core_log >= 0 && core_log <= 5) ? (FcaeEngineLog)core_log
                                                              : FCAE_ENGINE_LOG_OFF;
-        // A core backend with nothing to run is a start that fails, so a config
-        // the engine was not sent (a draft, or one that vanished) degrades to the
-        // default transport instead of refusing the session.
-        const int main_doc = core_doc_index(kCoreTransportBase + core_selected);
-        if (backend >= 3 && main_doc < 0) {
-            add_log(2, "[ui] the selected saved config is not usable; starting the default transport");
-        }
+        const int main_doc = backend >= 3
+            ? core_session_index(kCoreTransportBase + core_selected) : -1;
         core_ref_built.clear();
-        if (main_doc >= 0) {
-            core_ref_built = "#" + std::to_string(main_doc);
+        if (main_doc >= 0 || !core_library_error.empty()) {
+            core_ref_built = core_library_error.empty() ? "#" + std::to_string(main_doc) : core_library_error;
             c.core.config_ref = core_ref_built.c_str();
         }
+        const CoreConfigEntry* main_entry = backend >= 3
+            ? core_config_at(kCoreTransportBase + core_selected) : nullptr;
+        c.backend = main_entry ? (FcaeBackend)core_backend_id(main_entry->backend)
+                               : (FcaeBackend)backend;
 
-        // A saved config decides its own core, and its profile is the route.
-        if (main_doc >= 0 && backend == 3)      c.backend = FCAE_BACKEND_XRAY;
-        else if (main_doc >= 0 && backend == 4) c.backend = FCAE_BACKEND_SINGBOX;
-        else if (main_doc >= 0 && backend == 5) c.backend = FCAE_BACKEND_MIHOMO;
-        else if (backend >= 3)                  c.backend = FCAE_BACKEND_AETHER;
-        else c.backend = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
-
-        // A saved-config hop is referenced rather than encoded, so its
-        // references are built first and pointed at second: the hop list stays
-        // in carrier-to-exit order, in one pass. A position whose config is not
-        // in the document is dropped — the engine resolves every reference
-        // before it starts anything, so a dangling one refuses the whole
-        // session, and re-pointing the hop would route through a config the
-        // user did not pick.
+        // Preserve every hop, including missing references. Validation resolves
+        // the whole route before starting a carrier; shortening it is unsafe.
         chain_core_refs_built.clear();
         for (int transport : chain_transports) {
-            const int doc = core_doc_index(transport);
-            if (doc >= 0) chain_core_refs_built.push_back("#" + std::to_string(doc));
+            if (transport >= kCoreTransportBase)
+                chain_core_refs_built.push_back("#" + std::to_string(core_session_index(transport)));
         }
         size_t core_ref = 0;
         chain_hops_built.clear();
         chain_hops_built.reserve(chain_transports.size());
         for (int transport : chain_transports) {
-            if (core_doc_index(transport) >= 0) {
+            if (transport >= kCoreTransportBase) {
                 FcaeChainHop core_hop{};
                 // The referenced entry decides the backend and the profile, so
                 // the fallback here stays neutral instead of claiming a core.
@@ -642,7 +619,6 @@ struct AppState {
                 chain_hops_built.push_back(core_hop);
                 continue;
             }
-            if (transport >= kCoreTransportBase) continue;
             FcaeChainHop hop{};
             hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : FCAE_BACKEND_AETHER;
             hop.h2_enabled = transport == 1 || transport == 7 || transport == 9;

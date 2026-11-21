@@ -339,6 +339,10 @@ fn stream_settings(outbound: &Outbound, chained: bool) -> Result<Map<String, Val
             short_id,
             spider_x,
             mldsa65_verify,
+            // No Xray JSON toggle exists: REALITY already preserves the
+            // fingerprint's X25519MLKEM768 shares. link_blocker refuses an
+            // explicit request to strip them instead of silently ignoring it.
+            ..
         } => {
             stream.insert("security".into(), json!("reality"));
             let mut reality = Map::new();
@@ -1289,6 +1293,12 @@ pub(crate) fn link_blocker(outbound: &Outbound) -> Option<String> {
             "{what}; save it as a sing-box config, Xray cannot carry it"
         ))
     };
+    if matches!(
+        &outbound.security,
+        Security::Reality { support_x25519mlkem768: Some(false), .. }
+    ) {
+        return Some("REALITY support-x25519mlkem768=false cannot be applied by Xray: it preserves the fingerprint's key shares; use true, omit the flag, or select a Mihomo config to disable hybrid key shares".into());
+    }
     let name = outbound.protocol.name();
     if !carries_protocol(&outbound.protocol) {
         return match &outbound.protocol {

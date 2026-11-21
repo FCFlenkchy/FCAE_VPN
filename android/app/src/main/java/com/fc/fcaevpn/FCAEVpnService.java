@@ -1416,10 +1416,8 @@ public class FCAEVpnService extends VpnService {
         // protocol-list positions above point into, and the entry the main
         // protocol runs.
         final String coreConfigs = orEmpty(intent.getStringExtra("coreConfigs"));
-        // A config that was removed since this session was recorded must degrade
-        // to a built-in transport, not fail the whole start.
-        final String coreConfigId = NativeEngine.sanitizeCoreConfigRef(
-            coreConfigs, intent.getStringExtra("coreConfigId"));
+        // Preserve dangling references so native validation refuses the route.
+        final String coreConfigId = orEmpty(intent.getStringExtra("coreConfigId"));
         final String firefoxAccountId = orEmpty(intent.getStringExtra("firefoxAccountId"));
         final String firefoxLocation = orEmpty(intent.getStringExtra("firefoxLocation"));
         final String firefoxServer = orEmpty(intent.getStringExtra("firefoxServer"));
@@ -1437,12 +1435,7 @@ public class FCAEVpnService extends VpnService {
         final String torLinesV = (torLines == null) ? "" : torLines;
         final int engineLog    = intent.getIntExtra("engineLog", 3);
         final int coreLog      = intent.getIntExtra("coreLog", 0);
-        // Xray/sing-box without the saved config they run has no profile at all,
-        // so a session recorded against a config that no longer exists falls back
-        // to the default transport instead of failing to start.
-        final int backendRaw   = intent.getIntExtra("backend", 0);
-        final int backend      = (coreConfigId.isEmpty() && (backendRaw == 3 || backendRaw == 4 || backendRaw == 5))
-            ? 0 : backendRaw;
+        final int backend = intent.getIntExtra("backend", 0);
         // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
         // MainActivity sends 0 when the field still holds the default.
         final int torSocksPort = intent.getIntExtra("torSocksPort", 0);

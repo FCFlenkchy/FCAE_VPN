@@ -216,56 +216,20 @@ object NativeEngine {
      */
     const val MAX_CORE_DOCUMENT_BYTES = 512 * 1024
 
-    /** Valid chain-exit positions: the built-in transports, then saved configs. */
-    private val CHAIN_POSITIONS = 0 until CORE_TRANSPORT_BASE + MAX_CORE_CONFIGS
-
     @JvmStatic
     fun parseChainTransports(value: String?): IntArray = value.orEmpty()
         .split(',')
         .mapNotNull { it.trim().toIntOrNull() }
-        .filter { it in CHAIN_POSITIONS }
         .toIntArray()
 
     @JvmStatic
     fun encodeChainTransports(transports: IntArray): String = transports.joinToString(",")
 
-    /**
-     * Saved configs a session document carries. A chain position only means
-     * something while its config is in that document, so this is what bounds
-     * the positions below.
-     */
-    private fun coreConfigCount(document: String?): Int = try {
-        if (document.isNullOrBlank()) 0 else org.json.JSONArray(document).length()
-    } catch (_: org.json.JSONException) {
-        0
-    }
-
-    /**
-     * The saved-config reference a session may use: `"#<index>"` while that
-     * entry is in [document], otherwise `""` so the start falls back to a
-     * built-in transport instead of failing on a config that was removed since
-     * the session was recorded.
-     */
-    @JvmStatic
-    fun sanitizeCoreConfigRef(document: String?, reference: String?): String {
-        val count = coreConfigCount(document)
-        val index = reference.orEmpty().trim().removePrefix("#").toIntOrNull() ?: return ""
-        return if (index in 0 until count) "#$index" else ""
-    }
-
     @JvmStatic
     fun sessionChainTransports(session: Intent): IntArray {
-        val coreConfigs = session.getStringExtra("coreConfigs")
-        val coreCount = coreConfigCount(coreConfigs)
-        // A position names a saved config, so it is only valid while that config
-        // is still in the session's library: the engine refuses the whole
-        // session over a dangling reference.
-        fun valid(position: Int) =
-            position in CHAIN_POSITIONS &&
-                (position < CORE_TRANSPORT_BASE || position - CORE_TRANSPORT_BASE < coreCount)
-        session.getIntArrayExtra("chainTransports")?.let { chain ->
-            return chain.filter { valid(it) }.toIntArray()
-        }
+        // Do not filter missing saved-config hops: only the runtime can validate
+        // the complete route, and dropping a hop would change the user's exit.
+        session.getIntArrayExtra("chainTransports")?.let { return it }
         val count = session.getIntExtra("chainCount", 0).coerceIn(0, 3)
         return IntArray(count) { index ->
             when (session.getIntExtra("chainExit$index", 0)) {
@@ -286,11 +250,10 @@ object NativeEngine {
         if (!ensureLoaded()) return false
         val mode = if (session.getIntExtra("mode", 1) == 1) 1 else 0
         val socks = session.getIntExtra("socksPort", 1819)
-        // The library and the reference into it travel together: a saved config
-        // that was removed since the session was recorded must fall back to a
-        // built-in transport instead of failing the whole start.
+        // Preserve the choice verbatim. Missing/invalid references must fail
+        // validation, not select a different carrier on a headless restart.
         val coreConfigs = session.getStringExtra("coreConfigs").orEmpty()
-        val coreConfigId = sanitizeCoreConfigRef(coreConfigs, session.getStringExtra("coreConfigId"))
+        val coreConfigId = session.getStringExtra("coreConfigId").orEmpty()
         nativeInit()
         try {
             nativeSetNativeLibDir(context.applicationInfo.nativeLibraryDir)
@@ -327,11 +290,7 @@ object NativeEngine {
             torBridges = session.getIntExtra("torBridges", 0),
             torBridgeLines = session.getStringExtra("torBridgeLines").orEmpty(),
             engineLog = session.getIntExtra("engineLog", 3),
-            // Xray/sing-box without its saved config has no profile at all, so a
-            // session recorded against a removed config keeps its route and falls
-            // back to the default transport.
-            backend = session.getIntExtra("backend", 0)
-                .takeUnless { coreConfigId.isEmpty() && (it == 3 || it == 4 || it == 5) } ?: 0,
+            backend = session.getIntExtra("backend", 0),
             torSocksPort = session.getIntExtra("torSocksPort", 0),
             torHttpPort = session.getIntExtra("torHttpPort", 0),
             psiphonThroughTunnel = session.getBooleanExtra("psiphonThroughTunnel", false),

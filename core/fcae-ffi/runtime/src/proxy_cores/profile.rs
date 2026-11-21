@@ -129,6 +129,10 @@ pub enum Security {
         /// ML-DSA-65 verification key (`pqv`). Xray-core verifies the server's
         /// handshake with it; sing-box's REALITY has no such field.
         mldsa65_verify: Option<String>,
+        /// REALITY key-share compatibility flag. Xray preserves the chosen
+        /// fingerprint's hybrid key shares natively; Mihomo needs an opt-in.
+        /// Keep absence distinct from false so legacy links retain defaults.
+        support_x25519mlkem768: Option<bool>,
     },
 }
 
@@ -819,6 +823,7 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         "sid",
         "spx",
         "pqv",
+        "support-x25519mlkem768",
         "ech",
         "pcs",
         "vcn",
@@ -836,7 +841,10 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         ));
     }
     for (key, value) in object {
-        let flag = matches!(key.as_str(), "insecure" | "allowInsecure" | "tfo" | "uot");
+        let flag = matches!(
+            key.as_str(),
+            "insecure" | "allowInsecure" | "tfo" | "uot" | "support-x25519mlkem768"
+        );
         let structured = matches!(key.as_str(), "fm" | "extra") && value.is_object();
         let alpn = key == "alpn"
             && value
@@ -913,6 +921,7 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         "sid",
         "spx",
         "pqv",
+        "support-x25519mlkem768",
         "ech",
         "pcs",
         "vcn",
@@ -1918,6 +1927,9 @@ fn parse_security(
                 short_id: query.string("sid").unwrap_or_default(),
                 spider_x,
                 mldsa65_verify: query.string("pqv"),
+                support_x25519mlkem768: query
+                    .get("support-x25519mlkem768")
+                    .map(|_| query.flag("support-x25519mlkem768")),
             })
         }
         other => Err(format!(
