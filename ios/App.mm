@@ -128,7 +128,7 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint
     id<MTLRenderCommandEncoder> encoder=[command renderCommandEncoderWithDescriptor:pass];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),command,encoder);
     [encoder endEncoding];[command presentDrawable:drawable];[command commit];
-    const bool keepKeyboard = io.WantTextInput || UiText::wants_keyboard();
+    const bool keepKeyboard = io.WantTextInput || UiText::wants_keyboard() || _input.keep_keyboard_open();
     if (keepKeyboard && !self.isFirstResponder) [self becomeFirstResponder];
     if (!keepKeyboard && self.isFirstResponder) [self resignFirstResponder];
 }

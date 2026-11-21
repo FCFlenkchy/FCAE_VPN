@@ -166,6 +166,10 @@ pub(crate) fn native(proxy: Value, backend: FcaeBackend) -> Value {
 }
 
 pub(super) fn native_link(text: &str, backend: FcaeBackend) -> Option<Result<Value, String>> {
+    if text.get(..11).is_some_and(|s| s.eq_ignore_ascii_case("anyconnect:")) {
+        let rest = &text[11..];
+        return Some(anyconnect(rest.strip_prefix("//").unwrap_or(rest), backend));
+    }
     let (scheme, rest) = text.split_once("://")?;
     if !scheme
         .bytes()
@@ -175,6 +179,7 @@ pub(super) fn native_link(text: &str, backend: FcaeBackend) -> Option<Result<Val
     }
     let scheme = scheme.to_ascii_lowercase();
     let result = match scheme.as_str() {
+        "tt" => Some(trusttunnel(rest, backend)),
         "socks4" | "socks4a" => {
             Some((|| {
                 if backend != FcaeBackend::SingBox {
@@ -233,6 +238,195 @@ pub(super) fn native_link(text: &str, backend: FcaeBackend) -> Option<Result<Val
         _ => None,
     };
     result.map(|result| check_encoding(rest).and(result))
+}
+
+// Cisco AnyConnect Mobile URI handler (connect action only):
+// https://www.cisco.com/c/en/us/td/docs/security/vpn_client/anyconnect/anyconnect40/administration/guide/Cisco_AnyConnect_Mobile_Administrator_Guide_4-0.pdf
+fn anyconnect(rest: &str, backend: FcaeBackend) -> Result<Value, String> {
+    if backend != FcaeBackend::SingBox {
+        return Err("AnyConnect connection links require sing-box's OpenConnect endpoint".into());
+    }
+    check_encoding(rest)?;
+    let (body, _) = split_fragment(rest);
+    let (action, params) = split_query(body);
+    if action.trim_matches('/') != "connect" {
+        return Err("only AnyConnect connect links are supported; profile/certificate import and disconnect actions are not configs".into());
+    }
+    let params = pairs(params, &[])?;
+    only(
+        &params,
+        &["host", "name", "prefill_username", "prefill_password"],
+    )?;
+    let q = Query(params.into_iter().collect());
+    let host = q
+        .get("host")
+        .ok_or("AnyConnect link needs host; a saved Cisco connection name alone is not portable")?;
+    let server = if host.contains("://") {
+        host.to_owned()
+    } else {
+        format!("https://{host}")
+    };
+    let url = reqwest::Url::parse(&server).map_err(|_| "invalid AnyConnect HTTPS server URL")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("AnyConnect host must be an HTTPS host[:port][/group] without embedded credentials, query or fragment".into());
+    }
+    let mut endpoint =
+        json!({"type":"openconnect", "tag":"FCAE-PROXY", "flavor":"anyconnect", "server":server});
+    for (source, target) in [
+        ("prefill_username", "username"),
+        ("prefill_password", "password"),
+    ] {
+        if let Some(value) = q.0.get(source) {
+            endpoint[target] = json!(value);
+        }
+    }
+    let name = q.get("name").unwrap_or("FCAE-PROXY");
+    if name.chars().any(char::is_control) {
+        return Err("AnyConnect display name contains control characters".into());
+    }
+    endpoint["tag"] = json!(name);
+    Ok(json!({"endpoints":[endpoint], "route":{"final":name}}))
+}
+
+// Official TrustTunnel TLV deep links, not an invented trusttunnel:// grammar.
+// https://github.com/TrustTunnel/TrustTunnel/blob/master/DEEP_LINK.md
+// The pinned Mihomo adapter cannot express every official-client feature:
+// refuse those explicitly instead of silently weakening security or routing.
+fn trusttunnel(rest: &str, backend: FcaeBackend) -> Result<Value, String> {
+    if backend != FcaeBackend::Mihomo {
+        return Err("TrustTunnel links require Mihomo".into());
+    }
+    let payload = rest
+        .strip_prefix('?')
+        .ok_or("TrustTunnel link must use tt://?base64url")?;
+    if payload.len() > 128 * 1024 {
+        return Err("TrustTunnel link is too large".into());
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| "invalid TrustTunnel base64url payload")?;
+    fn varint(bytes: &[u8], offset: &mut usize) -> Result<u64, String> {
+        let first = *bytes.get(*offset).ok_or("truncated TrustTunnel varint")?;
+        let size = 1usize << (first >> 6);
+        let end = offset
+            .checked_add(size)
+            .ok_or("TrustTunnel length overflow")?;
+        let part = bytes
+            .get(*offset..end)
+            .ok_or("truncated TrustTunnel varint")?;
+        let mut value = (first & 63) as u64;
+        for byte in &part[1..] {
+            value = (value << 8) | u64::from(*byte);
+        }
+        *offset = end;
+        Ok(value)
+    }
+    let mut fields = HashMap::new();
+    let mut addresses = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let tag = varint(&bytes, &mut offset)?;
+        let length = usize::try_from(varint(&bytes, &mut offset)?)
+            .map_err(|_| "TrustTunnel length overflow")?;
+        let end = offset
+            .checked_add(length)
+            .ok_or("TrustTunnel length overflow")?;
+        let value = bytes
+            .get(offset..end)
+            .ok_or("truncated TrustTunnel field")?;
+        if tag == 2 {
+            addresses.push(value);
+        } else {
+            fields.insert(tag, value);
+        }
+        offset = end;
+    }
+    let string = |tag| -> Result<Option<&str>, String> {
+        fields
+            .get(&tag)
+            .map(|v| std::str::from_utf8(v).map_err(|_| "invalid TrustTunnel UTF-8".into()))
+            .transpose()
+    };
+    let boolean = |tag, default| -> Result<bool, String> {
+        match fields.get(&tag).copied() {
+            None => Ok(default),
+            Some([0]) => Ok(false),
+            Some([1]) => Ok(true),
+            _ => Err("invalid TrustTunnel boolean".into()),
+        }
+    };
+    if let Some(version) = fields.get(&0) {
+        let mut i = 0;
+        if varint(version, &mut i)? > 2 || i != version.len() {
+            return Err("unsupported TrustTunnel version".into());
+        }
+    }
+    if fields.contains_key(&14) {
+        return Err("TrustTunnel subscription links need a subscription importer; use a static native config".into());
+    }
+    for (tag, label) in [
+        (8, "custom CA"),
+        (11, "client_random_prefix"),
+        (13, "DNS upstreams"),
+        (15, "client_random_auth_key"),
+    ] {
+        if fields.get(&tag).is_some_and(|v| !v.is_empty()) {
+            return Err(format!("the pinned Mihomo TrustTunnel adapter has no verified {label} mapping; use a compatible client"));
+        }
+    }
+    if !boolean(4, true)? || boolean(10, false)? {
+        return Err("TrustTunnel IPv6-disable/anti-DPI settings cannot be preserved by the pinned Mihomo adapter".into());
+    }
+    if addresses.len() != 1 {
+        return Err("TrustTunnel import needs exactly one address; multi-address failover is not equivalent to one Mihomo proxy".into());
+    }
+    let address = std::str::from_utf8(addresses[0]).map_err(|_| "invalid TrustTunnel address")?;
+    let (server, port) = split_host_port(address, None)?;
+    let hostname = string(1)?
+        .filter(|s| !s.is_empty())
+        .ok_or("TrustTunnel hostname is required")?;
+    let username = string(5)?
+        .filter(|s| !s.is_empty())
+        .ok_or("TrustTunnel username is required")?;
+    let password = string(6)?
+        .filter(|s| !s.is_empty())
+        .ok_or("TrustTunnel password is required")?;
+    let quic = match fields.get(&9).copied() {
+        None | Some([1]) => false,
+        Some([2]) => true,
+        _ => return Err("invalid TrustTunnel upstream protocol".into()),
+    };
+    let fingerprint =
+        match fields.get(&16).copied() {
+            None | Some([0]) => "chrome",
+            Some([2]) => "safari",
+            Some([3]) => "firefox",
+            _ => return Err(
+                "unsupported TrustTunnel TLS profile; no verified equivalent in the pinned adapter"
+                    .into(),
+            ),
+        };
+    let mut config = native(
+        json!({"type":"trusttunnel", "name":"FCAE-PROXY", "server":server, "port":port,
+        "username":username, "password":password, "sni":string(3)?.filter(|s| !s.is_empty()).unwrap_or(hostname),
+        "name-cert-verify":hostname, "skip-cert-verify":boolean(7,false)?, "quic":quic, "udp":true, "client-fingerprint":fingerprint}),
+        backend,
+    );
+    if let Some(name) = string(12)?.filter(|s| !s.is_empty()) {
+        if name.contains(',') || name.chars().any(char::is_control) {
+            return Err("TrustTunnel name contains routing separators or control characters".into());
+        }
+        config["proxies"][0]["name"] = json!(name);
+        config["rules"] = json!([format!("MATCH,{name}")]);
+    }
+    config["mode"] = json!("rule");
+    Ok(config)
 }
 
 fn ssh(rest: &str) -> Result<Value, String> {

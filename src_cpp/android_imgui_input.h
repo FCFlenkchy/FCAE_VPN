@@ -87,6 +87,7 @@ public:
         window_id_ = tab_bar_ = touch_window_ = 0;
         velocity_ = 0.0f;
         suppress_tap_ = false;
+        keyboard_gesture_ = false;
         drag_items_.clear();
     }
 
@@ -119,6 +120,11 @@ public:
         }
     }
 
+    // Blurring InputText on physical Down must not resize the viewport before
+    // this adapter delivers its deferred press/release to the tapped button.
+    // Shared by Android and iOS; do not reopen an IME for ordinary touches.
+    bool keep_keyboard_open() const { return keyboard_gesture_ && (down_ || forwarding_ || !events_.empty()); }
+
     bool active() const {
         return down_ || !events_.empty() || std::abs(velocity_) > 1.0f;
     }
@@ -139,6 +145,7 @@ private:
     int press_frame_ = -1, capture_frame_ = -1;
     bool down_ = false, scrolling_ = false, forwarding_ = false;
     bool horizontal_owner_ = false, suppress_tap_ = false;
+    bool keyboard_gesture_ = false;
 
     static ImGuiWindow* hovered_window(const ImVec2& position) {
         ImGuiWindow* hovered = nullptr;
@@ -220,6 +227,7 @@ private:
             return;
         }
         if (event.action == Down) {
+            keyboard_gesture_ = io.WantTextInput || UiText::wants_keyboard();
             UiText::pointer_down(event.pos);
             held_ = 0.0f;
             text_selection_ = 0;

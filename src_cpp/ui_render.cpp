@@ -3655,7 +3655,7 @@ static void render_core_editor() {
     }
     ImGui::Spacing();
     UiText::TextColoredWrapped(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
-                              "Config (share link, JSON or Mihomo YAML)");
+                              "Config (share link or native config)");
     const float status_width = std::max(1.0f, ImGui::GetContentRegionAvail().x
         - ImGui::GetStyle().WindowPadding.x * 2.0f - ImGui::GetStyle().ScrollbarSize);
     const float status_height = std::clamp(ImGui::CalcTextSize(s_core_status, nullptr, false, status_width).y,
@@ -3837,7 +3837,7 @@ static void render_protocol_editor() {
         ImGui::PopID();
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-    ImGui::Text("Additional exits (optional)");
+    ImGui::Text("Additional exits");
     int remove_index = -1;
     for (size_t i = 0; i < s_chain_draft.size(); ++i) {
         ImGui::PushID((int)i);

@@ -507,7 +507,7 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     // A text-action popup temporarily owns ImGui focus, not the Android IME.
-    const bool keyboard = io.WantTextInput || UiText::wants_keyboard();
+    const bool keyboard = io.WantTextInput || UiText::wants_keyboard() || input->keep_keyboard_open();
     const unsigned delay = 0; // Java schedules the single 60 FPS cadence.
     return static_cast<jint>(delay) | (keyboard ? 0x10000 : 0)
         | (GImGui->OpenPopupStack.Size ? 0x20000 : 0);

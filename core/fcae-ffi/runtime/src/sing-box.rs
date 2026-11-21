@@ -673,6 +673,19 @@ fn native(config: &Value, plan: &Plan<'_>) -> Result<Value, String> {
         .as_object_mut()
         .ok_or("native config must be a JSON object")?;
 
+    // Reject the legacy TLS-mode OpenVPN cipher spelling during preflight,
+    // rather than starting the carrier and retrying an unstartable endpoint.
+    if let Some(endpoints) = object.get("endpoints").and_then(Value::as_array) {
+        for endpoint in endpoints {
+            if endpoint.get("type").and_then(Value::as_str) == Some("openvpn-client")
+                && endpoint.get("mode").and_then(Value::as_str) != Some("static_key")
+                && endpoint.get("cipher").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+            {
+                return Err("OpenVPN TLS mode does not accept cipher; remove it and use data_ciphers and, for legacy servers, data_ciphers_fallback".into());
+            }
+        }
+    }
+
     // The session owns the log block: verbosity comes from the app, not from
     // whatever the pasted config was copied with.
     let native_log = object.entry("log").or_insert_with(|| json!({}));
