@@ -422,17 +422,22 @@ public class FCAEVpnService extends VpnService {
             if (mode == 1 && pkgs != null && !pkgs.isEmpty()) {
                 // Whitelist: ONLY selected apps use the VPN.
                 // Do NOT call addDisallowedApplication() because VpnService allows either allowed OR disallowed, not both.
+                int allowed = 0;
                 for (String pkg : pkgs) {
                     if (pkg.equals(getPackageName())) continue;
                     try {
                         builder.addAllowedApplication(pkg);
+                        allowed++;
                     } catch (Exception e) {
                         Log.w(TAG, "Failed to allow app in split tunnel: " + pkg, e);
                     }
                 }
+                // An empty platform allowlist means capture everything, including
+                // this process. Never allow that to loop direct router sockets.
+                if (allowed == 0) throw new IllegalStateException("No installed apps in VPN include selection");
             } else if (mode == 2 && pkgs != null && !pkgs.isEmpty()) {
                 // Blacklist: All apps EXCEPT selected apps use the VPN.
-                try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
+                builder.addDisallowedApplication(getPackageName());
                 for (String pkg : pkgs) {
                     if (pkg.equals(getPackageName())) continue;
                     try {
@@ -443,11 +448,11 @@ public class FCAEVpnService extends VpnService {
                 }
             } else {
                 // Off / Default: All apps routed through VPN except the VPN app itself
-                try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
+                builder.addDisallowedApplication(getPackageName());
             }
         } catch (Exception e) {
             Log.w(TAG, "configureSplitTunnel error", e);
-            try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
+            throw new IllegalStateException("Cannot safely configure VPN app selection", e);
         }
     }
 

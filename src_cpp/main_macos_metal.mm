@@ -468,11 +468,13 @@ static void install_main_menu(void) {
     NSApp.mainMenu = bar;
 }
 
+extern "C" void fcae_macos_ne_host_initialize(void);
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
     @autoreleasepool {
+        fcae_macos_ne_host_initialize();
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         install_main_menu();

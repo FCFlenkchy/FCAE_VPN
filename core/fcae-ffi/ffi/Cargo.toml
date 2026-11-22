@@ -46,7 +46,9 @@ hev = ["dep:fcae-bridge-hev-socks5-tunnel"]
 # and Psiphon, which is why this also pulls the Go bridge in.
 xray = ["dep:fcae-bridge-xray", "fcae-go-bridge/xray"]
 # sing-box backend, in the same archive.
-singbox = ["dep:fcae-bridge-singbox", "fcae-go-bridge/singbox"]
+# Captured-flow app routing uses the desktop TUN supervisor even in builds
+# selecting singbox without the default feature set.
+singbox = ["dep:fcae-bridge-singbox", "fcae-go-bridge/singbox", "tun"]
 # Both extra cores.
 mihomo = ["dep:fcae-bridge-mihomo", "fcae-go-bridge/mihomo"]
 cores = ["xray", "singbox", "mihomo"]

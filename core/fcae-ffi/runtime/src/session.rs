@@ -331,7 +331,7 @@ impl Supervisor {
                     "iOS TUN mode requires a Network Extension packet-flow adapter".into(),
                 ));
             }
-            if !external_fd && !(self.cfg.is_privileged)() {
+            if !external_fd && !config.uses_macos_ne() && !(self.cfg.is_privileged)() {
                 return Err(CoreError::PermissionDenied(
                     "TUN mode requires administrator/root privileges. \
                      On Windows: run as Administrator. On Linux/macOS: use sudo."

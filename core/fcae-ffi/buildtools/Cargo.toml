@@ -15,6 +15,5 @@ description = "Shared build-script helpers: Go c-archive cross-compilation, wint
 name = "fcae_build"
 path = "src/lib.rs"
 
-# Intentionally dependency-free so it never slows down or breaks a build
-# script. Everything is done with std + the toolchains already required.
 [dependencies]
+sha2 = "0.10"

@@ -77,7 +77,7 @@ fn prefix(text: &str, family: u16) -> Result<(IpAddr, u8)> {
     }
 }
 
-fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
+fn adapter_with_preference(name: &str, prefer_shared_guid:bool) -> Result<(NET_LUID_LH, u32, GUID)> {
     if name.is_empty() || name.contains('\0') {
         return Err(CoreError::InvalidConfig("invalid TUN adapter name".into()));
     }
@@ -88,7 +88,7 @@ fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
     // GUID was not honoured at creation (best-effort by Wintun).
     let (luid, via_guid) = loop {
         let mut luid = NET_LUID_LH::default();
-        let code = unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) };
+        let code = if prefer_shared_guid {unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) }} else {ERROR_NOT_FOUND};
         if code == 0 {
             break (luid, true);
         }
@@ -284,6 +284,60 @@ fn needs_exclusion_route(network: IpAddr) -> bool {
     }
 }
 
+// Resolve the physical /0 independently of the /1 TUN capture routes. A
+// network change invalidates driver address binding before another policy is
+// acknowledged; existing flows are never silently migrated.
+#[cfg(target_pointer_width = "64")]
+fn split_physical_source(family:u16, tunnel:NET_LUID_LH)->Result<IpAddr> {
+    let mut table:*mut MIB_IPFORWARD_TABLE2=ptr::null_mut();
+    checked(unsafe {GetIpForwardTable2(family,&mut table)},"read split uplink defaults")?;
+    if table.is_null() {return Err(CoreError::Internal("missing route table".into()));}
+    let result=(|| {
+        let count=unsafe {(*table).NumEntries as usize};
+        if count>65536 {return Err(CoreError::Internal("route table exceeds safety limit".into()));}
+        let rows=unsafe {std::slice::from_raw_parts((*table).Table.as_ptr(),count)};
+        let mut best:Option<(u64,NET_LUID_LH)>=None;
+        let mut ambiguous=false;
+        for row in rows {
+            if row.DestinationPrefix.PrefixLength!=0 || unsafe {row.InterfaceLuid.Value==tunnel.Value} || !interface_up(row.InterfaceLuid)? {continue;}
+            let mut interface=MIB_IPINTERFACE_ROW {Family:family,InterfaceLuid:row.InterfaceLuid,..Default::default()};
+            checked(unsafe {GetIpInterfaceEntry(&mut interface)},"read split uplink metric")?;
+            let metric=row.Metric as u64+interface.Metric as u64;
+            match best {
+                None=>{best=Some((metric,row.InterfaceLuid));ambiguous=false;},
+                Some((old,_)) if metric<old=>{best=Some((metric,row.InterfaceLuid));ambiguous=false;},
+                Some((old,luid)) if metric==old && unsafe {luid.Value!=row.InterfaceLuid.Value}=>ambiguous=true,
+                _=>{},
+            }
+        }
+        let (_,luid)=best.ok_or_else(||CoreError::Internal("no physical default route for split routing".into()))?;
+        if ambiguous {return Err(CoreError::Internal("ambiguous physical default routes; split routing refused".into()));}
+        let mut interface=MIB_IF_ROW2 {InterfaceLuid:luid,..Default::default()};
+        checked(unsafe {GetIfEntry2(&mut interface)},"inspect split uplink")?;
+        if !matches!(interface.Type,IF_TYPE_ETHERNET_CSMACD|IF_TYPE_IEEE80211) {
+            return Err(CoreError::Internal("experimental split routing requires an Ethernet or Wi-Fi uplink; other VPN/virtual uplinks are not adopted".into()));
+        }
+        let destination=if family==AF_INET {"1.1.1.1".parse::<IpAddr>().unwrap()} else {"2606:4700:4700::1111".parse::<IpAddr>().unwrap()};
+        let mut row=MIB_IPFORWARD_ROW2::default();let mut source=SOCKADDR_INET::default();
+        checked(unsafe {GetBestRoute2(&luid,0,ptr::null(),&sockaddr(destination),0,&mut row,&mut source)},"read split uplink source")?;
+        if unsafe {row.InterfaceLuid.Value!=luid.Value} {return Err(CoreError::Internal("split source lookup escaped its uplink".into()));}
+        Ok(ip_of(&source))
+    })();
+    unsafe {FreeMibTable(table.cast());}
+    result
+}
+#[cfg(target_pointer_width = "64")]
+fn split_addresses(cfg:&SessionConfig,tunnel:NET_LUID_LH)->Result<crate::windows_app_routing_driver::Addresses> {
+    let mut addresses=crate::windows_app_routing_driver::Addresses::default();
+    if let IpAddr::V4(ip)=prefix(&cfg.tun.ipv4,AF_INET)?.0 {addresses.tunnel_v4=ip.octets();}
+    if let IpAddr::V4(ip)=split_physical_source(AF_INET,tunnel)? {addresses.physical_v4=ip.octets();}
+    if let Some(ipv6)=cfg.tun.ipv6.as_deref() {
+        if let IpAddr::V6(ip)=prefix(ipv6,AF_INET6)?.0 {addresses.tunnel_v6=ip.octets();}
+        if let IpAddr::V6(ip)=split_physical_source(AF_INET6,tunnel)? {addresses.physical_v6=ip.octets();}
+    }
+    Ok(addresses)
+}
+
 struct InterfaceChange {
     before: MIB_IPINTERFACE_ROW,
     applied: MIB_IPINTERFACE_ROW,
@@ -313,6 +367,10 @@ pub struct TunGuard {
     dns: Option<DnsGuard>,
     dns_firewall: Option<crate::windows_dns_firewall::DnsFirewall>,
     ipv6_unavailable: bool,
+    #[cfg(target_pointer_width = "64")]
+    app_routing:std::sync::Mutex<Option<crate::windows_app_routing_control::Session>>,
+    #[cfg(target_pointer_width = "64")]
+    split_config:Option<(SessionConfig,NET_LUID_LH)>,
 }
 
 impl std::fmt::Debug for TunGuard {
@@ -322,7 +380,11 @@ impl std::fmt::Debug for TunGuard {
 }
 
 impl TunGuard {
-    pub fn configure(cfg: &SessionConfig, peer: Option<&str>) -> Result<Self> {
+    pub fn configure(cfg: &SessionConfig, peer: Option<&str>) -> Result<Self> {Self::configure_on(cfg,peer,true)}
+    /// For a different embedded TUN implementation: resolve its exact adapter
+    /// name, never a leftover adapter carrying another engine's shared GUID.
+    pub fn configure_named(cfg:&SessionConfig,peer:Option<&str>)->Result<Self>{Self::configure_on(cfg,peer,false)}
+    fn configure_on(cfg:&SessionConfig,peer:Option<&str>,prefer_shared_guid:bool)->Result<Self> {
         validate_backend(cfg, peer)?;
         // Every endpoint the carrier may dial gets a host route through the
         // physical interface: the tunnel's own transport must never be
@@ -342,9 +404,16 @@ impl TunGuard {
             servers = vec!["1.1.1.1".into(), "1.0.0.1".into()];
         }
         log::info!("[tun] resolving Windows TUN adapter");
-        let (luid, index, guid) = adapter(&cfg.tun.name)?;
+        let (luid, index, guid) = adapter_with_preference(&cfg.tun.name,prefer_shared_guid)?;
         log::info!("[tun] adapter found; configuring bypass routes");
-        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, dns_firewall: None, ipv6_unavailable: false };
+        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, dns_firewall: None, ipv6_unavailable: false,
+            #[cfg(target_pointer_width = "64")]
+            app_routing:std::sync::Mutex::new(None),
+            #[cfg(target_pointer_width = "64")]
+            split_config:None,
+        };
+        #[cfg(target_pointer_width = "64")]
+        let requested_split=if crate::windows_app_routing_control::needed() {Some(split_addresses(cfg,luid)?)} else {None};
         guard.dns_firewall = Some(crate::windows_dns_firewall::DnsFirewall::install(index, unsafe { luid.Value })?);
         for (position, peer) in peers.into_iter().enumerate() {
             // The endpoint the engine was told to use must be kept off the
@@ -550,6 +619,13 @@ impl TunGuard {
         }
         log::info!("[tun] configuring adapter DNS");
         guard.dns = Some(DnsGuard::apply_to(guid, &servers, ipv6_available)?);
+        #[cfg(target_pointer_width = "64")]
+        if let Some(addresses)=requested_split {
+            let session=crate::windows_app_routing_control::Session::start(addresses)
+                .map_err(|e|CoreError::Internal(format!("Windows app routing: {e}")))?;
+            *guard.app_routing.lock().unwrap_or_else(|e|e.into_inner())=session;
+            guard.split_config=Some((cfg.clone(),luid));
+        }
         log::info!(
             "[tun] Windows routing ready: interface {index}, outer endpoint(s) {:?}",
             guard.peers.iter().map(|bypass| bypass.peer).collect::<Vec<_>>()
@@ -558,6 +634,13 @@ impl TunGuard {
     }
 
     pub fn check_health(&self) -> Result<()> {
+        #[cfg(target_pointer_width = "64")]
+        if let Some((cfg,luid))=&self.split_config {
+            let addresses=split_addresses(cfg,*luid)?;
+            if let Some(session)=self.app_routing.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
+                session.check_health(addresses).map_err(|e|CoreError::Internal(format!("Windows app routing health: {e}")))?;
+            }
+        }
         if self.ipv6_unavailable && non_loopback_ipv6_present()? {
             return Err(CoreError::Internal("IPv6 became available outside the tunnel; reconnect required".into()));
         }
@@ -650,6 +733,8 @@ fn cleanup(code: u32, operation: &str) {
 
 impl Drop for TunGuard {
     fn drop(&mut self) {
+        #[cfg(target_pointer_width = "64")]
+        {self.app_routing.get_mut().unwrap_or_else(|e|e.into_inner()).take();}
         drop(self.dns.take());
         for row in self.routes.iter().rev() {
             let mut current = *row;
@@ -757,7 +842,7 @@ pub struct DnsGuard {
 
 impl DnsGuard {
     pub fn apply(cfg: &SessionConfig, name: &str) -> Result<Self> {
-        let (_, _, guid) = adapter(name)?;
+        let (_, _, guid) = adapter_with_preference(name,true)?;
         Self::apply_to(guid, &crate::tun_dns::servers(cfg)?, true)
     }
 

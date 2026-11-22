@@ -983,8 +983,28 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         ${IMGUI_BACKEND_DIR}/imgui_impl_metal.mm
         ${IMGUI_BACKEND_DIR}/imgui_impl_osx.mm
         ${CMAKE_SOURCE_DIR}/src_cpp/main_macos_metal.mm
+        ${CMAKE_SOURCE_DIR}/macos/app-routing/Host.mm
         ${UI_SOURCES}
     )
+    # The extension is a distinct executable with its own OS-granted identity.
+    # Packaging it with entitlements is explicit; an unsigned build never claims
+    # availability simply because this target compiled.
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/macos/app-routing/Host.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(fcaevpn PRIVATE "-framework NetworkExtension")
+    option(FCAE_MACOS_APP_ROUTING_EXTENSION "Build the separately signed transparent-proxy extension" ON)
+    if(FCAE_MACOS_APP_ROUTING_EXTENSION)
+        add_executable(fcae_app_routing MACOSX_BUNDLE ${CMAKE_SOURCE_DIR}/macos/app-routing/Provider.mm)
+        set_target_properties(fcae_app_routing PROPERTIES
+            OUTPUT_NAME FCAEAppRouting
+            BUNDLE_EXTENSION appex
+            MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/macos/app-routing/Info.plist
+            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO
+            XCODE_ATTRIBUTE_APPLICATION_EXTENSION_API_ONLY YES)
+        target_compile_options(fcae_app_routing PRIVATE -fobjc-arc -fblocks)
+        target_link_options(fcae_app_routing PRIVATE "-Wl,-e,_NSExtensionMain")
+        target_link_libraries(fcae_app_routing PRIVATE "-framework Foundation" "-framework NetworkExtension" "-framework Network" "-framework Security")
+    endif()
+
     fcae_apply_freetype(fcaevpn)
 
     target_include_directories(fcaevpn PRIVATE

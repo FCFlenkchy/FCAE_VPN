@@ -134,6 +134,10 @@ FcaeStatus ios_start(const FcaeConfig* config) {
     if (!payload) {report(FCAEError(@"Configuration text must be valid UTF-8."));return FCAE_INVALID_CONFIG;}
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!manager) {report(FCAEError(@"VPN preferences are still loading; please try again."));return;}
+        if (manager.routingMethod==NETunnelProviderRoutingMethodSourceApplication) {
+            report(FCAEError(@"This is an OS-configured per-app VPN. FCAE will not overwrite its managed configuration with a consumer session. Start or update it through the deployment's managed VPN workflow."));
+            return;
+        }
         const NSUInteger token=++generation;
         requesting=true;
         NSError* error=nil;

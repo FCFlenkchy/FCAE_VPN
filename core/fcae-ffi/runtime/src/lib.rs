@@ -28,6 +28,24 @@
 //! No `#[no_mangle]` lives in this crate. That is the `fcae-ffi` crate's job,
 //! which keeps this one unit-testable as ordinary Rust.
 
+pub mod destination_routing;
+pub mod app_routing;
+pub mod desktop_flow_routing;
+pub mod desktop_app_routing;
+pub mod windows_split_driver_package;
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub mod windows_app_routing_driver;
+pub mod windows_app_routing_events;
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub mod windows_app_routing_provider;
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub mod windows_split_driver_service;
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub mod windows_app_routing_control;
+#[cfg(all(windows, target_pointer_width = "64"))]
+mod windows_app_routing_journal;
+#[cfg(target_os = "linux")]
+pub mod linux_app_routing;
 pub mod backend;
 pub mod native_chain;
 pub mod config;

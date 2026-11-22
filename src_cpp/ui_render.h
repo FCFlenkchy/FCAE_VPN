@@ -127,6 +127,14 @@ struct AppState {
     // (FCAE_TUN_ENGINE_*). Only consumed in TUN mode; the core rejects
     // engines that cannot run on this platform at connect time.
     int  tun_engine      = 0;
+    // Desktop captured-flow policy. Android keeps its existing package policy.
+    int desktop_app_mode = 0;
+    std::vector<std::string> desktop_app_paths;
+    std::string desktop_app_platform;
+    std::string desktop_app_provider = "captured_flow";
+    // iOS UI drafts only: never passed to desktop or packet-tunnel enforcement.
+    int ios_app_draft_mode = 0;
+    std::vector<std::string> ios_app_draft_ids;
     bool lan_sharing     = false;
     int  scan_mode       = 0;
     int  ip_version      = 4;
@@ -233,6 +241,30 @@ struct AppState {
     char access_email[128] = {};
     // Inline routing rules (comma- or newline-separated)
     char routes_inline[2048] = {};
+    int destination_mode = 0;
+    // Rows are kind|protocol|ports|target, with no control characters.
+    char destination_rows[65536] = {};
+    std::string destination_envelope;
+    std::string destination_policy_json() const {
+        std::string out="{\"schema\":1,\"mode\":"+std::to_string(destination_mode)+",\"rules\":[";
+        std::string rows=destination_rows; size_t start=0; bool first=true;
+        while(start<rows.size()) {
+            size_t end=rows.find('\n',start); if(end==std::string::npos)end=rows.size();
+            auto row=rows.substr(start,end-start); start=end+1; if(row.empty())continue;
+            size_t a=row.find('|'), b=a==std::string::npos?a:row.find('|',a+1), c=b==std::string::npos?b:row.find('|',b+1);
+            if(c==std::string::npos) return "{}";
+            if(!first)out+=",";first=false;
+            auto field=[&](const char* key,const std::string& value){out+="\"";out+=key;out+="\":\"";core_json_escape_into(out,value);out+="\"";};
+            out+="{";field("kind",row.substr(0,a));out+=",";field("protocol",row.substr(a+1,b-a-1));out+=",";field("ports",row.substr(b+1,c-b-1));out+=",";field("target",row.substr(c+1));out+="}";
+        }
+        return out+"]}";
+    }
+    const char* routing_document() {
+        if(destination_mode==0)return routes_inline[0]?routes_inline:nullptr;
+        destination_envelope="FCAE-DESTINATIONS/1\n{\"destinations\":"+destination_policy_json()+",\"legacy\":\"";
+        core_json_escape_into(destination_envelope,routes_inline);destination_envelope+="\"}";
+        return destination_envelope.c_str();
+    }
     int sys_profile       = 0;   // 0=Auto, 1=Low, 2=Medium, 3=High
 
     // Verbosity of the aether ENGINE (FcaeEngineLog). 3 = info = default.
@@ -718,7 +750,7 @@ struct AppState {
         c.dns.server = dns_server_built[0] ? dns_server_built : nullptr;
 
         c.routing.rules_file   = nullptr;
-        c.routing.rules_inline = routes_inline[0] ? routes_inline : nullptr;
+        c.routing.rules_inline = routing_document();
 
         c.zero_trust.team_name    = team_name[0] ? team_name : nullptr;
         c.zero_trust.access_token = access_token[0] ? access_token : nullptr;

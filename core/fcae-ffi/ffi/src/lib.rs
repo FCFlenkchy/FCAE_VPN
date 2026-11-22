@@ -31,6 +31,8 @@ use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 
 mod logger;
+#[cfg(target_os="macos")]
+mod macos_app_routing;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod crash_log;
 
@@ -50,6 +52,12 @@ struct Runtime {
 /// The fd setters forward to ALL engines: Android hands the descriptor over
 /// before the session parses, and whichever engine later runs must see it.
 struct TunEngines {
+    #[cfg(feature="singbox")]
+    destinations:fcae_bridge_singbox::destination_routing::DestinationRouter,
+    #[cfg(target_os="macos")]
+    macos_ne:macos_app_routing::MacNeBridge,
+    #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+    flow:fcae_bridge_singbox::app_routing::FlowTunBridge,
     #[cfg(feature = "tun")]
     t2s: Arc<fcae_bridge_tun2socks::Tun2SocksBridge>,
     #[cfg(feature = "zeptun")]
@@ -240,6 +248,14 @@ impl TunEngines {
         endpoints: &fcae_runtime::backend::Endpoints,
         cancel: Option<&fcae_runtime::backend::CancelToken>,
     ) -> Result<(), CoreError> {
+        #[cfg(feature="singbox")]
+        let routed_endpoints=self.destinations.start(cfg,endpoints)?;
+        #[cfg(feature="singbox")]
+        let endpoints=&routed_endpoints;
+        #[cfg(target_os="macos")]
+        if cfg.uses_macos_ne(){return match cancel {Some(cancel)=>self.macos_ne.start_cancellable(cfg,endpoints,cancel),None=>self.macos_ne.start(cfg,endpoints)};}
+        #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+        if cfg.app_routing.is_some() {return match cancel {Some(cancel)=>self.flow.start_cancellable(cfg,endpoints,cancel),None=>self.flow.start(cfg,endpoints)};}
         #[cfg(windows)]
         crash_log::watch_exceptions();
         log::info!("[tun] preparing {:?}", cfg.tun.engine);
@@ -303,6 +319,10 @@ impl TunBridge for TunEngines {
     }
 
     fn stop(&self, timeout: std::time::Duration) {
+        #[cfg(target_os="macos")]
+        self.macos_ne.stop(timeout);
+        #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+        self.flow.stop(timeout);
         let stopping = { LOGGED_TUN_ENGINE.lock().take() };
         if let Some(engine) = stopping {
             let name = match engine {
@@ -318,9 +338,23 @@ impl TunBridge for TunEngines {
         self.zeptun.stop(timeout);
         #[cfg(feature = "hev")]
         self.hev.stop(timeout);
+        #[cfg(feature="singbox")]
+        self.destinations.stop();
+    }
+
+    fn reclaim(&self,timeout:std::time::Duration) {
+        self.stop(timeout);
+        #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+        self.flow.reclaim(timeout);
     }
 
     fn abort(&self) {
+        #[cfg(feature="singbox")]
+        self.destinations.stop();
+        #[cfg(target_os="macos")]
+        self.macos_ne.abort();
+        #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+        self.flow.abort();
         #[cfg(feature = "tun")]
         self.t2s.abort();
         #[cfg(feature = "zeptun")]
@@ -330,6 +364,12 @@ impl TunBridge for TunEngines {
     }
 
     fn check_health(&self, cfg: &config::SessionConfig) -> Result<(), CoreError> {
+        #[cfg(feature="singbox")]
+        if cfg.destinations.is_some(){self.destinations.check_health()?;}
+        #[cfg(target_os="macos")]
+        if cfg.uses_macos_ne(){return self.macos_ne.check_health(cfg);}
+        #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+        if cfg.app_routing.is_some() {return self.flow.check_health(cfg);}
         match cfg.tun.engine {
             #[cfg(feature = "tun")]
             config::TunEngine::Tun2socks => self.t2s.check_health(cfg),
@@ -343,6 +383,10 @@ impl TunBridge for TunEngines {
     }
 
     fn is_running(&self) -> bool {
+        #[cfg(target_os="macos")]
+        if self.macos_ne.is_running(){return true;}
+        #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+        if self.flow.is_running(){return true;}
         #[cfg(feature = "tun")]
         {
             if self.t2s.is_running() {
@@ -663,6 +707,12 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
 
         #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
         let engines = Arc::new(TunEngines {
+            #[cfg(feature="singbox")]
+            destinations:fcae_bridge_singbox::destination_routing::DestinationRouter::new(),
+            #[cfg(target_os="macos")]
+            macos_ne:macos_app_routing::MacNeBridge::new(),
+            #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+            flow:fcae_bridge_singbox::app_routing::FlowTunBridge::new(),
             #[cfg(feature = "tun")]
             t2s: Arc::new(fcae_bridge_tun2socks::Tun2SocksBridge::new()),
             #[cfg(feature = "zeptun")]
@@ -760,10 +810,38 @@ pub extern "C" fn fcae_ui_diagnostic(event: u32, value: u32) {
 /// `config` must point to a valid, correctly-stamped [`FcaeConfig`].
 #[no_mangle]
 pub unsafe extern "C" fn fcae_start(cfg: *const FcaeConfig) -> FcaeStatus {
-    guard("fcae_start", move || {
+    fcae_start_with_app_routing(cfg,std::ptr::null())
+}
+
+/// Start with an immutable desktop app-policy JSON snapshot. NULL uses the
+/// latest requested draft. The caller owns both input buffers for this call.
+/// # Safety
+/// cfg must be a readable FcaeConfig; routing must be NULL or NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_start_with_app_routing(cfg:*const FcaeConfig,routing:*const c_char)->FcaeStatus {
+    guard("fcae_start_with_app_routing", move || {
         log::info!("[session] start requested; parsing configuration");
         let rt = runtime()?;
-        let parsed = config::parse(cfg)?;
+        let mut parsed = config::parse(cfg)?;
+        if parsed.destinations.is_some(){
+            if !fcae_destination_routing_available(){return Err(CoreError::BackendUnavailable("destination routing requires embedded sing-box and a packet/flow bridge"));}
+            if parsed.mode!=FcaeMode::Tun{return Err(CoreError::InvalidConfig("destination split routing requires VPN/TUN mode".into()));}
+        }
+        let policy=if routing.is_null(){fcae_runtime::desktop_flow_routing::snapshot()}else{
+            let text=CStr::from_ptr(routing).to_str().map_err(|e|CoreError::InvalidConfig(e.to_string()))?;
+            if text.len()>65536{return Err(CoreError::InvalidConfig("application policy exceeds 64 KiB".into()));}
+            let value=serde_json::from_str(text).map_err(|e|CoreError::InvalidConfig(format!("app routing JSON: {e}")))?;
+            fcae_runtime::desktop_flow_routing::parse(&value)?
+        };
+        if policy.is_some(){
+            let provider_available=if policy.as_ref().is_some_and(|policy|policy.provider=="macos_ne"){fcae_app_routing_macos_ne_available()}else{fcae_app_routing_flow_available()};
+            if !provider_available{return Err(CoreError::BackendUnavailable("requested desktop application routing provider"));}
+            if parsed.mode!=FcaeMode::Tun{return Err(CoreError::InvalidConfig("desktop per-app routing requires TUN mode, not proxy mode".into()));}
+            #[cfg(all(windows,target_pointer_width="64"))]
+            if fcae_runtime::windows_app_routing_control::needed(){return Err(CoreError::InvalidConfig("disable the experimental Windows OS-bypass draft before using captured-flow routing".into()));}
+        }
+        fcae_runtime::desktop_flow_routing::submitted(policy.as_ref());
+        parsed.app_routing=policy;
         log::info!("[session] configuration accepted: backend={:?}, mode={:?}, TUN engine={:?}",
             parsed.backend, parsed.mode, parsed.tun.engine);
 
@@ -958,6 +1036,94 @@ pub extern "C" fn fcae_set_tun_fd_provider(
 #[no_mangle]
 pub extern "C" fn fcae_is_privileged() -> bool {
     guard_value("fcae_is_privileged", false, is_privileged)
+}
+
+/// Register an app-owned, signed macOS NetworkExtension host. This must occur
+/// before sessions are started. The callback/context must remain valid until
+/// all sessions and the runtime have shut down; callbacks run on workers.
+/// # Safety
+/// The callback must honor the bounded output buffer, be thread-safe, and not
+/// unwind across the ABI. Do not replace it while a session/maintenance task runs.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_app_routing_register_macos_ne(callback:Option<unsafe extern "C" fn(*const c_char,*mut c_char,u32,*mut c_void)->bool>,context:*mut c_void){
+    #[cfg(target_os="macos")]
+    macos_app_routing::register(callback,context);
+    #[cfg(not(target_os="macos"))]
+    {let _=(callback,context);}
+}
+#[no_mangle]
+pub extern "C" fn fcae_app_routing_macos_ne_available()->bool{
+    #[cfg(all(target_os="macos",any(feature="tun",feature="zeptun",feature="hev")))]
+    {macos_app_routing::available()}
+    #[cfg(not(all(target_os="macos",any(feature="tun",feature="zeptun",feature="hev"))))]
+    {false}
+}
+
+/// Whether this build can enforce destination rules on captured VPN traffic.
+#[no_mangle]
+pub extern "C" fn fcae_destination_routing_available()->bool{
+    #[cfg(all(feature="singbox",any(feature="tun",feature="zeptun",feature="hev")))]
+    {fcae_bridge_tun2socks::is_supported()}
+    #[cfg(not(all(feature="singbox",any(feature="tun",feature="zeptun",feature="hev"))))]
+    {false}
+}
+/// Validate without opening sockets, resolving names, installing routes or logging targets.
+/// # Safety
+/// text must be NUL-terminated UTF-8; output must have capacity writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_destination_rules_validate(text:*const c_char,output:*mut c_char,capacity:u32)->FcaeStatus{
+    guard("fcae_destination_rules_validate",||{
+        if text.is_null()||output.is_null()||capacity<256{return Err(CoreError::NullArgument("destination rule buffers"));}
+        *output=0;
+        let result=CStr::from_ptr(text).to_str().map_err(|error|CoreError::InvalidConfig(error.to_string())).and_then(|text|fcae_runtime::destination_routing::Policy::parse(text).map(|_|()));
+        if let Err(error)=&result{let message=error.to_string();let mut length=message.len().min(capacity as usize-1);while !message.is_char_boundary(length){length-=1;}std::ptr::copy_nonoverlapping(message.as_ptr(),output.cast(),length);*output.add(length)=0;}
+        result
+    })
+}
+
+/// Captured-flow library availability, not an enforcement acknowledgement.
+#[no_mangle]
+pub extern "C" fn fcae_app_routing_flow_available()->bool {
+    #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+    {fcae_bridge_tun2socks::is_supported()}
+    #[cfg(not(all(feature="singbox",any(windows,target_os="linux",target_os="macos"))))]
+    {false}
+}
+
+/// Reports package availability only, not installed driver/enforcement health.
+#[no_mangle]
+pub extern "C" fn fcae_app_routing_experimental_windows_available() -> bool {
+    cfg!(all(windows, target_pointer_width = "64")) && fcae_runtime::windows_split_driver_package::AVAILABLE
+}
+
+/// App-owned routing operation. Linux launch work runs on its routing worker;
+/// Windows kernel installation runs only on the VPN supervisor, never here.
+/// # Safety
+/// request must be NUL terminated; out must have capacity bytes; active, if non-NULL,
+/// must point to writable bool storage.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_app_routing_request(
+    request: *const c_char, out: *mut c_char, capacity: u32, active: *mut bool,
+) -> FcaeStatus {
+    guard("fcae_app_routing_request", || {
+        if request.is_null() || out.is_null() { return Err(CoreError::NullArgument("request/out")); }
+        if capacity < 4096 { return Err(CoreError::InvalidConfig("routing output buffer needs 4096 bytes".into())); }
+        let request = CStr::from_ptr(request).to_str().map_err(|e| CoreError::InvalidConfig(e.to_string()))?;
+        #[cfg(target_os="macos")]
+        let special=serde_json::from_str::<serde_json::Value>(request).ok().and_then(|value|value["action"].as_str().and_then(|action|macos_app_routing::maintenance(action,fcae_is_running())));
+        #[cfg(not(target_os="macos"))]
+        let special:Option<String>=None;
+        let result = special.unwrap_or_else(||fcae_runtime::desktop_app_routing::request(request));
+        let value: serde_json::Value = serde_json::from_str(&result).map_err(|e| CoreError::Internal(e.to_string()))?;
+        let message = value["message"].as_str().unwrap_or("Routing operation returned no status");
+        let mut size = message.len().min(capacity as usize - 1);
+        while !message.is_char_boundary(size) { size -= 1; }
+        std::ptr::copy_nonoverlapping(message.as_ptr(), out.cast(), size);
+        *out.add(size) = 0;
+        if !active.is_null() { *active = value["active"].as_bool().unwrap_or(false); }
+        if value["ok"].as_bool() != Some(true) { return Err(CoreError::InvalidConfig(message.to_owned())); }
+        Ok(())
+    })
 }
 
 fn is_privileged() -> bool {
@@ -1773,6 +1939,9 @@ fn backend_display_name(id: FcaeBackend) -> &'static str {
 #[no_mangle]
 pub extern "C" fn fcae_shutdown() -> FcaeStatus {
     guard("fcae_shutdown", || {
+        #[cfg(target_os="macos")]
+        macos_app_routing::shutdown_maintenance();
+        let _ = fcae_runtime::desktop_app_routing::request(r#"{"action":"shutdown"}"#);
         fcae_sponsor::set_connected(false);
         fcae_sponsor::set_proxy(None);
         if let Some(rt) = RUNTIME.get() {
@@ -2150,6 +2319,12 @@ mod tun_provider_tests {
     #[test]
     fn provider_result_preserves_absence_success_and_failure() {
         let engines = TunEngines {
+            #[cfg(feature="singbox")]
+            destinations:fcae_bridge_singbox::destination_routing::DestinationRouter::new(),
+            #[cfg(target_os="macos")]
+            macos_ne:macos_app_routing::MacNeBridge::new(),
+            #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+            flow:fcae_bridge_singbox::app_routing::FlowTunBridge::new(),
             t2s: Arc::new(fcae_bridge_tun2socks::Tun2SocksBridge::new()),
             zeptun: Arc::new(fcae_bridge_zeptun::ZeptunBridge::new()),
             hev: Arc::new(fcae_bridge_hev_socks5_tunnel::HevSocks5TunnelBridge::new()),

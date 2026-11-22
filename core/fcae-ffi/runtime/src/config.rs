@@ -486,6 +486,9 @@ impl ListenerPolicy {
 /// Fully validated session configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionConfig {
+    pub destinations:Option<crate::destination_routing::Policy>,
+    /// Frozen, per-session desktop captured-flow policy; never a mutable global draft.
+    pub app_routing:Option<crate::desktop_flow_routing::FlowPolicy>,
     pub backend: FcaeBackend,
     pub protocol: FcaeProtocol,
     pub mode: FcaeMode,
@@ -530,6 +533,8 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
+            destinations:None,
+            app_routing:None,
             backend: FcaeBackend::Aether,
             protocol: FcaeProtocol::Masque,
             mode: FcaeMode::Proxy,
@@ -566,6 +571,7 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
+    pub fn uses_macos_ne(&self)->bool {cfg!(target_os="macos") && self.app_routing.as_ref().is_some_and(|policy|policy.provider=="macos_ne")}
     /// Address the local SOCKS listener binds to.
     pub fn socks_bind_host(&self) -> &'static str {
         if self.lan_sharing {
@@ -1063,7 +1069,9 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     };
 
     // Routing
-    let (block, direct) = parse_inline_routes(cstr_opt(raw.routing.rules_inline).as_deref());
+    let (destinations,legacy)=crate::destination_routing::decode(cstr_opt(raw.routing.rules_inline))?;
+    cfg.destinations=destinations;
+    let (block, direct) = parse_inline_routes(legacy.as_deref());
     cfg.routing = RoutingConfig {
         rules_file: cstr_opt(raw.routing.rules_file),
         direct,

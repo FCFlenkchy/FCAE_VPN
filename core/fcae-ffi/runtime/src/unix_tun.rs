@@ -467,6 +467,7 @@ pub struct TunGuard {
     dns: Option<DnsGuard>,
     dns_firewall: Option<DnsFirewall>,
     _lock: StateLock,
+    default_snapshot:[String;2],
 }
 
 impl TunGuard {
@@ -480,6 +481,7 @@ impl TunGuard {
             dns: None,
             dns_firewall: None,
             _lock: StateLock::acquire(),
+            default_snapshot:[format!("{:?}",gateway(false)),format!("{:?}",gateway(true))],
         };
         guard.apply(cfg, peer_ip, assign_addresses)?;
         log::info!("[tun] routes/DNS applied to `{device}`");
@@ -488,6 +490,45 @@ impl TunGuard {
 
     pub fn device(&self) -> &str {
         &self.device
+    }
+
+    /// Read-only checks used by captured-flow routing. No policy acknowledgement
+    /// survives a missing capture route, dead DNS monitor or changed uplink.
+    pub fn check_health(&mut self)->Result<()> {
+        if self.default_snapshot != [format!("{:?}",gateway(false)),format!("{:?}",gateway(true))] {
+            return Err(CoreError::Internal("physical default route changed; reconnect app routing".into()));
+        }
+        if let Some(firewall)=self.dns_firewall.as_mut() {
+            if let Some(monitor)=firewall.monitor.as_mut() {
+                if monitor.try_wait().map_err(|e|CoreError::Internal(e.to_string()))?.is_some() {
+                    return Err(CoreError::Internal("DNS protection monitor exited; reconnect app routing".into()));
+                }
+            } else {return Err(CoreError::Internal("DNS protection monitor missing".into()));}
+        }
+        #[cfg(target_os="linux")]
+        for undo in &self.undo {
+            if undo.len()<5 || undo[0]!="ip" || undo[2]!="route" {continue;}
+            let reject=undo[4]=="unreachable";
+            let prefix=if reject {undo.get(5)} else {undo.get(4)};
+            let Some(prefix)=prefix.filter(|p|matches!(p.as_str(),"0.0.0.0/1"|"128.0.0.0/1"|"::/1"|"8000::/1")) else {continue;};
+            let text=tun_dns::run("ip",&[&undo[1],"-j","route","show","exact",prefix])?;
+            let value:serde_json::Value=serde_json::from_str(&text).map_err(|e|CoreError::Internal(e.to_string()))?;
+            let valid=value.as_array().is_some_and(|rows|rows.iter().any(|row|{
+                row["dst"].as_str()==Some(prefix.as_str()) && if reject {row["type"].as_str()==Some("unreachable")} else {row["dev"].as_str()==Some(self.device.as_str())}
+            }));
+            if !valid {return Err(CoreError::Internal(format!("capture route {prefix} changed; reconnect app routing")));}
+        }
+        #[cfg(target_os="macos")]
+        for undo in &self.undo {
+            if undo.len()!=6 || undo[0]!="route" || undo[4]!="-net" {continue;}
+            let prefix=&undo[5];
+            if !matches!(prefix.as_str(),"0.0.0.0/1"|"128.0.0.0/1"|"::/1"|"8000::/1") {continue;}
+            let text=tun_dns::run("route",&["-n","get",&undo[3],"-net",prefix])?;
+            let on_tunnel=text.lines().find_map(|line|line.trim().strip_prefix("interface:")).is_some_and(|name|name.trim()==self.device);
+            let rejected=text.lines().any(|line|line.trim().starts_with("flags:")&&line.contains("REJECT"));
+            if !on_tunnel && !rejected {return Err(CoreError::Internal(format!("capture route {prefix} changed; reconnect app routing")));}
+        }
+        Ok(())
     }
 
     fn apply(&mut self, cfg: &SessionConfig, peer_ip: Option<&str>, assign_addresses: bool) -> Result<()> {

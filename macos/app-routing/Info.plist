@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>FCAEAppRouting</string>
+<key>CFBundleIdentifier</key><string>com.fc.fcaevpn.app-routing</string>
+<key>CFBundleName</key><string>FCAE App Routing</string>
+<key>CFBundlePackageType</key><string>XPC!</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>NSExtension</key><dict>
+<key>NSExtensionPointIdentifier</key><string>com.apple.networkextension.app-proxy</string>
+<key>NSExtensionPrincipalClass</key><string>FCAETransparentProxy</string>
+</dict>
+</dict></plist>

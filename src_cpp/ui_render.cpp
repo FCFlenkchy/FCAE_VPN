@@ -1,6 +1,9 @@
 #include "ui_text_input.h"
 #include "ui_media_fit.h"
 #include "ui_render.h"
+#if !defined(ANDROID)
+#include "platform_app_routing_ui.h"
+#endif
 #if defined(FCAE_IOS)
 #include "Platform.h"
 #define fcae_start ios_start
@@ -488,6 +491,12 @@ static uint64_t config_signature() {
     h = fnv_value(h, g_app.psiphon_http_port);
     h = fnv_value(h, g_app.mode);
     h = fnv_value(h, g_app.tun_engine);
+    h = fnv_value(h, g_app.ios_app_draft_mode);
+    for (const auto& id : g_app.ios_app_draft_ids) h = fnv_cstr(h, id.c_str());
+    h = fnv_value(h, g_app.desktop_app_mode);
+    h = fnv_cstr(h, g_app.desktop_app_platform.c_str());
+    h = fnv_cstr(h, g_app.desktop_app_provider.c_str());
+    for (const auto& path : g_app.desktop_app_paths) h = fnv_cstr(h, path.c_str());
     h = fnv_value(h, g_app.lan_sharing);
     h = fnv_value(h, g_app.scan_mode);
     h = fnv_value(h, g_app.ip_version);
@@ -577,6 +586,8 @@ static uint64_t config_signature() {
     h = fnv_cstr(h, g_app.access_client_secret);
     h = fnv_cstr(h, g_app.access_email);
     h = fnv_cstr(h, g_app.routes_inline);
+    h = fnv_cstr(h, g_app.destination_rows);
+    h = fnv_cstr(h, std::to_string(g_app.destination_mode).c_str());
     return h;
 }
 
@@ -1196,6 +1207,18 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = parse_port(val, g_app.psiphon_socks_port);
     else if (key == "psiphon_http_port") g_app.psiphon_http_port = parse_port(val, g_app.psiphon_http_port);
     else if (key == "mode") g_app.mode = atoi(val.c_str());
+    else if (key == "ios_app_draft_mode") g_app.ios_app_draft_mode = std::clamp(atoi(val.c_str()), 0, 2);
+    else if (key == "ios_app_draft_id" && g_app.ios_app_draft_ids.size() < 8192) {
+        auto id = core_text_decode(val);
+        if (!id.empty() && id.size() <= 255) g_app.ios_app_draft_ids.push_back(std::move(id));
+    }
+    else if (key == "desktop_app_mode") g_app.desktop_app_mode = std::clamp(atoi(val.c_str()), 0, 2);
+    else if (key == "desktop_app_provider" && val.size() <= 32) g_app.desktop_app_provider = val;
+    else if (key == "desktop_app_platform" && val.size() <= 32) g_app.desktop_app_platform = val;
+    else if (key == "desktop_app_path" && g_app.desktop_app_paths.size() < 8192) {
+        auto path = core_text_decode(val);
+        if (!path.empty() && path.size() <= 32768) g_app.desktop_app_paths.push_back(std::move(path));
+    }
     else if (key == "tun_engine") { int e = atoi(val.c_str()); g_app.tun_engine = (e > 0 && e < (int)fcae_tun_engine_count()) ? e : 0; }
     else if (key == "lan_sharing") g_app.lan_sharing = atoi(val.c_str()) != 0;
     else if (key == "scan_mode") g_app.scan_mode = atoi(val.c_str());
@@ -1310,6 +1333,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.access_client_secret, sizeof(g_app.access_client_secret), "%s", val.c_str());
     else if (key == "access_email")
         snprintf(g_app.access_email, sizeof(g_app.access_email), "%s", val.c_str());
+    else if (key == "destination_mode") g_app.destination_mode=std::clamp(atoi(val.c_str()),0,2);
+    else if (key == "destination_rows_hex") decode_config_text(val,g_app.destination_rows,sizeof(g_app.destination_rows));
     else if (key == "routes_inline")
         snprintf(g_app.routes_inline, sizeof(g_app.routes_inline), "%s", val.c_str());
     else if (key == "routes_inline_hex")
@@ -1374,6 +1399,12 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "psiphon_http_port=%d\n", g_app.psiphon_http_port);
     fprintf(f, "mode=%d\n", g_app.mode);
     fprintf(f, "tun_engine=%d\n", g_app.tun_engine);
+    fprintf(f, "ios_app_draft_mode=%d\n", g_app.ios_app_draft_mode);
+    for (const auto& id : g_app.ios_app_draft_ids) fprintf(f, "ios_app_draft_id=%s\n", core_text_encode(id).c_str());
+    fprintf(f, "desktop_app_mode=%d\n", g_app.desktop_app_mode);
+    fprintf(f, "desktop_app_platform=%s\n", g_app.desktop_app_platform.c_str());
+    fprintf(f, "desktop_app_provider=%s\n", g_app.desktop_app_provider.c_str());
+    for (const auto& path : g_app.desktop_app_paths) fprintf(f, "desktop_app_path=%s\n", core_text_encode(path).c_str());
     fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing ? 1 : 0);
     fprintf(f, "scan_mode=%d\n", g_app.scan_mode);
     fprintf(f, "ip_version=%d\n", g_app.ip_version);
@@ -1474,6 +1505,8 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "access_client_secret=%s\n", g_app.access_client_secret);
     fprintf(f, "access_email=%s\n", g_app.access_email);
     fprintf(f, "routes_inline_hex=%s\n", encode_config_text(g_app.routes_inline).c_str());
+    fprintf(f, "destination_mode=%d\n", g_app.destination_mode);
+    fprintf(f, "destination_rows_hex=%s\n", encode_config_text(g_app.destination_rows).c_str());
     const bool write_ok = !ferror(f);
     const bool close_ok = fclose(f) == 0;
 #if defined(_WIN32)
@@ -1554,6 +1587,14 @@ static bool load_config_from(const std::string& path) {
     // The file is the source of truth for the saved core configs, exactly as it
     // is for every other setting.
     g_app.core_configs.clear();
+    g_app.destination_mode=0;
+    g_app.destination_rows[0]=0;
+    g_app.ios_app_draft_ids.clear();
+    g_app.ios_app_draft_mode = 0;
+    g_app.desktop_app_paths.clear();
+    g_app.desktop_app_mode = 0;
+    g_app.desktop_app_platform.clear();
+    g_app.desktop_app_provider="captured_flow";
     s_loaded_chain_transports = false;
     s_loaded_tor_mode = 0;
     s_loaded_socks_port = false;
@@ -2117,6 +2158,9 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
+#if !defined(ANDROID)
+    PlatformAppRouting::shutdown(); // Join inventory work before destroying UI/runtime state.
+#endif
     // The initializer owns the runtime and AppState until it has finished.
     if (s_runtime_init_thread.joinable()) s_runtime_init_thread.join();
     fcae_ui_diagnostic(5, 0);
@@ -4375,7 +4419,7 @@ void render_ui() {
                     return;
                 }
                 // TUN mode requires admin privileges on Windows
-                if (g_app.mode == 1 && !fcae_is_privileged()) {
+                if (g_app.mode == 1 && !fcae_is_privileged() && !PlatformAppRouting::uses_macos_ne()) {
 #ifdef _WIN32
                     // Save config then relaunch self as administrator.
                     // The elevated instance will start fresh — user clicks CONNECT manually.
@@ -4504,6 +4548,7 @@ void render_ui() {
                     // worker gets its own copy: the UI thread can open the
                     // config editor while a start is in flight.
                     std::string core_library, core_ref;
+                    std::string app_routing;
                     std::vector<std::string> chain_refs;
                     std::vector<FcaeChainHop> chain_hops;
                     FcaeConfig c{};
@@ -4530,7 +4575,6 @@ void render_ui() {
                 o->firefox_account = g_app.firefox_account_id;
                 o->firefox_location = g_app.firefox_location;
                 o->firefox_server = g_app.firefox_server;
-                o->routes_inline = g_app.routes_inline;
                 o->ech_dns = g_app.ech_dns;
                 o->ech_domain = g_app.ech_domain;
                 o->gool_inner = g_app.gool_inner;
@@ -4548,6 +4592,10 @@ void render_ui() {
                 o->tls_trust_anchors = g_app.tls_trust_anchors;
                 o->tls_server_padding = g_app.tls_server_padding;
                 o->c = g_app.to_config();
+                o->routes_inline = o->c.routing.rules_inline ? o->c.routing.rules_inline : "";
+#if !defined(FCAE_IOS)
+                o->app_routing = PlatformAppRouting::connection_policy();
+#endif
                 // to_config() built the JSON (with the server-entry fields
                 // merged in) into a g_app buffer; snapshot it, and read the
                 // embedded server entry list, so fcae_start only ever sees
@@ -4642,7 +4690,12 @@ void render_ui() {
                     );
                     // Every failure mode now has a specific, user-facing
                     // reason instead of a bare false.
-                    if (fcae_start(&guard->c) != FCAE_OK) {
+#if defined(FCAE_IOS)
+                    const auto start_status = fcae_start(&guard->c);
+#else
+                    const auto start_status = fcae_start_with_app_routing(&guard->c, guard->app_routing.c_str());
+#endif
+                    if (start_status != FCAE_OK) {
                         g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
                         ui_request_redraw();
                     }
@@ -5549,6 +5602,8 @@ void render_ui() {
                 ImGui::Checkbox("Exclude private IPs", &g_app.tun_exclude_private);
 #if defined(ANDROID)
                 android_ui_render_routing();
+#else
+                PlatformAppRouting::routing();
 #endif
                 if (g_app.parsed_tun_mtu() == 0xffffffffu)
                     UiText::TextColoredWrapped(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
@@ -6019,6 +6074,8 @@ void render_ui() {
 
 #if defined(ANDROID)
     android_ui_render_app_picker();
+#else
+    PlatformAppRouting::picker();
 #endif
     render_protocol_editor();
     s_firefox_captcha_embedded = false;

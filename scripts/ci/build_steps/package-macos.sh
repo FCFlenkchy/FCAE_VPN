@@ -132,6 +132,21 @@ else
   echo "No signing keychain found, falling back to ad-hoc signing"
   sign() { codesign --force --sign - "$@"; }
 fi
+# NetworkExtension provisioning is a separate distribution gate. Never apply
+# copied entitlements to an ad-hoc build and advertise it as an installed helper.
+if [ "${FCAE_PACKAGE_MACOS_NE:-0}" = 1 ]; then
+  test -f "$KEYCHAIN_PATH" || { echo "::error::NetworkExtension packaging requires a signing identity"; exit 1; }
+  test -f "${FCAE_MACOS_NE_APP_PROFILE:-}" || { echo "::error::Missing app NetworkExtension provisioning profile"; exit 1; }
+  test -f "${FCAE_MACOS_NE_EXTENSION_PROFILE:-}" || { echo "::error::Missing extension provisioning profile"; exit 1; }
+  test -d build/FCAEAppRouting.appex || { echo "::error::Build the FCAE macOS extension target first"; exit 1; }
+  mkdir -p "$APP/Contents/PlugIns"
+  ditto build/FCAEAppRouting.appex "$APP/Contents/PlugIns/FCAEAppRouting.appex"
+  cp "$FCAE_MACOS_NE_APP_PROFILE" "$APP/Contents/embedded.provisionprofile"
+  cp "$FCAE_MACOS_NE_EXTENSION_PROFILE" "$APP/Contents/PlugIns/FCAEAppRouting.appex/Contents/embedded.provisionprofile"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $MACOS_VER" "$APP/Contents/PlugIns/FCAEAppRouting.appex/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MACOS_VER" "$APP/Contents/PlugIns/FCAEAppRouting.appex/Contents/Info.plist"
+  sign --entitlements macos/app-routing/Extension.entitlements "$APP/Contents/PlugIns/FCAEAppRouting.appex"
+fi
 # The cronet dylib is loaded inside the process, not by the loader, so it is
 # code of its own and carries its own signature. Signing it before the bundle
 # keeps the seal over it intact.
@@ -139,8 +154,15 @@ sign "$APP/Contents/MacOS/libcronet.dylib"
 if [ -n "$FT_DYLIB" ] && [ -f "$FT_DYLIB" ]; then
   sign "$APP/Contents/Frameworks/$(basename "$FT_DYLIB")"
 fi
-sign --deep "$APP"
-codesign --verify --deep --strict --verbose=2 "$APP" || true
+if [ "${FCAE_PACKAGE_MACOS_NE:-0}" = 1 ]; then
+  # Nested extension was signed with its own entitlements; --deep here would
+  # replace those with the host's signature/entitlements.
+  sign --entitlements macos/app-routing/App.entitlements "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+else
+  sign --deep "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP" || true
+fi
 
 DMG_ROOT="$RUNNER_TEMP/dmgroot"
 rm -rf "$DMG_ROOT"

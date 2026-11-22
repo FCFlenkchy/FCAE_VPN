@@ -1788,6 +1788,9 @@ dependencies = [
 [[package]]
 name = "fcae-build"
 version = "2.0.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "fcae-ffi"

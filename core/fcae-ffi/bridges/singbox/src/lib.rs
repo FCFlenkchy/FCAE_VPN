@@ -6,6 +6,9 @@
 //! shared planning, supervision and teardown in [`fcae_runtime::proxy_cores`].
 
 pub mod config;
+pub mod destination_routing;
+#[cfg(any(windows,target_os="linux",target_os="macos"))]
+pub mod app_routing;
 
 use std::ffi::{c_char, c_int};
 use std::sync::Arc;
