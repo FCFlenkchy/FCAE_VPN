@@ -284,6 +284,9 @@ impl<'a> CArchive<'a> {
         {
             isolate_mihomo_metrics(&go, self.module_dir)?;
         }
+        if self.target.os == Os::Windows {
+            stage_windows_adapter_guids(&go, self.module_dir)?;
+        }
         let mut ldflags = self.ldflags.clone();
         if shared && self.target.is_android() {
             // Android 15 ships 16 KB memory pages. A shared object linked with
@@ -603,7 +606,6 @@ fn configure_ios_cgo(command: &mut Command) -> Result<(), GoError> {
     Ok(())
 }
 
-
 // Tailscale forks publish identical expvar keys during package initialization.
 // Adapt a generated copy, keeping upstream sources and the module cache intact.
 fn isolate_mihomo_metrics(go: &str, module: &Path) -> Result<(), GoError> {
@@ -668,4 +670,125 @@ fn isolate_mihomo_metrics(go: &str, module: &Path) -> Result<(), GoError> {
         &["mod", "edit", "-replace", &replacement],
         "isolate Mihomo metrics",
     )
+}
+
+// Use the actually resolved Go module versions, not guessed cache paths or
+// versions. Adapt only generated source copies; keep submodules/cache pristine.
+fn stage_windows_adapter_guids(go: &str, module: &Path) -> Result<(), GoError> {
+    let fail = |error: std::io::Error| GoError::Build(error.to_string());
+    let config_path = crate::repo_root().join("core/fcae-ffi/runtime/src/config.rs");
+    crate::rerun_if_changed(&config_path);
+    let config = std::fs::read_to_string(config_path).map_err(fail)?;
+    let guid = config
+        .split("pub const WINTUN_ADAPTER_GUID: &str = \"")
+        .nth(1)
+        .and_then(|tail| tail.split('"').next())
+        .ok_or_else(|| GoError::Build("host Wintun GUID declaration changed".into()))?;
+    let listed = Command::new(go)
+        .current_dir(module)
+        .args(["list", "-m", "-f", "{{.Path}}|{{.Dir}}", "all"])
+        .env("GOTOOLCHAIN", "auto")
+        .env("GOFLAGS", "-mod=readonly")
+        .output()
+        .map_err(fail)?;
+    if !listed.status.success() {
+        return Err(GoError::Build(
+            String::from_utf8_lossy(&listed.stderr).into_owned(),
+        ));
+    }
+    let mut changed = false;
+    for line in String::from_utf8_lossy(&listed.stdout).lines() {
+        let Some((name, directory)) = line.split_once('|') else {
+            continue;
+        };
+        let (label, relative) = match name {
+            "github.com/sagernet/sing-tun" => ("sagernet-sing-tun", "tun_windows.go"),
+            "github.com/metacubex/sing-tun" => ("metacubex-sing-tun", "tun_windows.go"),
+            "github.com/xtls/xray-core" => ("xray", "proxy/tun/tun_windows.go"),
+            _ => continue,
+        };
+        let root = PathBuf::from(directory);
+        let text = std::fs::read_to_string(root.join(relative)).map_err(fail)?;
+        if text.contains("func fcaeAdapterGUID()") {
+            continue;
+        }
+        let patched = if label == "xray" {
+            let original =
+                "id := md5.Sum([]byte(name))\n\tguid := (*windows.GUID)(unsafe.Pointer(&id[0]))";
+            if text.matches(original).count() != 1 {
+                return Err(GoError::Build(
+                    "Xray Windows adapter API changed; review shared GUID integration".into(),
+                ));
+            }
+            text.replace(original, "guid := fcaeAdapterGUID()")
+                .replace("\t\"crypto/md5\"\n", "")
+        } else {
+            let original="adapter, err := wintun.CreateAdapter(options.Name, TunnelType, generateGUIDByDeviceName(options.Name))";
+            if text.matches(original).count() != 1 {
+                return Err(GoError::Build(format!(
+                    "{name} Windows adapter API changed; review shared GUID integration"
+                )));
+            }
+            text.replace(original,"adapter, err := wintun.OpenAdapter(options.Name)\n if err != nil { adapter, err = wintun.CreateAdapter(options.Name, TunnelType, fcaeAdapterGUID()) }")
+        };
+        let patched=format!("{patched}\nfunc fcaeAdapterGUID() *windows.GUID {{ value, err := windows.GUIDFromString(\"{{{guid}}}\"); if err != nil {{ panic(err) }}; return &value }}\n");
+        let destination = module.join(format!("shared-guid-{label}"));
+        if destination.exists() {
+            std::fs::remove_dir_all(&destination).map_err(fail)?;
+        }
+        copy_windows_module(&root, &destination)?;
+        let output = destination.join(relative);
+        let mut permissions = std::fs::metadata(&output).map_err(fail)?.permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&output, permissions).map_err(fail)?;
+        std::fs::write(output, patched).map_err(fail)?;
+        let replacement = format!(
+            "{name}={}",
+            destination.to_string_lossy().replace('\\', "/")
+        );
+        CArchive::run_go_step(
+            go,
+            module,
+            &["mod", "edit", "-replace", &replacement],
+            "stage shared Windows adapter GUID",
+        )?;
+        changed = true;
+    }
+    if changed {
+        CArchive::run_go_step(
+            go,
+            module,
+            &["mod", "tidy"],
+            "resolve shared-GUID source copies",
+        )?;
+    }
+    Ok(())
+}
+fn copy_windows_module(source: &Path, destination: &Path) -> Result<(), GoError> {
+    let fail = |error: std::io::Error| GoError::Build(error.to_string());
+    std::fs::create_dir_all(destination).map_err(fail)?;
+    for entry in std::fs::read_dir(source).map_err(fail)? {
+        let entry = entry.map_err(fail)?;
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let kind = entry.file_type().map_err(fail)?;
+        if kind.is_dir() {
+            copy_windows_module(&entry.path(), &destination.join(name))?;
+        } else if kind.is_file() {
+            let output = destination.join(name);
+            std::fs::copy(entry.path(), &output).map_err(fail)?;
+            // Go's module cache is read-only; generated copies must be
+            // writable so Windows can replace them on the next build.
+            let mut permissions = std::fs::metadata(&output).map_err(fail)?.permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(output, permissions).map_err(fail)?;
+        } else {
+            return Err(GoError::Build(
+                "unexpected non-regular entry in Go module source".into(),
+            ));
+        }
+    }
+    Ok(())
 }

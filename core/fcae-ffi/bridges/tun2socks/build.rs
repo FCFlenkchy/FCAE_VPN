@@ -327,11 +327,7 @@ fn assemble(
         (xray, "xray", "xray.go"),
         (singbox, "singbox", "singbox.go"),
         (mihomo, "mihomo", "mihomo.go"),
-        (
-            cfg!(feature = "sing-tun"),
-            "sing-tun",
-            "sing_tun.go",
-        ),
+        (cfg!(feature = "sing-tun"), "sing-tun", "sing_tun.go"),
     ] {
         if !enabled {
             continue;
@@ -344,7 +340,10 @@ fn assemble(
         copy(&shim, &module.join(name));
         if dir == "sing-tun" {
             for file in ["app_routing.go", "app_routing_stub.go"] {
-                copy(&shim.with_file_name(file), &module.join(format!("sing_tun_{file}")));
+                copy(
+                    &shim.with_file_name(file),
+                    &module.join(format!("sing_tun_{file}")),
+                );
             }
         }
         if dir == "singbox" {
@@ -412,6 +411,41 @@ fn assemble(
             "MetaCubeX/sing-tun submodule is missing; initialize submodules before building"
         );
         fcae_build::go::track_sources(&source);
+        let source = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            // Keep the git submodule pristine; override only its Windows DLL
+            // loader in an OUT_DIR copy. All consumers in this archive share it.
+            let staged = module.join("metacubex-sing-tun");
+            if staged.exists() {
+                std::fs::remove_dir_all(&staged).expect("clear staged sing-tun");
+            }
+            copy_source_tree(&source, &staged);
+            let loader = root.join("core/fcae-ffi/bridges/sing-tun/windows/dll_windows.go");
+            fcae_build::rerun_if_changed(&loader);
+            copy(&loader, &staged.join("internal/wintun/dll_windows.go"));
+            let native_path = staged.join("tun_windows.go");
+            let native =
+                std::fs::read_to_string(&native_path).expect("read pinned sing-tun Windows source");
+            let create="adapter, err := wintun.CreateAdapter(options.Name, TunnelType, generateGUIDByDeviceName(options.Name))";
+            assert_eq!(
+                native.matches(create).count(),
+                1,
+                "sing-tun adapter API changed; review Windows override"
+            );
+            let config_path = root.join("core/fcae-ffi/runtime/src/config.rs");
+            fcae_build::rerun_if_changed(&config_path);
+            let config = std::fs::read_to_string(config_path).expect("read host adapter identity");
+            let guid = config
+                .split("pub const WINTUN_ADAPTER_GUID: &str = \"")
+                .nth(1)
+                .and_then(|tail| tail.split('"').next())
+                .expect("host Wintun GUID");
+            let native=native.replace(create,"adapter, err := wintun.OpenAdapter(options.Name)\n if err != nil { adapter, err = wintun.CreateAdapter(options.Name, TunnelType, fcaeAdapterGUID()) }");
+            let native=format!("{native}\nfunc fcaeAdapterGUID() *windows.GUID {{ value, err := windows.GUIDFromString(\"{{{guid}}}\"); if err != nil {{ panic(err) }}; return &value }}\n");
+            std::fs::write(native_path, native).expect("stage shared adapter identity");
+            staged
+        } else {
+            source
+        };
         manifest.push_str(&format!("\nrequire github.com/metacubex/sing-tun v0.0.0\nreplace github.com/metacubex/sing-tun => {}\n",local(&source)));
     }
     if mihomo {
@@ -441,4 +475,23 @@ fn assemble(
 fn copy(from: &Path, to: &Path) {
     std::fs::copy(from, to)
         .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", from.display(), to.display()));
+}
+
+fn copy_source_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("create staged sing-tun directory");
+    for entry in std::fs::read_dir(source).expect("read sing-tun source") {
+        let entry = entry.expect("sing-tun source entry");
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let kind = entry.file_type().expect("sing-tun entry type");
+        if kind.is_dir() {
+            copy_source_tree(&entry.path(), &destination.join(name));
+        } else if kind.is_file() {
+            copy(&entry.path(), &destination.join(name));
+        } else {
+            panic!("unexpected non-regular entry in pinned sing-tun source");
+        }
+    }
 }

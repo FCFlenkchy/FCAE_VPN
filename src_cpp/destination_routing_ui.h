@@ -19,7 +19,7 @@ inline void destination_routing_ui() {
     static const char* protocols[]={"TCP + UDP","TCP","UDP"};
     static const char* kind_keys[]={"ip","domain","port"};
     static const char* protocol_keys[]={"both","tcp","udp"};
-    static const char* modes[]={"Include matches in TUN","Exclude matches from TUN"};
+    static const char* modes[]={"Include matches in TUN","Exclude matches from TUN (DIRECT)"};
     const bool available=fcae_destination_routing_available();
     if(!available)ImGui::TextDisabled("Destination routing unavailable in this build.");
     ImGui::BeginChild("##destination_body",ImVec2(0,-ImGui::GetFrameHeightWithSpacing()),ImGuiChildFlags_None);

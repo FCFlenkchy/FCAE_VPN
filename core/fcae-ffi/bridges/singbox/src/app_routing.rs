@@ -114,21 +114,26 @@ impl FlowTunBridge {
                 "flow-routing start cancelled".into(),
             ));
         }
-        let mut id = 0;
-        unsafe {
-            let error = super::sb_tun_start(text.as_ptr(), &mut id);
-            if !error.is_null() {
-                let message = CStr::from_ptr(error).to_string_lossy().into_owned();
-                super::sb_string_free(error);
-                return Err(CoreError::StartFailed(message));
+        let start = || -> Result<u64> {
+            if stopped() {return Err(CoreError::StartFailed("TUN startup cancelled".into()));}
+            let mut id = 0;
+            unsafe {
+                let error = super::sb_tun_start(text.as_ptr(), &mut id);
+                if !error.is_null() {
+                    let message = CStr::from_ptr(error).to_string_lossy().into_owned();
+                    super::sb_string_free(error);
+                    if id != 0 { super::sb_stop(id); }
+                    return Err(CoreError::StartFailed(message));
+                }
             }
-        }
+            if id==0 {return Err(CoreError::StartFailed("TUN core returned no instance handle".into()));}
+            Ok(id)
+        };
+        #[cfg(windows)]
+        let id = fcae_runtime::windows_dll::start_with_driver_repair(&device, stopped, start)?;
+        #[cfg(not(windows))]
+        let id = start()?;
         let core = Core(id);
-        if id == 0 {
-            return Err(CoreError::StartFailed(
-                "flow core returned no instance handle".into(),
-            ));
-        }
         let mut live = Live {
             routes: None,
             core: Some(core),

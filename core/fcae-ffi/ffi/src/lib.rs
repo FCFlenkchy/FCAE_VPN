@@ -2416,6 +2416,6 @@ mod tun_provider_tests {
 pub extern "system" fn fcae_wintun_load_library() -> *mut std::ffi::c_void {
     match fcae_runtime::windows_dll::acquire_wintun_module() {
         Ok(module)=>module.cast(),
-        Err(error)=>{log::error!("[zeptun] shared Wintun loader failed: {error}");std::ptr::null_mut()}
+        Err(error)=>{log::error!("[tun] shared Wintun loader failed: {error}");std::ptr::null_mut()}
     }
 }

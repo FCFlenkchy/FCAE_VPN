@@ -5,6 +5,8 @@ package main
 /*
 #include <stdint.h>
 #include <stdlib.h>
+typedef void (*mtun_log_fn)(int, const char*);
+static void mtun_emit_log(mtun_log_fn fn, int level, const char* text) { if(fn) fn(level,text); }
 #ifndef _WIN32
 #include <unistd.h>
 #include <fcntl.h>
@@ -25,6 +27,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 	"unsafe"
@@ -64,6 +67,27 @@ func (c *mtunCore) close() {
 	}
 }
 
+var mtunLogMu sync.RWMutex
+var mtunLog C.mtun_log_fn
+
+//export mtun_set_log
+func mtun_set_log(sink C.mtun_log_fn, _ C.int) {
+	mtunLogMu.Lock()
+	mtunLog = sink
+	mtunLogMu.Unlock()
+}
+func mtunLogf(level int, format string, args ...any) {
+	mtunLogMu.RLock()
+	sink := mtunLog
+	mtunLogMu.RUnlock()
+	if sink == nil {
+		return
+	}
+	text := C.CString(fmt.Sprintf(format, args...))
+	defer C.free(unsafe.Pointer(text))
+	C.mtun_emit_log(sink, C.int(level), text)
+}
+
 var mtunMu sync.Mutex
 var mtunNext uint64
 var mtunCores = make(map[uint64]*mtunCore)
@@ -74,6 +98,7 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 		return C.CString("missing sing-tun start arguments")
 	}
 	*handle = 0
+	mtunLogf(3, "startup entered (%s/%s)", runtime.GOOS, runtime.GOARCH)
 	var cfg struct {
 		Name      string          `json:"name"`
 		MTU       uint32          `json:"mtu"`
@@ -120,7 +145,11 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	owned := false
 	defer func() {
 		if failure := recover(); failure != nil {
+			mtunLogf(1, "startup panic: %v\n%s", failure, debug.Stack())
 			result = C.CString(fmt.Sprintf("sing-tun startup panic: %v", failure))
+		}
+		if result != nil {
+			mtunLogf(1, "startup failed: %s", C.GoString(result))
 		}
 		if !owned {
 			core.close()
@@ -142,6 +171,7 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 		}
 		options.FileDescriptor = fd
 	}
+	mtunLogf(3, "creating TUN interface %s", cfg.Name)
 	core.device, err = tun.New(options)
 	if err != nil {
 		if mobile {
@@ -152,10 +182,12 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	handler := &mtunHandler{ctx: ctx, socks: M.SocksaddrFromNetIP(socksAddr), udp: cfg.UDP, active: make(map[io.Closer]struct{}), routing: core.routing}
 	handler.nat = udpnat.New[netip.AddrPort](120, handler)
 	core.handler = handler
+	mtunLogf(3, "interface created; initializing gVisor")
 	core.stack, err = tun.NewStack("gvisor", tun.StackOptions{Context: ctx, Tun: core.device, TunOptions: options, Handler: handler, Logger: logger.NOP(), UDPTimeout: 120 * time.Second, ICMPTimeout: 10 * time.Second})
 	if err != nil {
 		return C.CString("sing-tun stack: " + err.Error())
 	}
+	mtunLogf(3, "starting packet stack")
 	if err = core.stack.Start(); err != nil {
 		return C.CString("sing-tun stack start: " + err.Error())
 	}
@@ -167,6 +199,7 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	engineStarted(engineMetaTun)
 	owned = true
 	*handle = C.uint64_t(id)
+	mtunLogf(3, "packet engine started (handle %d)", id)
 	return nil
 }
 
