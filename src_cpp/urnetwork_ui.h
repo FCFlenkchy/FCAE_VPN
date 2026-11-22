@@ -126,6 +126,7 @@ static void render_urnetwork_settings() {
     listener_row("URnetwork SOCKS5", &g_app.ur_socks_enabled, &g_app.ur_socks_port, 1, 65535);
     listener_row("URnetwork HTTP", &g_app.ur_http_enabled, &g_app.ur_http_port, 1, 65535);
     ImGui::EndDisabled();
+    backend_log_combo("URnetwork log level", 6, g_app.urnetwork_log);
     if (!s_ur_status.empty()) ImGui::TextWrapped("%s", s_ur_status.c_str());
     if (s_ur_save_failed && ImGui::Button("Retry saving settings")) s_ur_save_failed = false;
     ImGui::EndChild();

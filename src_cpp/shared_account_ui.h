@@ -44,3 +44,13 @@ static bool account_region_combo(const char* id, std::string& selected,
     ImGui::PopID();
     return changed;
 }
+
+static void backend_log_combo(const char* label, uint32_t backend, int& level) {
+    static const char* const levels[] = {"Silent", "Error", "Warning", "Info", "Debug"};
+    ImGui::TextUnformatted(label);
+    ImGui::PushID(label);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::Combo("##log_level", &level, levels, 5))
+        fcae_backend_set_log_level(backend, (uint32_t)level);
+    ImGui::PopID();
+}

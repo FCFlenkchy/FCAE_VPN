@@ -17,6 +17,9 @@ const MAX_MSG: usize = 512;
 static CALLBACK: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static USER_DATA: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static MAX_LEVEL: AtomicU8 = AtomicU8::new(fcae_abi::FcaeLogLevel::Info as u8);
+static FIREFOX_LEVEL: AtomicU8 = AtomicU8::new(0);
+static URNETWORK_LEVEL: AtomicU8 = AtomicU8::new(0);
+
 static ACTIVE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 type RawCb = unsafe extern "C" fn(fcae_abi::FcaeLogLevel, *const std::ffi::c_char, *mut c_void);
@@ -25,8 +28,10 @@ struct FcaeLogger;
 
 impl log::Log for FcaeLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
+        if let Some(max) = backend_level(metadata.target()) {
+            return max != 0 && level_to_u8(metadata.level()) <= max;
+        }
         let max = MAX_LEVEL.load(Ordering::Relaxed);
-        // Core shims already apply the separately selected route-core gate.
         metadata.target() == fcae_runtime::proxy_cores::CORE_LOG_TARGET
             || level_to_u8(metadata.level()) <= max
     }
@@ -43,6 +48,7 @@ impl log::Log for FcaeLogger {
         let ud = USER_DATA.load(Ordering::SeqCst);
 
         let mut msg = record.args().to_string();
+        if backend_level(record.target()).is_some() { msg = redact_backend(&msg); }
         let limit = if msg.starts_with("[psiphon] {") { 1024 * 1024 } else { MAX_MSG };
         if msg.len() > limit {
             let mut end = limit;
@@ -69,6 +75,36 @@ impl log::Log for FcaeLogger {
     }
 
     fn flush(&self) {}
+}
+
+pub fn set_backend_level(backend: u32, level: u8) {
+    match backend {
+        2 => FIREFOX_LEVEL.store(level.min(4), Ordering::Relaxed),
+        6 => URNETWORK_LEVEL.store(level.min(4), Ordering::Relaxed),
+        _ => {},
+    }
+}
+fn backend_level(target: &str) -> Option<u8> {
+    if target == "fcae_firefox" || target.starts_with("fcae_firefox::")
+        || target == "fcae_firefox_bridge" || target.starts_with("fcae_firefox_bridge::") {
+        Some(FIREFOX_LEVEL.load(Ordering::Relaxed))
+    } else if target == "fcae.urnetwork" || target.starts_with("fcae_bridge_tun2socks::urnetwork") {
+        Some(URNETWORK_LEVEL.load(Ordering::Relaxed))
+    } else { None }
+}
+fn redact_backend(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    let stop = ["authorization", "password", "bearer ", "token", "jwt", "secret",
+        "verification_code", "auth_code", "message=", "message:"]
+        .iter().filter_map(|key| lower.find(key)).min().unwrap_or(message.len());
+    let mut output = message[..stop].split_whitespace().map(|word| {
+        if word.contains('@') || word.contains("eyJ")
+            || word.split(|c: char| !c.is_ascii_hexdigit()).any(|part| part.len() >= 32) {
+            "[redacted]"
+        } else { word }
+    }).collect::<Vec<_>>().join(" ");
+    if stop < message.len() { output.push_str(" [sensitive details omitted]"); }
+    output
 }
 
 fn level_to_u8(l: log::Level) -> u8 {

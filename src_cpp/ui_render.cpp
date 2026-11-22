@@ -73,6 +73,7 @@
 // UI-lifetime audio gate is an embedding hook rather than a public ABI field.
 extern "C" void fcae_sponsor_set_ui_active(bool active);
 extern "C" void fcae_ui_diagnostic(uint32_t event, uint32_t value);
+extern "C" void fcae_backend_set_log_level(uint32_t backend, uint32_t level);
 // A `fcae-ffi` export rather than part of the `fcae-abi` header: what the live
 // cores are listening on, as `core|position|name|protocol|port|scope` records.
 extern "C" uint32_t fcae_live_listeners(char* out, uint32_t capacity);
@@ -485,6 +486,8 @@ static uint64_t config_signature() {
     h = fnv_cstr(h, g_app.firefox_location);
     h = fnv_cstr(h, g_app.firefox_server);
     h = fnv_value(h, g_app.firefox_transport);
+    h = fnv_value(h, g_app.firefox_log);
+    h = fnv_value(h, g_app.urnetwork_log);
     h = fnv_value(h, g_app.ur_socks_port);
     h = fnv_value(h, g_app.ur_http_port);
     h = fnv_value(h, g_app.ur_socks_enabled);
@@ -1220,6 +1223,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "firefox_account_id") snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", val.c_str());
     else if (key == "firefox_location") snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s", val.c_str());
     else if (key == "firefox_server") snprintf(g_app.firefox_server, sizeof(g_app.firefox_server), "%s", val.c_str());
+    else if (key == "firefox_log") g_app.firefox_log = std::max(0, std::min(4, atoi(val.c_str())));
+    else if (key == "urnetwork_log") g_app.urnetwork_log = std::max(0, std::min(4, atoi(val.c_str())));
     else if (key == "firefox_transport") g_app.firefox_transport = atoi(val.c_str());
     else if (key == "tor_socks_port") g_app.tor_socks_port = parse_port(val, g_app.tor_socks_port);
     else if (key == "psiphon_region") snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region), "%s", val.c_str());
@@ -1420,6 +1425,8 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "firefox_account_id=%s\n", g_app.firefox_account_id);
     fprintf(f, "firefox_location=%s\n", g_app.firefox_location);
     fprintf(f, "firefox_server=%s\n", g_app.firefox_server);
+    fprintf(f, "firefox_log=%d\n", g_app.firefox_log);
+    fprintf(f, "urnetwork_log=%d\n", g_app.urnetwork_log);
     fprintf(f, "firefox_transport=%d\n", g_app.firefox_transport);
     fprintf(f, "tor_socks_port=%d\n", g_app.tor_socks_port);
     fprintf(f, "psiphon_region=%s\n", g_app.psiphon_region);
@@ -2034,6 +2041,8 @@ void ui_init() {
                 g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
             }
         }
+        fcae_backend_set_log_level(2, (uint32_t)g_app.firefox_log);
+        fcae_backend_set_log_level(6, (uint32_t)g_app.urnetwork_log);
         // Data paths stay relative to data_dir() so the folder can move
         // between machines; resolve_data_path() anchors them at use.
         bool migrated = make_portable(g_app.config_path, sizeof(g_app.config_path));
@@ -4029,6 +4038,7 @@ static void render_firefox_settings() {
     UiText::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
     static const char* const firefox_transports[] = {"Auto (H3 → H2 → H1)", "HTTP/2", "HTTP/1.1", "HTTP/3"};
     ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 4);
+    backend_log_combo("Firefox log level", 2, g_app.firefox_log);
     ImGui::EndChild();
     if (ImGui::Button("Close")) {
         if (!g_app.firefox_job && !s_firefox_unblock_required) {

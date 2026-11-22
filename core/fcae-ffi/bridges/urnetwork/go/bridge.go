@@ -5,6 +5,7 @@ package main
 /*
 #include <stdlib.h>
 #include <stdint.h>
+extern void fcae_ur_log(uint32_t level, const char *message);
 typedef int (*ur_protect_fn)(int);
 static int ur_invoke_protect(uintptr_t fn, int fd) { return fn ? ((ur_protect_fn)fn)(fd) : -1; }
 */
@@ -188,6 +189,15 @@ func urResult(v any, e error) *C.char {
 	}
 	b, _ := json.Marshal(v)
 	return C.CString(string(b))
+}
+
+//export ur_set_log_level
+func ur_set_log_level(level C.uint32_t) { urSetLogLevel(uint32(level)) }
+
+func urWriteLog(level uint32, message string) {
+	text := C.CString(message)
+	defer C.free(unsafe.Pointer(text))
+	C.fcae_ur_log(C.uint32_t(level), text)
 }
 
 //export ur_free
@@ -475,6 +485,8 @@ func ur_call(raw *C.char) (out *C.char) {
 			return urResult(nil, errors.New("invalid saved URnetwork device identity"))
 		}
 		settings := ur.DefaultDeviceLocalSettings()
+		settings.ClientSettings.Log = urHostLogger{}
+		settings.DisableLogging = false
 		settings.EnableRpc = false
 		settings.AllowProvider = false
 		settings.DefaultOffline = false
@@ -542,6 +554,8 @@ func urTransportValid(s string) bool {
 }
 func urSpace(_ context.Context, upstream string, tun bool) (*ur.NetworkSpace, error) {
 	settings := uc.DefaultClientStrategySettings()
+	settings.Log = urHostLogger{}
+	settings.ConnectSettings.Log = urHostLogger{}
 	// Connect's central egress seam also covers QUIC, DNS and WebRTC sockets.
 	uc.SetEgressInterfaceIndex(0, 0)
 	var iface *net.Interface

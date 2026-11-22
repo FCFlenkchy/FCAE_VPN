@@ -88,6 +88,7 @@ struct AppState {
     int  protocol        = 0;
     // 0 = Aether, 1 = Psiphon, 2 = Firefox (FcaeBackend).
     int  backend         = 0;
+    int firefox_log = 0, urnetwork_log = 0;
     // Ordered additional exits as protocol-list positions (see
     // transport_labels()); >= kCoreTransportBase names a saved core config.
     std::vector<int> chain_transports;

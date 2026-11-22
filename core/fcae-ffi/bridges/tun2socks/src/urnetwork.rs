@@ -16,9 +16,12 @@ use zeroize::Zeroizing;
 
 unsafe extern "C" {
     fn ur_call(request: *const libc::c_char) -> *mut libc::c_char;
+    fn ur_set_log_level(level: u32);
     fn ur_free(value: *mut libc::c_char);
     fn ur_set_protect(callback: usize);
 }
+pub fn set_log_level(level: u32) { unsafe { ur_set_log_level(level.min(4)); } }
+
 pub fn set_protect(cb: Option<unsafe extern "C" fn(libc::c_int) -> libc::c_int>) {
     unsafe {
         ur_set_protect(cb.map(|f| f as usize).unwrap_or(0));
@@ -93,6 +96,7 @@ impl Backend for UrBackend {
                 "URnetwork TUN/chaining requires a SOCKS5 listener".into(),
             ));
         }
+        log::info!(target: "fcae.urnetwork", "[urnetwork] establishing device connection");
         cx.report(FcaeState::Connecting, "Connecting to URnetwork");
         let request = json!({"op":"start", "data_dir":cfg.data_dir.as_deref().unwrap_or("fcae-data"), "socks":socks,"http":http,"proxy":cfg.upstream_proxy.as_ref().map(|p|p.url()).unwrap_or_default(),"tun":true}).to_string();
         // The blocking result owns cleanup even if startup's async future is
@@ -137,6 +141,7 @@ impl Backend for UrBackend {
             }
             tokio::select! { _=cx.cancel.cancelled()=>return Err(CoreError::StartFailed("URnetwork startup cancelled".into())), _=tokio::time::sleep(Duration::from_millis(250))=>{} }
         }
+        log::info!(target: "fcae.urnetwork", "[urnetwork] device connection ready");
         Ok(Box::new(handle))
     }
 }
@@ -245,11 +250,17 @@ pub fn submit(request: &str) -> u64 {
         }
         j.insert(id, json!({"status":"pending"}).to_string());
     }
+    let operation = v.get("op").and_then(Value::as_str).unwrap_or_default().to_owned();
+    log::debug!(target: "fcae.urnetwork", "[urnetwork] account operation queued: {operation}");
     let request = Zeroizing::new(request.to_owned());
     if std::thread::Builder::new()
         .name("urnetwork-account".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(|| call(&request));
+            match &result {
+                Ok(Ok(_)) => log::debug!(target: "fcae.urnetwork", "[urnetwork] account operation completed: {operation}"),
+                _ => log::warn!(target: "fcae.urnetwork", "[urnetwork] account operation failed: {operation}"),
+            }
             let value = match result {
                 Ok(Ok(v)) => json!({"status":"done","result":v}),
                 Ok(Err(e)) => json!({"status":"error","error":e}),

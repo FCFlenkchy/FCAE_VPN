@@ -1893,6 +1893,28 @@ pub unsafe extern "C" fn fcae_firefox_relay_get(data_dir: *const c_char, out: *m
     { let _ = (data_dir, out, cap); u32::MAX }
 }
 
+/// Set a live backend log gate: backend 2 = Firefox, 6 = URnetwork;
+/// level 0 = silent, 1 = error, 2 = warning, 3 = info, 4 = debug.
+#[no_mangle]
+pub extern "C" fn fcae_backend_set_log_level(backend: u32, level: u32) {
+    if !matches!(backend, 2 | 6) || level > 4 { return; }
+    logger::set_backend_level(backend, level as u8);
+    #[cfg(feature = "urnetwork")]
+    if backend == 6 { fcae_bridge_tun2socks::urnetwork::set_log_level(level); }
+}
+
+// The Go adapter forwards only bounded, sanitized messages; never retain its pointer.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_ur_log(level: u32, message: *const c_char) {
+    if message.is_null() || !(1..=4).contains(&level) { return; }
+    guard_value("fcae_ur_log", (), || {
+        let text = CStr::from_ptr(message).to_string_lossy();
+        let severity = match level { 1 => log::Level::Error, 2 => log::Level::Warn,
+            3 => log::Level::Info, _ => log::Level::Debug };
+        log::log!(target: "fcae.urnetwork", severity, "[urnetwork] {}", text);
+    });
+}
+
 /// Submit a URnetwork account operation JSON request. Returns an opaque job ID,
 /// or 0 for an invalid request, a busy queue, or unavailable feature. Secrets are consumed by the
 /// account worker and are never returned by `fcae_urnetwork_job_poll`.
