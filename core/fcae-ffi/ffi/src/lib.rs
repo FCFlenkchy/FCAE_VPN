@@ -898,7 +898,7 @@ pub unsafe extern "C" fn fcae_start_with_app_routing(cfg:*const FcaeConfig,routi
             fcae_runtime::desktop_flow_routing::parse(&value)?
         };
         if policy.is_some(){
-            if policy.as_ref().is_some_and(|policy|policy.provider!="macos_ne") && !matches!(parsed.tun.engine,config::TunEngine::SingBox|config::TunEngine::Mihomo){return Err(CoreError::InvalidConfig("Select sing-box or Mihomo TUN for per-app split tunneling".into()));}
+            if policy.as_ref().is_some_and(|policy|policy.provider!="macos_ne") && !matches!(parsed.tun.engine,config::TunEngine::SingBox|config::TunEngine::Mihomo|config::TunEngine::MetaSingTun){return Err(CoreError::InvalidConfig("Select sing-box, Mihomo or sing-tun for per-app split tunneling".into()));}
 
             let provider_available=if policy.as_ref().is_some_and(|policy|policy.provider=="macos_ne"){fcae_app_routing_macos_ne_available()}else{fcae_app_routing_flow_available()};
             if !provider_available{return Err(CoreError::BackendUnavailable("requested desktop application routing provider"));}
@@ -1363,7 +1363,7 @@ pub unsafe extern "C" fn fcae_tun_engine_info(index: u32, out: *mut FcaeTunEngin
             6 => {
                 let compiled=cfg!(feature="sing-tun");
                 let supported=cfg!(any(windows,target_os="linux",target_os="macos",target_os="android",target_os="ios")) && fcae_bridge_tun2socks::is_supported();
-                (FCAE_TUN_ENGINE_METACUBEX_SING_TUN,"metacubex-sing-tun","sing-tun (MetaCubeX)",compiled&&supported,if !compiled{"not compiled into this build"}else if !supported{"native sing-tun is unavailable on this target"}else{""})
+                (FCAE_TUN_ENGINE_METACUBEX_SING_TUN,"metacubex-sing-tun","sing-tun",compiled&&supported,if !compiled{"not compiled into this build"}else if !supported{"native sing-tun is unavailable on this target"}else{""})
             },
             3|4|5 => {
                 let (id,name,compiled)=match index{3=>("singbox","sing-box",cfg!(feature="singbox")),4=>("xray","Xray",cfg!(feature="xray")),_=>("mihomo","Mihomo",cfg!(feature="mihomo"))};
@@ -2407,5 +2407,15 @@ mod tun_provider_tests {
         assert!(matches!(engines.establish_via_provider(), Err(CoreError::Internal(_))));
         assert_eq!(engines.t2s.android_fd(), None);
         engines.set_fd_provider(None);
+    }
+}
+
+// Internal static-link callback, not part of the public C ABI.
+#[cfg(windows)]
+#[no_mangle]
+pub extern "system" fn fcae_wintun_load_library() -> *mut std::ffi::c_void {
+    match fcae_runtime::windows_dll::acquire_wintun_module() {
+        Ok(module)=>module.cast(),
+        Err(error)=>{log::error!("[zeptun] shared Wintun loader failed: {error}");std::ptr::null_mut()}
     }
 }

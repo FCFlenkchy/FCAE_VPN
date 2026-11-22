@@ -7,5 +7,5 @@
         // Four levels up: bridges/zeptun/zig -> bridges -> fcae-ffi -> core.
         .zeptun = .{ .path = "../../../../zeptun" },
     },
-    .paths = .{ "build.zig", "build.zig.zon" },
+    .paths = .{ "build.zig", "build.zig.zon", "shared_wintun.py" },
 }

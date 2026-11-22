@@ -340,15 +340,18 @@ fn configuration(
     }
     match cfg.tun.engine {
         TunEngine::MetaSingTun => {
-            if policy.is_some() {
-                return Err(CoreError::InvalidConfig(
-                    "Select sing-box or Mihomo TUN for desktop per-app routing".into(),
-                ));
+            let mut value = json!({"name":device,"mtu":cfg.tun.mtu,"addresses":addresses,"socks":socks.to_string(),"udp":udp});
+            if let Some(policy) = policy {
+                let mut routing = policy.config(cfg, socks, device, udp)?;
+                routing["inbounds"] = json!([]);
+                value["routing"] = routing;
+                // DIRECT UDP is supported even if the VPN exit is TCP-only.
+                // The native router still rejects VPN-required UDP.
+                value["udp"] = json!(true);
             }
-            Ok(
-                json!({"name":device,"mtu":cfg.tun.mtu,"addresses":addresses,"socks":socks.to_string(),"udp":udp}),
-            )
+            Ok(value)
         }
+
         TunEngine::Xray => {
             if policy.is_some() {
                 return Err(CoreError::InvalidConfig(

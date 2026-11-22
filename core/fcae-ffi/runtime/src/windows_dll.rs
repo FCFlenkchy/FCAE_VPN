@@ -20,7 +20,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{ConvertInterfaceGuidToLuid
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::System::LibraryLoader::{
-    AddDllDirectory, GetProcAddress, LoadLibraryExW, SetDefaultDllDirectories,
+    AddDllDirectory, GetModuleFileNameW, GetProcAddress, LoadLibraryExW, SetDefaultDllDirectories,
     LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
@@ -482,4 +482,20 @@ mod tests {
         drop(verified(&path, b"right").unwrap());
         std::fs::remove_file(path).unwrap();
     }
+}
+
+/// A separately refcounted handle to the exact image the host already loaded.
+/// Zeptun releases its reference; the host retains its own for the process.
+pub fn acquire_wintun_module() -> Result<HMODULE> {
+    ensure_wintun(crate::wintun::wintun_bytes())?;
+    let library=WINTUN.get().and_then(|result|result.as_ref().ok())
+        .ok_or_else(||CoreError::Internal("shared Wintun module is unavailable".into()))?;
+    let mut path=vec![0u16;32768];
+    let length=unsafe{GetModuleFileNameW(library.module as HMODULE,path.as_mut_ptr(),path.len() as u32)};
+    if length==0 || length as usize >= path.len() {
+        return Err(CoreError::Internal(format!("cannot resolve shared Wintun image: {}",std::io::Error::last_os_error())));
+    }
+    let module=unsafe{LoadLibraryExW(path.as_ptr(),std::ptr::null_mut(),LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32)};
+    if module.is_null() {return Err(CoreError::Internal(format!("cannot acquire shared Wintun image: {}",std::io::Error::last_os_error())));}
+    Ok(module)
 }

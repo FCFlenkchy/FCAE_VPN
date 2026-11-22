@@ -24,8 +24,17 @@ pub fn build(b: *std.Build) void {
     const zeptun = b.dependency("zeptun", .{ .target = target, .optimize = optimize });
     const engine = zeptun.module("zeptun");
     engine.link_libc = true;
+    // Share the host DLL image instead of loading an independent Wintun copy.
+    const patched = b.addSystemCommand(&.{"python3"});
+    patched.addFileArg(b.path("shared_wintun.py"));
+    patched.addFileArg(zeptun.path("src/device/wintun.zig"));
+    const loader = patched.addOutputFileArg("wintun.zig");
+    const sources = b.addWriteFiles();
+    _ = sources.addCopyDirectory(zeptun.path("src"), "src", .{ .exclude_extensions = &.{"device/wintun.zig"} });
+    _ = sources.addCopyFile(loader, "src/device/wintun.zig");
+    engine.root_source_file = sources.getDirectory().path(b, "src/root.zig");
     const ffi = b.createModule(.{
-        .root_source_file = zeptun.path("src/ffi/ffi.zig"),
+        .root_source_file = sources.getDirectory().path(b, "src/ffi/ffi.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

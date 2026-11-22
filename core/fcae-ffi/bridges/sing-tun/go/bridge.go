@@ -44,6 +44,7 @@ type mtunCore struct {
 	device  tun.Tun
 	stack   tun.Stack
 	handler *mtunHandler
+	routing mtunAppRouter
 }
 
 func (c *mtunCore) close() {
@@ -58,6 +59,9 @@ func (c *mtunCore) close() {
 	if c.stack != nil {
 		_ = c.stack.Close()
 	}
+	if c.routing != nil {
+		_ = c.routing.Close()
+	}
 }
 
 var mtunMu sync.Mutex
@@ -71,12 +75,13 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	}
 	*handle = 0
 	var cfg struct {
-		Name      string   `json:"name"`
-		MTU       uint32   `json:"mtu"`
-		Addresses []string `json:"addresses"`
-		Socks     string   `json:"socks"`
-		UDP       bool     `json:"udp"`
-		FD        *int     `json:"fd"`
+		Name      string          `json:"name"`
+		MTU       uint32          `json:"mtu"`
+		Addresses []string        `json:"addresses"`
+		Socks     string          `json:"socks"`
+		UDP       bool            `json:"udp"`
+		FD        *int            `json:"fd"`
+		Routing   json.RawMessage `json:"routing"`
 	}
 	if err := json.Unmarshal([]byte(C.GoString(text)), &cfg); err != nil {
 		return C.CString(err.Error())
@@ -121,6 +126,15 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 			core.close()
 		}
 	}()
+	if len(cfg.Routing) > 0 && string(cfg.Routing) != "null" {
+		if mobile {
+			return C.CString("desktop app routing is not available on a mobile descriptor")
+		}
+		core.routing, err = mtunNewAppRouter(ctx, cfg.Routing)
+		if err != nil {
+			return C.CString("sing-tun app router: " + err.Error())
+		}
+	}
 	if mobile {
 		fd := int(C.mtun_dup_fd(C.int(*cfg.FD)))
 		if fd < 0 {
@@ -135,7 +149,7 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 		}
 		return C.CString("sing-tun interface: " + err.Error())
 	}
-	handler := &mtunHandler{ctx: ctx, socks: M.SocksaddrFromNetIP(socksAddr), udp: cfg.UDP, active: make(map[io.Closer]struct{})}
+	handler := &mtunHandler{ctx: ctx, socks: M.SocksaddrFromNetIP(socksAddr), udp: cfg.UDP, active: make(map[io.Closer]struct{}), routing: core.routing}
 	handler.nat = udpnat.New[netip.AddrPort](120, handler)
 	core.handler = handler
 	core.stack, err = tun.NewStack("gvisor", tun.StackOptions{Context: ctx, Tun: core.device, TunOptions: options, Handler: handler, Logger: logger.NOP(), UDPTimeout: 120 * time.Second, ICMPTimeout: 10 * time.Second})
@@ -194,13 +208,20 @@ func mtun_running(id C.uint64_t) C.int {
 //export mtun_string_free
 func mtun_string_free(message *C.char) { C.free(unsafe.Pointer(message)) }
 
+type mtunAppRouter interface {
+	RouteTCP(context.Context, net.Conn, M.Metadata) error
+	RouteUDP(context.Context, N.PacketConn, M.Metadata) error
+	Close() error
+}
+
 type mtunHandler struct {
-	ctx    context.Context
-	socks  M.Socksaddr
-	udp    bool
-	nat    *udpnat.Service[netip.AddrPort]
-	mu     sync.Mutex
-	active map[io.Closer]struct{}
+	routing mtunAppRouter
+	ctx     context.Context
+	socks   M.Socksaddr
+	udp     bool
+	nat     *udpnat.Service[netip.AddrPort]
+	mu      sync.Mutex
+	active  map[io.Closer]struct{}
 }
 
 func (h *mtunHandler) add(c io.Closer) bool {
@@ -237,6 +258,9 @@ func (h *mtunHandler) NewConnection(_ context.Context, conn net.Conn, metadata M
 		return net.ErrClosed
 	}
 	defer func() { h.remove(conn); _ = conn.Close() }()
+	if h.routing != nil {
+		return h.routing.RouteTCP(h.ctx, conn, metadata)
+	}
 	dialer := &mtunDialer{handler: h}
 	client := socks.NewClient(dialer, h.socks, socks.Version5, "", "")
 	remote, err := client.DialContext(h.ctx, "tcp", metadata.Destination)
@@ -263,6 +287,9 @@ func (h *mtunHandler) NewPacketConnection(_ context.Context, conn N.PacketConn, 
 		return net.ErrClosed
 	}
 	defer func() { h.remove(conn); _ = conn.Close() }()
+	if h.routing != nil {
+		return h.routing.RouteUDP(h.ctx, conn, metadata)
+	}
 	dialer := &mtunDialer{handler: h}
 	client := socks.NewClient(dialer, h.socks, socks.Version5, "", "")
 	remote, err := client.ListenPacket(h.ctx, metadata.Destination)

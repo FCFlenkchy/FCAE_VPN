@@ -342,6 +342,11 @@ fn assemble(
             .join("go/bridge.go");
         fcae_build::go::track_sources(shim.parent().expect("shim directory"));
         copy(&shim, &module.join(name));
+        if dir == "sing-tun" {
+            for file in ["app_routing.go", "app_routing_stub.go"] {
+                copy(&shim.with_file_name(file), &module.join(format!("sing_tun_{file}")));
+            }
+        }
         if dir == "singbox" {
             copy(
                 &shim.with_file_name("cronet_ios.c"),

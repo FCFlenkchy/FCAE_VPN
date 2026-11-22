@@ -178,20 +178,20 @@ impl Policy {
         if text.len() > 65536 {
             return Err(invalid("destination policy exceeds 64 KiB"));
         }
-        let value: Self = serde_json::from_str(text)
+        let mut value: Self = serde_json::from_str(text)
             .map_err(|error| invalid(format!("destination policy: {error}")))?;
         value.validate()?;
+        // Old saved Off policies with rules become the default exclude policy.
+        // Empty policies remain inactive regardless of the selected direction.
+        if value.mode == 0 && !value.rules.is_empty() {
+            value.mode = 2;
+        }
         Ok(value)
     }
     pub fn validate(&self) -> Result<()> {
         if self.schema != 1 || self.mode > 2 || self.rules.len() > 256 {
             return Err(invalid(
                 "invalid destination policy schema, mode or rule count",
-            ));
-        }
-        if self.mode == 1 && self.rules.is_empty() {
-            return Err(invalid(
-                "include mode requires at least one destination rule",
             ));
         }
         let mut count = 0;
@@ -208,7 +208,7 @@ impl Policy {
         Ok(())
     }
     pub fn active(&self) -> bool {
-        self.mode != 0 && !(self.mode == 2 && self.rules.is_empty())
+        self.mode != 0 && !self.rules.is_empty()
     }
     pub fn config(&self, socks: SocketAddr, listen: u16, udp: bool) -> Result<Value> {
         self.validate()?;
@@ -376,10 +376,16 @@ pub fn apply_mihomo(
         return Ok(());
     };
     policy.validate()?;
-    let mut rules: Vec<String> = value["rules"].as_array().into_iter().flatten()
+    let mut rules: Vec<String> = value["rules"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(Value::as_str)
-        .filter(|rule| rule.starts_with("PROCESS-PATH-REGEX,") && rule.ends_with(",fcae-tun-direct"))
-        .map(str::to_owned).collect();
+        .filter(|rule| {
+            rule.starts_with("PROCESS-PATH-REGEX,") && rule.ends_with(",fcae-tun-direct")
+        })
+        .map(str::to_owned)
+        .collect();
     let mut push = |condition: String, exit: bool| {
         if exit && !udp {
             rules.push(if condition == "MATCH" {

@@ -1587,7 +1587,7 @@ static bool load_config_from(const std::string& path) {
     // The file is the source of truth for the saved core configs, exactly as it
     // is for every other setting.
     g_app.core_configs.clear();
-    g_app.destination_mode=0;
+    g_app.destination_mode=2;
     g_app.destination_rows[0]=0;
     g_app.ios_app_draft_ids.clear();
     g_app.ios_app_draft_mode = 0;

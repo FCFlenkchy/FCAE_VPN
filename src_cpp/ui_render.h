@@ -247,12 +247,18 @@ struct AppState {
     char access_email[128] = {};
     // Inline routing rules (comma- or newline-separated)
     char routes_inline[2048] = {};
-    int destination_mode = 0;
+    int destination_mode = 2;
     // Rows are kind|protocol|ports|target, with no control characters.
     char destination_rows[65536] = {};
     std::string destination_envelope;
+    bool destination_has_rules() const {
+        for (const char* p=destination_rows; *p; ++p) if (*p!='\n' && *p!='\r') return true;
+        return false;
+    }
     std::string destination_policy_json() const {
-        std::string out="{\"schema\":1,\"mode\":"+std::to_string(destination_mode)+",\"rules\":[";
+        // Migrate the former Off value: rule count now controls activation.
+        const int policy_mode=destination_mode==1?1:2;
+        std::string out="{\"schema\":1,\"mode\":"+std::to_string(policy_mode)+",\"rules\":[";
         std::string rows=destination_rows; size_t start=0; bool first=true;
         while(start<rows.size()) {
             size_t end=rows.find('\n',start); if(end==std::string::npos)end=rows.size();
@@ -266,7 +272,7 @@ struct AppState {
         return out+"]}";
     }
     const char* routing_document() {
-        if(destination_mode==0)return routes_inline[0]?routes_inline:nullptr;
+        if(mode!=1 || !destination_has_rules())return routes_inline[0]?routes_inline:nullptr;
         destination_envelope="FCAE-DESTINATIONS/1\n{\"destinations\":"+destination_policy_json()+",\"legacy\":\"";
         core_json_escape_into(destination_envelope,routes_inline);destination_envelope+="\"}";
         return destination_envelope.c_str();

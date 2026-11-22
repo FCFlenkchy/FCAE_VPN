@@ -42,6 +42,8 @@ fn main() {
         return;
     }
 
+    fcae_build::rerun_if_changed(zig_build_dir().join("build.zig"));
+    fcae_build::rerun_if_changed(zig_build_dir().join("shared_wintun.py"));
     let submodule = fcae_build::repo_root().join("core/zeptun");
     let header = submodule.join("include/zeptun.h");
     if !header.is_file() {
@@ -106,7 +108,9 @@ fn build_archive(submodule: &Path, target: Target) {
         _ => return,
     };
     if std::env::var_os("FCAE_ZEPTUN_NO_BUILD").is_some() {
-        fcae_build::note("fcae-bridge-zeptun: FCAE_ZEPTUN_NO_BUILD is set — not building the archive");
+        fcae_build::note(
+            "fcae-bridge-zeptun: FCAE_ZEPTUN_NO_BUILD is set — not building the archive",
+        );
         return;
     }
     let Some(zig) = zig_binary() else {
@@ -219,7 +223,8 @@ fn resolve_zeptun_archive(lib_dir: &Path) -> PathBuf {
 fn isolate_static_archive(archive: &Path) -> PathBuf {
     let dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo always sets OUT_DIR"))
         .join("zeptun_static");
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("cannot create {}: {e}", dir.display()));
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("cannot create {}: {e}", dir.display()));
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let _ = std::fs::remove_file(entry.path());

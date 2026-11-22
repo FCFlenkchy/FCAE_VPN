@@ -19,14 +19,14 @@ inline void destination_routing_ui() {
     static const char* protocols[]={"TCP + UDP","TCP","UDP"};
     static const char* kind_keys[]={"ip","domain","port"};
     static const char* protocol_keys[]={"both","tcp","udp"};
-    static const char* modes[]={"Off","Include matches in VPN","Exclude matches from VPN"};
+    static const char* modes[]={"Include matches in TUN","Exclude matches from TUN"};
     const bool available=fcae_destination_routing_available();
     if(!available)ImGui::TextDisabled("Destination routing unavailable in this build.");
     ImGui::BeginChild("##destination_body",ImVec2(0,-ImGui::GetFrameHeightWithSpacing()),ImGuiChildFlags_None);
     ImGui::BeginDisabled(!available);
-    int mode=g_app.destination_mode;
-    if(ImGui::Combo("Mode",&mode,modes,3)) {
-        int previous=g_app.destination_mode;g_app.destination_mode=mode;
+    int mode=g_app.destination_mode==1?0:1;
+    if(ImGui::Combo("Mode",&mode,modes,2)) {
+        int previous=g_app.destination_mode;g_app.destination_mode=mode+1;
         if(fcae_destination_rules_validate(g_app.destination_policy_json().c_str(),error,sizeof(error))!=FCAE_OK)g_app.destination_mode=previous;
     }
     ImGui::Separator();
@@ -73,7 +73,6 @@ inline void destination_routing_ui() {
         ImGui::SameLine();
         if(ImGui::SmallButton("Remove")) {
             auto remaining=rows.substr(0,start)+(end<rows.size()?rows.substr(end+1):"");
-            if(remaining.empty())g_app.destination_mode=0;
             snprintf(g_app.destination_rows,sizeof(g_app.destination_rows),"%s",remaining.c_str());
             editing=-1;editing_row.clear();target[0]=ports[0]=error[0]=0;
         }
