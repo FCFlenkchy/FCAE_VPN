@@ -40,10 +40,15 @@ import (
 	"unsafe"
 
 	box "github.com/sagernet/sing-box"
+	"github.com/sagernet/sing-box/adapter"
+	sbendpoint "github.com/sagernet/sing-box/adapter/endpoint"
+	sbinbound "github.com/sagernet/sing-box/adapter/inbound"
+	sboutbound "github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/include"
 	sblog "github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/route"
 	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/service"
 )
@@ -65,6 +70,7 @@ const (
 // refused with "a core is already running", so instances are kept in a registry
 // and every entry point carries the handle a start handed back.
 type sbCore struct {
+	ctx    context.Context
 	box    *box.Box
 	cancel context.CancelFunc
 	// Nil only if the tracker could not be attached; the core then reports no
@@ -232,7 +238,7 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 		_ = created.Close()
 		return C.CString("sing-box: " + err.Error())
 	}
-	core := &sbCore{box: created, cancel: cancel, traffic: traffic, listeners: sbInbounds(text), label: sbFlavor(text)}
+	core := &sbCore{ctx: ctx, box: created, cancel: cancel, traffic: traffic, listeners: sbInbounds(text), label: sbFlavor(text)}
 	sbMu.Lock()
 	sbNextID++
 	id := sbNextID
@@ -251,6 +257,7 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 func sb_stop(id C.uint64_t) {
 	sbMu.Lock()
 	core := sbCores[uint64(id)]
+	sbCloseTunLocked(uint64(id))
 	delete(sbCores, uint64(id))
 	sbMu.Unlock()
 	if core == nil {
@@ -267,6 +274,7 @@ func sb_stop(id C.uint64_t) {
 //export sb_stop_all
 func sb_stop_all() {
 	sbMu.Lock()
+	sbCloseTunLocked(0)
 	cores := sbCores
 	sbCores = make(map[uint64]*sbCore)
 	sbMu.Unlock()
@@ -391,4 +399,148 @@ func sbEmit(level int, text string) {
 	msg := C.CString(strings.TrimRight(text, "\n"))
 	defer C.free(unsafe.Pointer(msg))
 	C.sb_invoke_log(fn, C.int(level), msg)
+}
+
+// Attached TUN components use the existing box's service context and logging,
+// but a private routing/outbound namespace. No proxy-listener rules are changed.
+type sbTunAttachment struct {
+	parent uint64
+	scope  *adapter.Scope
+}
+
+var sbTuns = make(map[uint64]sbTunAttachment)
+
+func sbCloseTunLocked(parent uint64) {
+	for id, tun := range sbTuns {
+		if parent == 0 || tun.parent == parent {
+			delete(sbTuns, id)
+			_ = tun.scope.Close()
+		}
+	}
+}
+
+//export sb_tun_start
+func sb_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
+	if text == nil || handle == nil {
+		return C.CString("missing sing-box TUN arguments")
+	}
+	*handle = 0
+	sbMu.Lock()
+	// Deterministic selection also works when this core is an intermediate
+	// chain hop: the private TUN exit still targets the final session SOCKS.
+	var parent uint64
+	for id := range sbCores {
+		if parent == 0 || id < parent {
+			parent = id
+		}
+	}
+	if parent == 0 {
+		sbMu.Unlock()
+		return sb_start(text, handle)
+	}
+	defer sbMu.Unlock()
+	base := sbCores[parent]
+	ctx := service.ExtendContext(base.ctx)
+	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(C.GoString(text)))
+	if err != nil {
+		return C.CString("sing-box TUN: " + err.Error())
+	}
+	if len(options.Inbounds) != 1 || options.Inbounds[0].Type != "tun" || options.Route == nil {
+		return C.CString("invalid sing-box TUN attachment")
+	}
+	logger := base.box.LogFactory().NewLogger("fcae-tun")
+	scope := adapter.NewScope(ctx, logger)
+	owned := false
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = C.CString(fmt.Sprintf("sing-box TUN panic: %v", failure))
+		}
+		if !owned {
+			_ = scope.Close()
+		}
+	}()
+	ctx = scope.Context()
+	endpoint := sbendpoint.NewManager(service.FromContext[adapter.EndpointRegistry](ctx))
+	inbound := sbinbound.NewManager(service.FromContext[adapter.InboundRegistry](ctx), endpoint)
+	outbound := sboutbound.NewManager(service.FromContext[adapter.OutboundRegistry](ctx), endpoint, options.Route.Final)
+	service.MustRegister[adapter.EndpointManager](ctx, endpoint)
+	service.MustRegister[adapter.InboundManager](ctx, inbound)
+	service.MustRegister[adapter.OutboundManager](ctx, outbound)
+	// A private connection manager makes detach close only captured TUN flows.
+	connection := route.NewConnectionManager(ctx, logger)
+	service.MustRegister[adapter.ConnectionManager](ctx, connection)
+	dnsOptions := option.DNSOptions{}
+	if options.DNS != nil {
+		dnsOptions = *options.DNS
+	}
+	network, err := route.NewNetworkManager(ctx, logger, *options.Route, dnsOptions)
+	if err != nil {
+		return C.CString("sing-box TUN network: " + err.Error())
+	}
+	service.MustRegister[adapter.NetworkManager](ctx, network)
+	router := route.NewRouter(ctx, base.box.LogFactory(), *options.Route, dnsOptions)
+	service.MustRegister[adapter.Router](ctx, router)
+	if err = router.Initialize(options.Route.Rules, options.Route.RuleSet); err != nil {
+		return C.CString("sing-box TUN rules: " + err.Error())
+	}
+	if base.traffic != nil {
+		router.AppendTracker(base.traffic)
+	}
+	for _, o := range options.Outbounds {
+		if err = outbound.Create(ctx, router, logger, o.Tag, o.Type, o.Options); err != nil {
+			return C.CString("sing-box TUN outbound: " + err.Error())
+		}
+	}
+	for _, i := range options.Inbounds {
+		if err = inbound.Create(ctx, router, logger, i.Tag, i.Type, i.Options); err != nil {
+			return C.CString("sing-box TUN inbound: " + err.Error())
+		}
+	}
+	components := []struct {
+		name      string
+		component adapter.Lifecycle
+	}{{"network", network}, {"connection", connection}, {"outbound", outbound}, {"router", router}, {"inbound", inbound}}
+	for _, stage := range adapter.ListStartStages {
+		for _, component := range components {
+			if err = scope.Start(component.name, component.component, stage); err != nil {
+				return C.CString("sing-box TUN start: " + err.Error())
+			}
+		}
+	}
+	sbNextID++
+	id := sbNextID
+	sbTuns[id] = sbTunAttachment{parent, scope}
+	owned = true
+	*handle = C.uint64_t(id)
+	return nil
+}
+
+//export sb_tun_stop
+func sb_tun_stop(id C.uint64_t) {
+	sbMu.Lock()
+	tun, attached := sbTuns[uint64(id)]
+	if attached {
+		delete(sbTuns, uint64(id))
+		_ = tun.scope.Close()
+		sbMu.Unlock()
+		return
+	}
+	sbMu.Unlock()
+	sb_stop(id)
+}
+
+//export sb_tun_running
+func sb_tun_running(id C.uint64_t) C.int {
+	sbMu.Lock()
+	tun, attached := sbTuns[uint64(id)]
+	if attached {
+		_, alive := sbCores[tun.parent]
+		sbMu.Unlock()
+		if alive {
+			return 1
+		}
+		return 0
+	}
+	sbMu.Unlock()
+	return sb_running(id)
 }

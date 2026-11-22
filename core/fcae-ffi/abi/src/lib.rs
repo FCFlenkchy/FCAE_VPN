@@ -48,6 +48,9 @@ pub const FCAE_CORE_LISTENER_HTTP: u32 = 2;
 pub const FCAE_TUN_ENGINE_TUN2SOCKS: u64 = 0;
 pub const FCAE_TUN_ENGINE_ZEPTUN: u64 = 1;
 pub const FCAE_TUN_ENGINE_HEV: u64 = 2;
+pub const FCAE_TUN_ENGINE_SINGBOX: u64 = 3;
+pub const FCAE_TUN_ENGINE_XRAY: u64 = 4;
+pub const FCAE_TUN_ENGINE_MIHOMO: u64 = 5;
 
 // Enumerations
 

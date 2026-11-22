@@ -16,15 +16,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"sync"
 	"unsafe"
 
+	"github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/config"
 	MC "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/metacubex/mihomo/listener"
 	mlog "github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/rules/common"
 	"github.com/metacubex/mihomo/tunnel"
 	"github.com/metacubex/mihomo/tunnel/statistic"
 )
@@ -33,6 +36,23 @@ var mihomoMu sync.Mutex
 var mihomoID uint64
 var mihomoNext uint64
 var mihomoHome string
+var mihomoTun bool
+var mihomoBase *config.Config
+var mihomoOverlayID uint64
+var mihomoOverlayMode tunnel.TunnelMode
+var mihomoOverlayProcess process.FindProcessMode
+
+// Delegate every rule method except matching: TUN policy must never intercept
+// the SOCKS listener used by this session's existing protocol/chain.
+type mihomoTunRule struct{ MC.Rule }
+
+func (r mihomoTunRule) Match(m *MC.Metadata, h MC.RuleMatchHelper) (bool, string) {
+	if m.Type != MC.TUN {
+		return false, ""
+	}
+	return r.Rule.Match(m, h)
+}
+
 var mihomoInbounds []coreListener
 var mihomoLogMu sync.RWMutex
 var mihomoSink C.mihomo_log_fn
@@ -76,6 +96,9 @@ func mihomo_set_home(path *C.char) *C.char {
 	mihomoMu.Lock()
 	defer mihomoMu.Unlock()
 	home := C.GoString(path)
+	if mihomoID != 0 && mihomoHome == home {
+		return nil
+	}
 	if mihomoID != 0 || (mihomoHome != "" && mihomoHome != home) {
 		return C.CString("Mihomo home is already owned by this process")
 	}
@@ -140,19 +163,33 @@ func mihomo_check(text *C.char) (result *C.char) {
 }
 
 //export mihomo_start
-func mihomo_start(text *C.char, handle *C.uint64_t) (result *C.char) {
+func mihomo_start(text *C.char, handle *C.uint64_t) *C.char { return mihomoStart(text, handle, false) }
+
+//export mihomo_tun_start
+func mihomo_tun_start(text *C.char, handle *C.uint64_t) *C.char {
+	return mihomoStart(text, handle, true)
+}
+
+func mihomoStart(text *C.char, handle *C.uint64_t, allowTun bool) (result *C.char) {
 	mihomoMu.Lock()
 	defer mihomoMu.Unlock()
 	if handle == nil || text == nil {
 		return C.CString("invalid Mihomo start arguments")
 	}
 	*handle = 0
-	if mihomoID != 0 {
-		return C.CString("Mihomo is already running: this in-process core supports one instance; repeated Mihomo hops are not supported")
+	if mihomoID != 0 && !allowTun {
+		return C.CString("Mihomo is already running: repeated Mihomo protocol hops are not supported")
+	}
+	if allowTun && mihomoOverlayID != 0 {
+		return C.CString("Mihomo TUN is already attached")
 	}
 	defer func() {
 		if failure := recover(); failure != nil {
-			mihomoCleanup()
+			if mihomoID != 0 && allowTun {
+				mihomoDetachTun()
+			} else {
+				mihomoCleanup()
+			}
 			result = C.CString(fmt.Sprintf("Mihomo start panic: %v", failure))
 		}
 	}()
@@ -162,11 +199,47 @@ func mihomo_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 		return C.CString(err.Error())
 	}
 	// Never create a controller or change the host's network configuration.
-	parsed.General.Tun.Enable = false
+	parsed.General.Tun.Enable = allowTun
+	if allowTun {
+		var extra struct {
+			Addresses []string `json:"fcae-tun-addresses"`
+		}
+		if err = json.Unmarshal(data, &extra); err != nil {
+			return C.CString(err.Error())
+		}
+		parsed.General.Tun.Inet4Address = nil
+		parsed.General.Tun.Inet6Address = nil
+		for _, text := range extra.Addresses {
+			prefix, e := netip.ParsePrefix(text)
+			if e != nil {
+				return C.CString(e.Error())
+			}
+			if prefix.Addr().Is4() {
+				parsed.General.Tun.Inet4Address = append(parsed.General.Tun.Inet4Address, prefix)
+			} else {
+				parsed.General.Tun.Inet6Address = append(parsed.General.Tun.Inet6Address, prefix)
+			}
+		}
+		if len(parsed.General.Tun.Inet4Address) != 1 {
+			return C.CString("Mihomo TUN requires one IPv4 address")
+		}
+		parsed.General.Tun.AutoRoute = false
+		parsed.General.Tun.AutoRedirect = false
+	}
+	if allowTun && mihomoID != 0 {
+		return mihomoAttachTun(parsed, handle)
+	}
 	parsed.IPTables.Enable = false
 	parsed.NTP.Enable = false
 	parsed.NTP.WriteToSystem = false
 	executor.ApplyConfig(parsed, true)
+	if allowTun {
+		actual := listener.GetTunConf()
+		if !actual.Enable || actual.Device != parsed.General.Tun.Device {
+			mihomoCleanup()
+			return C.CString("Mihomo TUN could not start its requested adapter")
+		}
+	}
 	if tunnel.Status() != tunnel.Running {
 		mihomoCleanup()
 		return C.CString("Mihomo did not reach running state")
@@ -198,11 +271,16 @@ func mihomo_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	statistic.DefaultManager.ResetStatistic()
 	mihomoNext++
 	mihomoID = mihomoNext
+	mihomoTun = allowTun
+	mihomoBase = parsed
 	*handle = C.uint64_t(mihomoID)
 	return nil
 }
 
 func mihomoCleanup() {
+	mihomoDetachTun()
+	mihomoBase = nil
+	mihomoTun = false
 	tunnel.OnSuspend()
 	listener.Cleanup()
 	statistic.DefaultManager.Range(func(connection statistic.Tracker) bool { _ = connection.Close(); return true })
@@ -249,7 +327,7 @@ func mihomo_stop_all() {
 func mihomo_running(id C.uint64_t) C.int {
 	mihomoMu.Lock()
 	defer mihomoMu.Unlock()
-	if mihomoID != 0 && mihomoID == uint64(id) && tunnel.Status() == tunnel.Running {
+	if mihomoID != 0 && mihomoID == uint64(id) && tunnel.Status() == tunnel.Running && (!mihomoTun || listener.GetTunConf().Enable) {
 		return 1
 	}
 	return 0
@@ -286,3 +364,100 @@ func mihomo_listeners(buf *C.char, capacity C.int) C.int {
 
 //export mihomo_string_free
 func mihomo_string_free(value *C.char) { C.free(unsafe.Pointer(value)) }
+
+func mihomoAttachTun(parsed *config.Config, handle *C.uint64_t) *C.char {
+	if mihomoBase == nil || mihomoTun {
+		return C.CString("Mihomo backend is not attachable")
+	}
+
+	proxies := make(map[string]MC.Proxy, len(tunnel.Proxies())+2)
+	for name, value := range tunnel.Proxies() {
+		proxies[name] = value
+	}
+	for _, name := range []string{"fcae-tun-exit", "fcae-tun-direct"} {
+		if _, exists := proxies[name]; exists {
+			return C.CString("reserved Mihomo TUN proxy name is already in use")
+		}
+		proxy, ok := parsed.Proxies[name]
+		if !ok {
+			return C.CString("missing Mihomo TUN proxy")
+		}
+		proxies[name] = proxy
+	}
+	rules := make([]MC.Rule, 0, len(parsed.Rules)+len(mihomoBase.Rules)+1)
+	for _, rule := range parsed.Rules {
+		rules = append(rules, mihomoTunRule{rule})
+	}
+	mihomoOverlayMode = tunnel.Mode()
+	mihomoOverlayProcess = tunnel.FindProcessMode()
+	switch mihomoOverlayMode {
+	case tunnel.Direct:
+		rules = append(rules, common.NewMatch("DIRECT"))
+	case tunnel.Global:
+		rules = append(rules, common.NewMatch("GLOBAL"))
+	default:
+		rules = append(rules, mihomoBase.Rules...)
+	}
+	// Publish the handle before modifying shared state so panic rollback can
+	// restore the backend without suspending it or closing its listeners.
+	mihomoNext++
+	mihomoOverlayID = mihomoNext
+	tunnel.UpdateProxies(proxies, tunnel.Providers())
+	tunnel.UpdateRules(rules, mihomoBase.SubRules, tunnel.RuleProviders())
+	tunnel.SetMode(tunnel.Rule)
+	tunnel.SetFindProcessMode(parsed.General.FindProcessMode)
+	listener.ReCreateTun(parsed.General.Tun, tunnel.Tunnel)
+	actual := listener.GetTunConf()
+	if !actual.Enable || actual.Device != parsed.General.Tun.Device {
+		mihomoDetachTun()
+		return C.CString("Mihomo TUN could not attach its requested adapter")
+	}
+	*handle = C.uint64_t(mihomoOverlayID)
+	return nil
+}
+
+func mihomoDetachTun() {
+	if mihomoOverlayID == 0 {
+		return
+	}
+	mihomoOverlayID = 0
+	if mihomoBase == nil {
+		return
+	}
+	off := listener.GetTunConf()
+	off.Enable = false
+	listener.ReCreateTun(off, tunnel.Tunnel)
+	statistic.DefaultManager.Range(func(connection statistic.Tracker) bool {
+		if info := connection.Info(); info != nil && info.Metadata != nil && info.Metadata.Type == MC.TUN {
+			_ = connection.Close()
+		}
+		return true
+	})
+	tunnel.UpdateRules(mihomoBase.Rules, mihomoBase.SubRules, tunnel.RuleProviders())
+	tunnel.UpdateProxies(mihomoBase.Proxies, tunnel.Providers())
+	tunnel.SetMode(mihomoOverlayMode)
+	tunnel.SetFindProcessMode(mihomoOverlayProcess)
+}
+
+//export mihomo_tun_stop
+func mihomo_tun_stop(id C.uint64_t) {
+	mihomoMu.Lock()
+	defer mihomoMu.Unlock()
+	if mihomoOverlayID != 0 && mihomoOverlayID == uint64(id) {
+		mihomoDetachTun()
+		return
+	}
+	if mihomoTun && mihomoID != 0 && mihomoID == uint64(id) {
+		mihomoCleanup()
+	}
+}
+
+//export mihomo_tun_running
+func mihomo_tun_running(id C.uint64_t) C.int {
+	mihomoMu.Lock()
+	defer mihomoMu.Unlock()
+	if ((mihomoOverlayID != 0 && mihomoOverlayID == uint64(id)) || (mihomoTun && mihomoID != 0 && mihomoID == uint64(id))) && tunnel.Status() == tunnel.Running && listener.GetTunConf().Enable {
+		return 1
+	}
+	return 0
+}

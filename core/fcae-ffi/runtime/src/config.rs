@@ -281,6 +281,9 @@ pub enum TunEngine {
     Zeptun,
     /// C hev-socks5-tunnel engine (static library, coroutine-based I/O).
     Hev,
+    SingBox,
+    Xray,
+    Mihomo,
 }
 
 /// TUN parameters. Owned by the supervisor, not the backend: whichever
@@ -1494,9 +1497,12 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             0 => TunEngine::Tun2socks,
             1 => TunEngine::Zeptun,
             2 => TunEngine::Hev,
+            3 => TunEngine::SingBox,
+            4 => TunEngine::Xray,
+            5 => TunEngine::Mihomo,
             _ => {
                 return Err(CoreError::InvalidConfig(
-                    "tun_engine must be 0 (tun2socks), 1 (zeptun), or 2 (hev)".into(),
+                    "tun_engine must be 0..5 (tun2socks, zeptun, hev, sing-box, xray, mihomo)".into(),
                 ))
             }
         },
@@ -1544,7 +1550,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
 
     if usize::from(cfg.backend == FcaeBackend::Mihomo)
         + cfg.chain.iter().filter(|hop|hop.backend == FcaeBackend::Mihomo).count() > 1 {
-        return Err(CoreError::InvalidConfig("Mihomo's in-process core supports one instance; repeated Mihomo hops are not supported".into()));
+        return Err(CoreError::InvalidConfig("Mihomo's in-process core supports one protocol instance; repeated Mihomo backend/chain hops are not supported".into()));
     }
     Ok(cfg)
 }

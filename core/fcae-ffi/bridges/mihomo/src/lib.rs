@@ -21,6 +21,9 @@ use fcae_runtime::Result;
 extern "C" {
     fn mihomo_check(config: *const c_char) -> *mut c_char;
     fn mihomo_set_home(path: *const c_char) -> *mut c_char;
+    fn mihomo_tun_stop(handle:u64);
+    fn mihomo_tun_running(handle:u64)->c_int;
+    fn mihomo_tun_start(config:*const c_char,handle:*mut u64)->*mut c_char;
     fn mihomo_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
     fn mihomo_stop(handle: u64);
     fn mihomo_stop_all();
@@ -161,4 +164,12 @@ pub fn install_validator() {
 pub fn register() {
     install_validator();
     fcae_runtime::registry::register(FcaeBackend::Mihomo, || Arc::new(MihomoBackend));
+}
+
+pub fn tun_ffi()->CoreFfi {CoreFfi{start:mihomo_tun_start,stop:mihomo_tun_stop,running:mihomo_tun_running,..MihomoDialect::FFI}}
+pub fn prepare_tun(cfg:&fcae_runtime::config::SessionConfig)->Result<()> {
+    let home=cfg.data_dir.as_ref().map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("mihomo");
+    let home=std::ffi::CString::new(home.to_string_lossy().as_bytes()).map_err(|e|fcae_runtime::CoreError::InvalidConfig(e.to_string()))?;
+    unsafe{let error=mihomo_set_home(home.as_ptr());if !error.is_null(){let message=std::ffi::CStr::from_ptr(error).to_string_lossy().into_owned();mihomo_string_free(error);return Err(fcae_runtime::CoreError::StartFailed(message));}}
+    Ok(())
 }

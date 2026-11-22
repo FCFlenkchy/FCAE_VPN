@@ -2158,6 +2158,22 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
+#if !defined(ANDROID) && !defined(FCAE_IOS)
+    // Give normal routing/DNS restoration time, but do not leave a headless
+    // process forever if inventory, initialization or a core join is stuck.
+    static std::atomic<bool> shutdown_finished{false};
+    try {std::thread([] {
+        for(int i=0;i<20;++i){std::this_thread::sleep_for(std::chrono::seconds(1));if(shutdown_finished.load())return;}
+#if defined(_WIN32)
+        TerminateProcess(GetCurrentProcess(),1);
+#else
+        std::_Exit(1);
+#endif
+    }).detach();} catch(...) {}
+#endif
+    // Request session cancellation before inventory/init joins so OS cleanup
+    // can make progress even if one of those independent workers stalls.
+    fcae_stop();
 #if !defined(ANDROID)
     PlatformAppRouting::shutdown(); // Join inventory work before destroying UI/runtime state.
 #endif
@@ -2192,12 +2208,12 @@ void ui_shutdown() {
                 : "fcae_shutdown() failed; routes/DNS may need manual restore");
     }
 #if defined(_WIN32)
-    // ExitProcess is the right call here: a normal `return` would unwind the
-    // GUI thread while background workers are still tearing down, and a
-    // runtime shutdown abort would still leave the ImGui render thread
-    // holding the only strong reference to device resources. Process exit is
-    // the documented contract for this binary.
+    // Avoid DLL-detach deadlocks in an embedded core after cleanup returned.
+    TerminateProcess(GetCurrentProcess(),0);
     ExitProcess(0);
+#endif
+#if !defined(ANDROID) && !defined(FCAE_IOS)
+    shutdown_finished.store(true);
 #endif
 }
 
@@ -5567,10 +5583,10 @@ void render_ui() {
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Text("TUN engine");
                 ImGui::SameLine(0, 8);
-                FcaeTunEngineInfo tei[4];
-                const char* te_names[4];
+                FcaeTunEngineInfo tei[6];
+                const char* te_names[6];
                 uint32_t te_n = fcae_tun_engine_count();
-                if (te_n > 4) te_n = 4;
+                if (te_n > 6) te_n = 6;
                 // The closed combo previews the selected entry, so it is sized to
                 // the widest name: "hev-socks5-tunnel" was cut in half the moment
                 // it was picked, the popup beside it having always been wide enough.

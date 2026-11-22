@@ -20,6 +20,9 @@ use fcae_runtime::Result;
 // prefix is per core: one Go package cannot export `start` twice.
 extern "C" {
     fn xray_check(config: *const c_char) -> *mut c_char;
+    fn xray_tun_start(config:*const c_char,handle:*mut u64)->*mut c_char;
+    fn xray_tun_stop(handle:u64);
+    fn xray_tun_running(handle:u64)->c_int;
     fn xray_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
     fn xray_stop(handle: u64);
     fn xray_stop_all();
@@ -155,3 +158,5 @@ pub fn register() {
     install_validator();
     fcae_runtime::registry::register(FcaeBackend::Xray, || Arc::new(XrayBackend));
 }
+
+pub fn tun_ffi()->CoreFfi {CoreFfi{start:xray_tun_start,stop:xray_tun_stop,running:xray_tun_running,..XrayDialect::FFI}}

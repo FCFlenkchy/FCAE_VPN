@@ -32,6 +32,7 @@ import "C"
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -40,11 +41,17 @@ import (
 	"unsafe"
 
 	applog "github.com/xtls/xray-core/app/log"
+	xrouter "github.com/xtls/xray-core/app/router"
 	appstats "github.com/xtls/xray-core/app/stats"
 	"github.com/xtls/xray-core/common"
 	xlog "github.com/xtls/xray-core/common/log"
+	"github.com/xtls/xray-core/common/serial"
 	xcore "github.com/xtls/xray-core/core"
+	xinbound "github.com/xtls/xray-core/features/inbound"
+	xoutbound "github.com/xtls/xray-core/features/outbound"
+	xrouting "github.com/xtls/xray-core/features/routing"
 	featurestats "github.com/xtls/xray-core/features/stats"
+	"google.golang.org/protobuf/proto"
 	// Registers the JSON config loader and every inbound/outbound proxy, the
 	// same set the `xray` executable carries.
 	_ "github.com/xtls/xray-core/main/distro/all"
@@ -76,6 +83,7 @@ const (
 // instances are kept in a registry and every entry point carries the handle a
 // start handed back.
 type xrayCore struct {
+	routing  *xrouter.Config
 	instance *xcore.Instance
 	// Nil when this config carries no `stats` app; the core then keeps no
 	// traffic totals at all.
@@ -214,6 +222,21 @@ func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 	if err != nil {
 		return C.CString("xray: " + err.Error())
 	}
+	baseline := &xrouter.Config{}
+	hasRouter := false
+	for _, app := range configOptions.App {
+		instance, e := app.GetInstance()
+		if e != nil {
+			return C.CString("xray: " + e.Error())
+		}
+		if router, ok := instance.(*xrouter.Config); ok {
+			baseline = router
+			hasRouter = true
+		}
+	}
+	if !hasRouter {
+		configOptions.App = append(configOptions.App, serial.ToTypedMessage(baseline))
+	}
 	created, err := xcore.New(configOptions)
 	if err != nil {
 		return C.CString("xray: " + err.Error())
@@ -222,7 +245,7 @@ func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 		_ = created.Close()
 		return C.CString("xray: " + err.Error())
 	}
-	core := &xrayCore{instance: created, listeners: xrayInbounds(text), label: xrayFlavor(text)}
+	core := &xrayCore{routing: baseline, instance: created, listeners: xrayInbounds(text), label: xrayFlavor(text)}
 	if manager, ok := created.GetFeature(featurestats.ManagerType()).(featurestats.Manager); ok {
 		core.stats = manager
 	}
@@ -243,6 +266,7 @@ func xray_start(config *C.char, handle *C.uint64_t) *C.char {
 func xray_stop(id C.uint64_t) {
 	xrayMu.Lock()
 	core := xrayCores[uint64(id)]
+	xrayCloseTunLocked(uint64(id))
 	delete(xrayCores, uint64(id))
 	xrayMu.Unlock()
 	if core == nil {
@@ -258,6 +282,7 @@ func xray_stop(id C.uint64_t) {
 //export xray_stop_all
 func xray_stop_all() {
 	xrayMu.Lock()
+	xrayCloseTunLocked(0)
 	cores := xrayCores
 	xrayCores = make(map[uint64]*xrayCore)
 	xrayMu.Unlock()
@@ -441,4 +466,159 @@ func xrayEmit(level int, text string) {
 	msg := C.CString(strings.TrimRight(text, "\n"))
 	defer C.free(unsafe.Pointer(msg))
 	C.xray_invoke_log(fn, C.int(level), msg)
+}
+
+type xrayTunAttachment struct {
+	parent    uint64
+	inbound   string
+	outbounds []string
+}
+
+var xrayTuns = make(map[uint64]xrayTunAttachment)
+
+func xrayCloseTunLocked(parent uint64) {
+	for id, tun := range xrayTuns {
+		if parent == 0 || tun.parent == parent {
+			xrayDetachTunLocked(id, tun)
+		}
+	}
+}
+func xrayDetachTunLocked(id uint64, tun xrayTunAttachment) {
+	delete(xrayTuns, id)
+	core := xrayCores[tun.parent]
+	if core == nil {
+		return
+	}
+	ctx := context.Background()
+	im := core.instance.GetFeature(xinbound.ManagerType()).(xinbound.Manager)
+	om := core.instance.GetFeature(xoutbound.ManagerType()).(xoutbound.Manager)
+	router := core.instance.GetFeature(xrouting.RouterType()).(xrouting.Router)
+	_ = im.RemoveHandler(ctx, tun.inbound)
+	_ = router.AddRule(serial.ToTypedMessage(core.routing), false)
+	for _, tag := range tun.outbounds {
+		_ = om.RemoveHandler(ctx, tag)
+	}
+}
+
+//export xray_tun_start
+func xray_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
+	if text == nil || handle == nil {
+		return C.CString("missing Xray TUN arguments")
+	}
+	*handle = 0
+	xrayMu.Lock()
+	var parent uint64
+	for id := range xrayCores {
+		if parent == 0 || id < parent {
+			parent = id
+		}
+	}
+	if parent == 0 {
+		xrayMu.Unlock()
+		return xray_start(text, handle)
+	}
+	defer xrayMu.Unlock()
+	for _, tun := range xrayTuns {
+		if tun.parent == parent {
+			return C.CString("Xray TUN is already attached")
+		}
+	}
+	base := xrayCores[parent]
+	options, err := xcore.LoadConfig("json", bytes.NewReader([]byte(C.GoString(text))))
+	if err != nil {
+		return C.CString("Xray TUN: " + err.Error())
+	}
+	if len(options.Inbound) != 1 || len(options.Outbound) == 0 {
+		return C.CString("invalid Xray TUN attachment")
+	}
+	im := base.instance.GetFeature(xinbound.ManagerType()).(xinbound.Manager)
+	om := base.instance.GetFeature(xoutbound.ManagerType()).(xoutbound.Manager)
+	router := base.instance.GetFeature(xrouting.RouterType()).(xrouting.Router)
+	inboundTag := options.Inbound[0].Tag
+	if handler, _ := im.GetHandler(context.Background(), inboundTag); handler != nil {
+		return C.CString("reserved Xray TUN inbound tag is already in use")
+	}
+	for _, out := range options.Outbound {
+		if om.GetHandler(out.Tag) != nil {
+			return C.CString("reserved Xray TUN outbound tag is already in use")
+		}
+	}
+	overlay := &xrouter.Config{}
+	for _, app := range options.App {
+		instance, e := app.GetInstance()
+		if e != nil {
+			return C.CString(e.Error())
+		}
+		if cfg, ok := instance.(*xrouter.Config); ok {
+			overlay = cfg
+		}
+	}
+	if len(overlay.Rule) == 0 {
+		return C.CString("missing inbound-scoped Xray TUN rules")
+	}
+	combined := proto.Clone(base.routing).(*xrouter.Config)
+	combined.Rule = append(append([]*xrouter.RoutingRule{}, overlay.Rule...), combined.Rule...)
+	xrayNextID++
+	id := xrayNextID
+	tun := xrayTunAttachment{parent: parent, inbound: inboundTag}
+	xrayTuns[id] = tun
+	owned := false
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = C.CString(fmt.Sprintf("Xray TUN panic: %v", failure))
+		}
+		if !owned {
+			xrayDetachTunLocked(id, xrayTuns[id])
+		}
+	}()
+	for _, out := range options.Outbound {
+		if err = xcore.AddOutboundHandler(base.instance, out); err != nil {
+			return C.CString("Xray TUN outbound: " + err.Error())
+		}
+		tun.outbounds = append(tun.outbounds, out.Tag)
+		xrayTuns[id] = tun
+	}
+	if err = router.AddRule(serial.ToTypedMessage(combined), false); err != nil {
+		return C.CString("Xray TUN routing: " + err.Error())
+	}
+	if err = xcore.AddInboundHandler(base.instance, options.Inbound[0]); err != nil {
+		return C.CString("Xray TUN inbound: " + err.Error())
+	}
+	owned = true
+	*handle = C.uint64_t(id)
+	return nil
+}
+
+//export xray_tun_stop
+func xray_tun_stop(id C.uint64_t) {
+	xrayMu.Lock()
+	tun, attached := xrayTuns[uint64(id)]
+	if attached {
+		xrayDetachTunLocked(uint64(id), tun)
+		xrayMu.Unlock()
+		return
+	}
+	xrayMu.Unlock()
+	xray_stop(id)
+}
+
+//export xray_tun_running
+func xray_tun_running(id C.uint64_t) C.int {
+	xrayMu.Lock()
+	tun, attached := xrayTuns[uint64(id)]
+	if attached {
+		core := xrayCores[tun.parent]
+		alive := core != nil && core.instance.IsRunning()
+		if alive {
+			handler, _ := core.instance.GetFeature(xinbound.ManagerType()).(xinbound.Manager).GetHandler(context.Background(), tun.inbound)
+			alive = handler != nil
+		}
+		xrayMu.Unlock()
+		if alive {
+			return 1
+		}
+		return 0
+	}
+	xrayMu.Unlock()
+	return xray_running(id)
 }

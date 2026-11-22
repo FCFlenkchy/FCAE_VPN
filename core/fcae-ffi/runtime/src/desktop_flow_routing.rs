@@ -275,8 +275,8 @@ impl FlowPolicy {
                 self.paths.iter().map(String::as_str),
                 "fcae-direct",
             ));
-        } else {
-            return Err(invalid("flow provider needs include or exclude mode"));
+        } else if self.mode != 0 {
+            return Err(invalid("invalid application routing mode"));
         }
         let mut exit = json!({"type":"socks","tag":"fcae-exit","server":socks.ip().to_string(),"server_port":socks.port(),"version":"5","inet4_bind_address":"127.0.0.1","inet6_bind_address":"::1"});
         if !udp {

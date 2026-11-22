@@ -52,6 +52,8 @@ struct Runtime {
 /// The fd setters forward to ALL engines: Android hands the descriptor over
 /// before the session parses, and whichever engine later runs must see it.
 struct TunEngines {
+    #[cfg(any(windows,target_os="linux",target_os="macos"))]
+    core_tun:fcae_runtime::core_tun::CoreTunBridge,
     #[cfg(feature="singbox")]
     destinations:fcae_bridge_singbox::destination_routing::DestinationRouter,
     #[cfg(target_os="macos")]
@@ -255,7 +257,21 @@ impl TunEngines {
         #[cfg(target_os="macos")]
         if cfg.uses_macos_ne(){return match cancel {Some(cancel)=>self.macos_ne.start_cancellable(cfg,endpoints,cancel),None=>self.macos_ne.start(cfg,endpoints)};}
         #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
-        if cfg.app_routing.is_some() {return match cancel {Some(cancel)=>self.flow.start_cancellable(cfg,endpoints,cancel),None=>self.flow.start(cfg,endpoints)};}
+        if cfg.tun.engine==config::TunEngine::SingBox {return match cancel {Some(cancel)=>self.flow.start_cancellable(cfg,endpoints,cancel),None=>self.flow.start(cfg,endpoints)};}
+        if matches!(cfg.tun.engine,config::TunEngine::SingBox|config::TunEngine::Xray|config::TunEngine::Mihomo) {
+            #[cfg(any(windows,target_os="linux",target_os="macos"))]
+            {
+                let ffi=match cfg.tun.engine {
+                    #[cfg(feature="xray")]
+                    config::TunEngine::Xray=>Some(fcae_bridge_xray::tun_ffi()),
+                    #[cfg(feature="mihomo")]
+                    config::TunEngine::Mihomo=>{fcae_bridge_mihomo::prepare_tun(cfg)?;Some(fcae_bridge_mihomo::tun_ffi())},
+                    _=>None,
+                };
+                if let Some(ffi)=ffi{return self.core_tun.start_with(cfg,endpoints,cancel,ffi);}
+            }
+            return Err(CoreError::BackendUnavailable("selected core TUN engine on this platform/build"));
+        }
         #[cfg(windows)]
         crash_log::watch_exceptions();
         log::info!("[tun] preparing {:?}", cfg.tun.engine);
@@ -263,6 +279,9 @@ impl TunEngines {
             config::TunEngine::Tun2socks => "tun2socks",
             config::TunEngine::Zeptun => "zeptun",
             config::TunEngine::Hev => "hev",
+            config::TunEngine::Mihomo => "mihomo",
+            config::TunEngine::Xray => "xray",
+            config::TunEngine::SingBox => "sing-box",
         };
         log::info!("[tun:{name}] starting: interface={}, mtu={}, socks={:?}",
             cfg.tun.name, cfg.tun.mtu, endpoints.socks);
@@ -280,11 +299,15 @@ impl TunEngines {
                 config::TunEngine::Tun2socks => "tun2socks: starting\n",
                 config::TunEngine::Zeptun => "zeptun: starting\n",
                 config::TunEngine::Hev => "hev: starting\n",
+                config::TunEngine::Mihomo => "mihomo: starting\n",
+                config::TunEngine::Xray => "xray: starting\n",
+                config::TunEngine::SingBox => "sing-box: starting\n",
             });
             let result = match cfg.tun.engine {
                 config::TunEngine::Tun2socks => self.t2s_start(cfg, endpoints),
                 config::TunEngine::Zeptun => self.zeptun_start(cfg, endpoints, cancel),
                 config::TunEngine::Hev => self.hev_start(cfg, endpoints),
+                _=>Err(CoreError::BackendUnavailable("selected core TUN engine")),
             };
             #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             crash_log::record(match (cfg.tun.engine, result.is_ok()) {
@@ -293,7 +316,13 @@ impl TunEngines {
                 (config::TunEngine::Zeptun, true) => "zeptun: started\n",
                 (config::TunEngine::Zeptun, false) => "zeptun: start failed\n",
                 (config::TunEngine::Hev, true) => "hev: started\n",
+                (config::TunEngine::Mihomo, true) => "mihomo: started\n",
+                (config::TunEngine::Xray, true) => "xray: started\n",
+                (config::TunEngine::SingBox, true) => "sing-box: started\n",
                 (config::TunEngine::Hev, false) => "hev: start failed\n",
+                (config::TunEngine::Mihomo, false) => "mihomo: start failed\n",
+                (config::TunEngine::Xray, false) => "xray: start failed\n",
+                (config::TunEngine::SingBox, false) => "sing-box: start failed\n",
             });
             result
         })();
@@ -323,12 +352,17 @@ impl TunBridge for TunEngines {
         self.macos_ne.stop(timeout);
         #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
         self.flow.stop(timeout);
+        #[cfg(any(windows,target_os="linux",target_os="macos"))]
+        self.core_tun.stop(timeout);
         let stopping = { LOGGED_TUN_ENGINE.lock().take() };
         if let Some(engine) = stopping {
             let name = match engine {
                 config::TunEngine::Tun2socks => "tun2socks",
                 config::TunEngine::Zeptun => "zeptun",
                 config::TunEngine::Hev => "hev",
+            config::TunEngine::Mihomo => "mihomo",
+            config::TunEngine::Xray => "xray",
+            config::TunEngine::SingBox => "sing-box",
             };
             log::info!("[tun:{name}] stopping");
         }
@@ -346,6 +380,8 @@ impl TunBridge for TunEngines {
         self.stop(timeout);
         #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
         self.flow.reclaim(timeout);
+        #[cfg(any(windows,target_os="linux",target_os="macos"))]
+        self.core_tun.reclaim(timeout);
     }
 
     fn abort(&self) {
@@ -355,6 +391,8 @@ impl TunBridge for TunEngines {
         self.macos_ne.abort();
         #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
         self.flow.abort();
+        #[cfg(any(windows,target_os="linux",target_os="macos"))]
+        self.core_tun.abort();
         #[cfg(feature = "tun")]
         self.t2s.abort();
         #[cfg(feature = "zeptun")]
@@ -369,7 +407,9 @@ impl TunBridge for TunEngines {
         #[cfg(target_os="macos")]
         if cfg.uses_macos_ne(){return self.macos_ne.check_health(cfg);}
         #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
-        if cfg.app_routing.is_some() {return self.flow.check_health(cfg);}
+        if cfg.tun.engine==config::TunEngine::SingBox {return self.flow.check_health(cfg);}
+        #[cfg(any(windows,target_os="linux",target_os="macos"))]
+        if matches!(cfg.tun.engine,config::TunEngine::Xray|config::TunEngine::Mihomo){return self.core_tun.check_health(cfg);}
         match cfg.tun.engine {
             #[cfg(feature = "tun")]
             config::TunEngine::Tun2socks => self.t2s.check_health(cfg),
@@ -387,6 +427,8 @@ impl TunBridge for TunEngines {
         if self.macos_ne.is_running(){return true;}
         #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
         if self.flow.is_running(){return true;}
+        #[cfg(any(windows,target_os="linux",target_os="macos"))]
+        if self.core_tun.is_running(){return true;}
         #[cfg(feature = "tun")]
         {
             if self.t2s.is_running() {
@@ -707,6 +749,8 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
 
         #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
         let engines = Arc::new(TunEngines {
+            #[cfg(any(windows,target_os="linux",target_os="macos"))]
+            core_tun:fcae_runtime::core_tun::CoreTunBridge::new(),
             #[cfg(feature="singbox")]
             destinations:fcae_bridge_singbox::destination_routing::DestinationRouter::new(),
             #[cfg(target_os="macos")]
@@ -834,6 +878,8 @@ pub unsafe extern "C" fn fcae_start_with_app_routing(cfg:*const FcaeConfig,routi
             fcae_runtime::desktop_flow_routing::parse(&value)?
         };
         if policy.is_some(){
+            if policy.as_ref().is_some_and(|policy|policy.provider!="macos_ne") && !matches!(parsed.tun.engine,config::TunEngine::SingBox|config::TunEngine::Mihomo){return Err(CoreError::InvalidConfig("Select sing-box or Mihomo TUN for per-app split tunneling".into()));}
+
             let provider_available=if policy.as_ref().is_some_and(|policy|policy.provider=="macos_ne"){fcae_app_routing_macos_ne_available()}else{fcae_app_routing_flow_available()};
             if !provider_available{return Err(CoreError::BackendUnavailable("requested desktop application routing provider"));}
             if parsed.mode!=FcaeMode::Tun{return Err(CoreError::InvalidConfig("desktop per-app routing requires TUN mode, not proxy mode".into()));}
@@ -1082,9 +1128,9 @@ pub unsafe extern "C" fn fcae_destination_rules_validate(text:*const c_char,outp
 /// Captured-flow library availability, not an enforcement acknowledgement.
 #[no_mangle]
 pub extern "C" fn fcae_app_routing_flow_available()->bool {
-    #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
+    #[cfg(all(any(feature="singbox",feature="mihomo"),any(windows,target_os="linux",target_os="macos")))]
     {fcae_bridge_tun2socks::is_supported()}
-    #[cfg(not(all(feature="singbox",any(windows,target_os="linux",target_os="macos"))))]
+    #[cfg(not(all(any(feature="singbox",feature="mihomo"),any(windows,target_os="linux",target_os="macos"))))]
     {false}
 }
 
@@ -1256,7 +1302,7 @@ pub unsafe extern "C" fn fcae_backend_info(index: u32, out: *mut FcaeBackendInfo
 /// say why (not compiled / stub / disabled on this platform).
 #[no_mangle]
 pub extern "C" fn fcae_tun_engine_count() -> u32 {
-    3
+    6
 }
 
 /// Detail of one TUN engine: id, name, and whether selecting it can succeed
@@ -1294,9 +1340,14 @@ pub unsafe extern "C" fn fcae_tun_engine_info(index: u32, out: *mut FcaeTunEngin
             ),
             1 => zeptun_info_fields(),
             2 => hev_info_fields(),
+            3|4|5 => {
+                let (id,name,compiled)=match index{3=>("singbox","sing-box",cfg!(feature="singbox")),4=>("xray","Xray",cfg!(feature="xray")),_=>("mihomo","Mihomo",cfg!(feature="mihomo"))};
+                let desktop=cfg!(any(windows,target_os="linux",target_os="macos")) && fcae_bridge_tun2socks::is_supported();
+                (index as u64,id,name,compiled&&desktop,if !compiled{"not compiled into this build"}else if !desktop{"native core TUN is available on desktop only"}else{""})
+            },
             _ => {
                 return Err(CoreError::InvalidConfig(format!(
-                    "TUN engine index {index} is out of range (fcae_tun_engine_count() = 3)"
+                    "TUN engine index {index} is out of range (fcae_tun_engine_count() = 6)"
                 )))
             }
         };
@@ -2310,6 +2361,8 @@ mod tun_provider_tests {
     #[test]
     fn provider_result_preserves_absence_success_and_failure() {
         let engines = TunEngines {
+            #[cfg(any(windows,target_os="linux",target_os="macos"))]
+            core_tun:fcae_runtime::core_tun::CoreTunBridge::new(),
             #[cfg(feature="singbox")]
             destinations:fcae_bridge_singbox::destination_routing::DestinationRouter::new(),
             #[cfg(target_os="macos")]

@@ -24,7 +24,7 @@ struct Core(u64);
 impl Drop for Core {
     fn drop(&mut self) {
         unsafe {
-            super::sb_stop(self.0);
+            super::sb_tun_stop(self.0);
         }
     }
 }
@@ -77,11 +77,7 @@ impl FlowTunBridge {
             return Err(CoreError::AlreadyRunning);
         }
         self.cancelled.store(false, Ordering::Release);
-        let policy = cfg
-            .app_routing
-            .as_ref()
-            .ok_or_else(|| CoreError::InvalidConfig("no captured-flow policy was supplied".into()))?
-            .resolve()?;
+        let policy=cfg.app_routing.as_ref().map(|policy|policy.resolve()).transpose()?.unwrap_or(fcae_runtime::desktop_flow_routing::FlowPolicy{revision:0,provider:"captured_flow".into(),mode:0,paths:Default::default()});
         if !fcae_go_bridge_supported() {
             return Err(CoreError::BackendUnavailable(
                 "embedded sing-box flow router",
@@ -119,7 +115,7 @@ impl FlowTunBridge {
         }
         let mut id = 0;
         unsafe {
-            let error = super::sb_start(text.as_ptr(), &mut id);
+            let error = super::sb_tun_start(text.as_ptr(), &mut id);
             if !error.is_null() {
                 let message = CStr::from_ptr(error).to_string_lossy().into_owned();
                 super::sb_string_free(error);
@@ -277,7 +273,7 @@ impl TunBridge for FlowTunBridge {
                 .core
                 .as_ref()
                 .ok_or_else(|| CoreError::Internal("flow core handle missing".into()))?;
-            if unsafe { super::sb_running(core.0) } == 0 {
+            if unsafe { super::sb_tun_running(core.0) } == 0 {
                 return Err(CoreError::Internal("flow-routing core stopped".into()));
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -29,6 +29,8 @@
 //! which keeps this one unit-testable as ordinary Rust.
 
 pub mod destination_routing;
+#[cfg(any(windows,target_os="linux",target_os="macos"))]
+pub mod core_tun;
 pub mod desktop_flow_routing;
 pub mod desktop_app_routing;
 pub mod backend;

@@ -23,6 +23,9 @@ use fcae_runtime::Result;
 // prefix is per core: one Go package cannot export `start` twice.
 extern "C" {
     fn sb_check(config: *const c_char) -> *mut c_char;
+    fn sb_tun_start(config:*const c_char,handle:*mut u64)->*mut c_char;
+    fn sb_tun_stop(handle:u64);
+    fn sb_tun_running(handle:u64)->c_int;
     fn sb_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
     fn sb_stop(handle: u64);
     fn sb_stop_all();
