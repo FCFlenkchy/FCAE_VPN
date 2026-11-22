@@ -290,3 +290,170 @@ pub fn decode(text: Option<String>) -> Result<(Option<Policy>, Option<String>)> 
         .to_owned();
     Ok((policy.active().then_some(policy), Some(legacy)))
 }
+
+/// Conservative capability gate: the complete policy goes through one path.
+/// App policies keep their existing ordered composition via the shared stage.
+pub fn uses_native(cfg: &crate::config::SessionConfig) -> bool {
+    use crate::config::TunEngine;
+    let Some(policy) = cfg.destinations.as_ref() else {
+        return false;
+    };
+    if !policy.active() || cfg.app_routing.is_some() {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    if cfg.uses_macos_ne() {
+        return false;
+    }
+    match cfg.tun.engine {
+        TunEngine::SingBox => cfg!(any(
+            windows,
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "android",
+            target_os = "ios"
+        )),
+        // Native domain sniffing/DNS semantics differ; retain the shared path.
+        TunEngine::Mihomo => {
+            cfg!(any(windows, target_os = "linux", target_os = "macos"))
+                && policy.rules.iter().all(|rule| rule.kind != "domain")
+        }
+        _ => false,
+    }
+}
+
+/// Install the same sing-box rule grammar directly in its selected TUN core.
+pub fn apply_singbox(
+    cfg: &crate::config::SessionConfig,
+    value: &mut Value,
+    socks: SocketAddr,
+    udp: bool,
+) -> Result<()> {
+    if !uses_native(cfg) {
+        return Ok(());
+    }
+    let Some(policy) = cfg.destinations.as_ref() else {
+        return Ok(());
+    };
+    let compiled = policy.config(socks, 1, udp)?;
+    // Keep the TUN platform/process guards, then evaluate destination policy.
+    let guards: Vec<Value> = value["route"]["rules"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|rule| {
+            rule.get("process_path").is_some() || rule.get("process_path_regex").is_some()
+        })
+        .cloned()
+        .collect();
+    let mut rules = guards;
+    rules.extend(
+        compiled["route"]["rules"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    value["outbounds"] = compiled["outbounds"].clone();
+    value["dns"] = compiled["dns"].clone();
+    value["route"]["default_domain_resolver"] =
+        compiled["route"]["default_domain_resolver"].clone();
+    value["route"]["rules"] = json!(rules);
+    value["route"]["final"] = compiled["route"]["final"].clone();
+    Ok(())
+}
+
+/// Mihomo IP/port rules only. OR port selections, AND the other fields;
+/// reject VPN-required UDP explicitly before Mihomo can skip a TCP-only exit.
+pub fn apply_mihomo(
+    cfg: &crate::config::SessionConfig,
+    value: &mut Value,
+    udp: bool,
+) -> Result<()> {
+    if !uses_native(cfg) {
+        return Ok(());
+    }
+    let Some(policy) = cfg.destinations.as_ref() else {
+        return Ok(());
+    };
+    policy.validate()?;
+    let mut rules: Vec<String> = value["rules"].as_array().into_iter().flatten()
+        .filter_map(Value::as_str)
+        .filter(|rule| rule.starts_with("PROCESS-PATH-REGEX,") && rule.ends_with(",fcae-tun-direct"))
+        .map(str::to_owned).collect();
+    let mut push = |condition: String, exit: bool| {
+        if exit && !udp {
+            rules.push(if condition == "MATCH" {
+                "NETWORK,udp,REJECT".into()
+            } else {
+                format!("AND,((NETWORK,udp),({condition})),REJECT")
+            });
+        }
+        rules.push(format!(
+            "{condition},{}",
+            if exit {
+                "fcae-tun-exit"
+            } else {
+                "fcae-tun-direct"
+            }
+        ));
+    };
+    push("DST-PORT,53".into(), true);
+    push("DST-PORT,853".into(), true);
+    for rule in &policy.rules {
+        let mut conditions = Vec::new();
+        if rule.kind == "ip" {
+            for prefix in prefixes(&rule.target)? {
+                conditions.push(format!(
+                    "{},{}",
+                    if prefix.contains(':') {
+                        "IP-CIDR6"
+                    } else {
+                        "IP-CIDR"
+                    },
+                    prefix
+                ));
+            }
+        }
+        if rule.protocol != "both" {
+            conditions.push(format!("NETWORK,{}", rule.protocol));
+        }
+        let (single, ranges) = ports(&rule.ports)?;
+        let mut choices: Vec<String> = single
+            .iter()
+            .map(|port| format!("DST-PORT,{port}"))
+            .collect();
+        choices.extend(
+            ranges
+                .iter()
+                .map(|range| format!("DST-PORT,{}", range.replace(':', "-"))),
+        );
+        if choices.len() == 1 {
+            conditions.push(choices.remove(0));
+        } else if !choices.is_empty() {
+            conditions.push(format!(
+                "OR,({})",
+                choices
+                    .iter()
+                    .map(|c| format!("({c})"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        let condition = if conditions.len() == 1 {
+            conditions.remove(0)
+        } else {
+            format!(
+                "AND,({})",
+                conditions
+                    .iter()
+                    .map(|c| format!("({c})"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        push(condition, policy.mode == 1);
+    }
+    push("MATCH".into(), policy.mode != 1);
+    value["rules"] = json!(rules);
+    Ok(())
+}

@@ -34,6 +34,7 @@ impl DestinationRouter {
         Self::default()
     }
     pub fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<Endpoints> {
+        if fcae_runtime::destination_routing::uses_native(cfg) { return Ok(endpoints.clone()); }
         let Some(policy) = cfg.destinations.as_ref() else {
             return Ok(endpoints.clone());
         };

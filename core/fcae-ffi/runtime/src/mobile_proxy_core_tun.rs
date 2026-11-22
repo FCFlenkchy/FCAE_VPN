@@ -75,7 +75,15 @@ impl ProxyCoreTunBridge {
                 "mobile TUN requires the session's loopback SOCKS exit".into(),
             ));
         }
-        let value = configuration(cfg, socks, fd, endpoints.udp || endpoints.psiphon_dns)?;
+        let mut value = configuration(cfg, socks, fd, endpoints.udp || endpoints.psiphon_dns)?;
+        if cfg.tun.engine == TunEngine::SingBox {
+            crate::destination_routing::apply_singbox(
+                cfg,
+                &mut value,
+                socks,
+                endpoints.udp || endpoints.psiphon_dns,
+            )?;
+        }
         let text =
             CString::new(value.to_string()).map_err(|e| CoreError::InvalidConfig(e.to_string()))?;
         let mut id = 0;

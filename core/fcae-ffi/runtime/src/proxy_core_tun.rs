@@ -93,13 +93,20 @@ impl ProxyCoreTunBridge {
         crate::windows_dll::ensure_wintun(crate::wintun::wintun_bytes())?;
         let device = device_name(cfg)?;
         let (adapter, socks) = crate::exit_adapter::psiphon_socks5p(cfg, endpoints, "app-routing")?;
-        let value = configuration(
+        let mut value = configuration(
             cfg,
             socks,
             &device,
             endpoints.udp || endpoints.psiphon_dns,
             policy.as_ref(),
         )?;
+        if cfg.tun.engine == crate::config::TunEngine::Mihomo {
+            crate::destination_routing::apply_mihomo(
+                cfg,
+                &mut value,
+                endpoints.udp || endpoints.psiphon_dns,
+            )?;
+        }
         let text =
             CString::new(value.to_string()).map_err(|e| CoreError::InvalidConfig(e.to_string()))?;
         let stopped = || {

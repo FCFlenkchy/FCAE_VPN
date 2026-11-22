@@ -94,7 +94,8 @@ impl FlowTunBridge {
         let device = device_name(cfg)?;
         let (adapter, socks) =
             fcae_runtime::exit_adapter::psiphon_socks5p(cfg, endpoints, "app-routing")?;
-        let value = policy.config(cfg, socks, &device, endpoints.udp || endpoints.psiphon_dns)?;
+        let mut value = policy.config(cfg, socks, &device, endpoints.udp || endpoints.psiphon_dns)?;
+        fcae_runtime::destination_routing::apply_singbox(cfg, &mut value, socks, endpoints.udp || endpoints.psiphon_dns)?;
         let text =
             CString::new(value.to_string()).map_err(|e| CoreError::InvalidConfig(e.to_string()))?;
         unsafe {

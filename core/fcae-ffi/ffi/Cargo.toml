@@ -51,7 +51,7 @@ xray = ["dep:fcae-bridge-xray", "fcae-go-bridge/xray", "tun"]
 singbox = ["dep:fcae-bridge-singbox", "fcae-go-bridge/singbox", "tun"]
 # Both extra cores.
 mihomo = ["dep:fcae-bridge-mihomo", "fcae-go-bridge/mihomo", "tun"]
-metacubex-tun = ["dep:fcae-bridge-metacubex-tun", "fcae-go-bridge/metacubex-tun", "tun"]
+sing-tun = ["dep:fcae-bridge-sing-tun", "fcae-go-bridge/sing-tun", "tun"]
 cores = ["xray", "singbox", "mihomo"]
 # Tor egress inside the Aether engine. OFF by default: it pulls in arti-client
 # and a statically built liblzma, which need a C cross-toolchain on the
@@ -71,7 +71,7 @@ fcae-bridge-hev-socks5-tunnel = { workspace = true, optional = true }
 fcae-bridge-xray = { workspace = true, optional = true }
 fcae-bridge-singbox = { workspace = true, optional = true }
 fcae-bridge-mihomo = { workspace = true, optional = true }
-fcae-bridge-metacubex-tun = { workspace = true, optional = true }
+fcae-bridge-sing-tun = { workspace = true, optional = true }
 libc.workspace = true
 log.workspace = true
 once_cell.workspace = true

@@ -180,7 +180,7 @@ impl TunEngines {
     /// registered. `Ok(None)` = no provider (the engine creates the device
     /// itself); `Err` = the host refused, with the reason the user has to act
     /// on.
-    #[cfg(all(feature = "tun", any(feature = "zeptun", feature = "hev", all(any(target_os="android",target_os="ios"),any(feature="xray",feature="singbox",feature="mihomo",feature="metacubex-tun")))))]
+    #[cfg(all(feature = "tun", any(feature = "zeptun", feature = "hev", all(any(target_os="android",target_os="ios"),any(feature="xray",feature="singbox",feature="mihomo",feature="sing-tun")))))]
     fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
         if !self.t2s.has_fd_provider() {
             // Android has no way to open a device of its own: the descriptor
@@ -207,7 +207,7 @@ impl TunEngines {
     /// zeptun or hev has nothing to borrow: those engines take their
     /// descriptor from VpnService (`set_android_fd`) or create the device
     /// themselves.
-    #[cfg(all(not(feature = "tun"), any(feature = "zeptun", feature = "hev", all(any(target_os="android",target_os="ios"),any(feature="xray",feature="singbox",feature="mihomo",feature="metacubex-tun")))))]
+    #[cfg(all(not(feature = "tun"), any(feature = "zeptun", feature = "hev", all(any(target_os="android",target_os="ios"),any(feature="xray",feature="singbox",feature="mihomo",feature="sing-tun")))))]
     fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
         Ok(None)
     }
@@ -221,7 +221,7 @@ impl TunEngines {
 /// while a revoked permission is one only the user can answer and ends the
 /// session with something to act on. "Could not establish the VPN interface"
 /// told them neither.
-#[cfg(all(feature = "tun", any(feature = "zeptun", feature = "hev", all(any(target_os="android",target_os="ios"),any(feature="xray",feature="singbox",feature="mihomo",feature="metacubex-tun")))))]
+#[cfg(all(feature = "tun", any(feature = "zeptun", feature = "hev", all(any(target_os="android",target_os="ios"),any(feature="xray",feature="singbox",feature="mihomo",feature="sing-tun")))))]
 fn tun_refusal(code: i32) -> CoreError {
     use fcae_bridge_tun2socks::host_fd;
     match code {
@@ -277,8 +277,8 @@ impl TunEngines {
                     config::TunEngine::Xray=>Some(fcae_bridge_xray::tun_ffi()),
                     #[cfg(feature="mihomo")]
                     config::TunEngine::Mihomo=>{fcae_bridge_mihomo::prepare_tun(cfg)?;Some(fcae_bridge_mihomo::tun_ffi())},
-                    #[cfg(feature="metacubex-tun")]
-                    config::TunEngine::MetaSingTun=>Some(fcae_bridge_metacubex_tun::tun_ffi()),
+                    #[cfg(feature="sing-tun")]
+                    config::TunEngine::MetaSingTun=>Some(fcae_bridge_sing_tun::tun_ffi()),
                     _=>None,
                 };
                 if let Some(ffi)=ffi{return self.proxy_core_tun.start_with(cfg,endpoints,cancel,ffi);}
@@ -421,7 +421,7 @@ impl TunBridge for TunEngines {
 
     fn check_health(&self, cfg: &config::SessionConfig) -> Result<(), CoreError> {
         #[cfg(feature="singbox")]
-        if cfg.destinations.is_some(){self.destinations.check_health()?;}
+        if cfg.destinations.is_some() && !fcae_runtime::destination_routing::uses_native(cfg){self.destinations.check_health()?;}
         #[cfg(target_os="macos")]
         if cfg.uses_macos_ne(){return self.macos_ne.check_health(cfg);}
         #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]
@@ -1361,7 +1361,7 @@ pub unsafe extern "C" fn fcae_tun_engine_info(index: u32, out: *mut FcaeTunEngin
             1 => zeptun_info_fields(),
             2 => hev_info_fields(),
             6 => {
-                let compiled=cfg!(feature="metacubex-tun");
+                let compiled=cfg!(feature="sing-tun");
                 let supported=cfg!(any(windows,target_os="linux",target_os="macos",target_os="android",target_os="ios")) && fcae_bridge_tun2socks::is_supported();
                 (FCAE_TUN_ENGINE_METACUBEX_SING_TUN,"metacubex-sing-tun","sing-tun (MetaCubeX)",compiled&&supported,if !compiled{"not compiled into this build"}else if !supported{"native sing-tun is unavailable on this target"}else{""})
             },

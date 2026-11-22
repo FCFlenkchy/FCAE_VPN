@@ -1,5 +1,5 @@
 [package]
-name = "fcae-bridge-metacubex-tun"
+name = "fcae-bridge-sing-tun"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,4 +7,4 @@ license.workspace = true
 
 [dependencies]
 fcae-runtime.workspace = true
-fcae-go-bridge = { workspace = true, features = ["metacubex-tun"] }
+fcae-go-bridge = { workspace = true, features = ["sing-tun"] }

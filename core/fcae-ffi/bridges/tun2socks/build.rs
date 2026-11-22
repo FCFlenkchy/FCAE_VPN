@@ -57,7 +57,7 @@ fn main() {
     if cfg!(feature = "stub") {
         // The archive is what exports these symbols; a stub build that also
         // asks for a core would fail at link time with an unhelpful message.
-        if psiphon || xray || singbox || mihomo || cfg!(feature = "metacubex-tun") {
+        if psiphon || xray || singbox || mihomo || cfg!(feature = "sing-tun") {
             panic!(
                 "a proxy core needs the live Go archive, but `fcae-go-bridge/stub` is enabled; \
                  drop `stub`, or drop the core that needs it"
@@ -115,8 +115,8 @@ fn main() {
             .ldflags
             .push("-X github.com/metacubex/mihomo/constant.Version=embedded".into());
     }
-    if cfg!(feature = "metacubex-tun") {
-        archive.tags.push("fcae_metacubex_tun".into());
+    if cfg!(feature = "sing-tun") {
+        archive.tags.push("fcae_sing_tun".into());
         archive.tags.push("with_gvisor".into());
     }
     if xray {
@@ -274,7 +274,7 @@ fn cores(psiphon: bool, xray: bool, singbox: bool, mihomo: bool) -> String {
     if mihomo {
         names.push("mihomo");
     }
-    if cfg!(feature = "metacubex-tun") {
+    if cfg!(feature = "sing-tun") {
         names.push("MetaCubeX/sing-tun");
     }
     if names.is_empty() {
@@ -328,9 +328,9 @@ fn assemble(
         (singbox, "singbox", "singbox.go"),
         (mihomo, "mihomo", "mihomo.go"),
         (
-            cfg!(feature = "metacubex-tun"),
-            "metacubex-tun",
-            "metacubex_tun.go",
+            cfg!(feature = "sing-tun"),
+            "sing-tun",
+            "sing_tun.go",
         ),
     ] {
         if !enabled {
@@ -400,8 +400,8 @@ fn assemble(
             ));
         }
     }
-    if cfg!(feature = "metacubex-tun") {
-        let source = root.join("core/metacubex-sing-tun");
+    if cfg!(feature = "sing-tun") {
+        let source = root.join("core/sing-tun");
         assert!(
             source.join("go.mod").is_file(),
             "MetaCubeX/sing-tun submodule is missing; initialize submodules before building"

@@ -1,4 +1,4 @@
-//go:build fcae_metacubex_tun
+//go:build fcae_sing_tun
 
 package main
 
