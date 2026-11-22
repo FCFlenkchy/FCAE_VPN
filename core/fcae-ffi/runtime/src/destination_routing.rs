@@ -210,7 +210,7 @@ impl Policy {
         if !socks.ip().is_loopback() || socks.port() == 0 || listen == 0 {
             return Err(invalid("destination routing requires loopback listeners"));
         }
-        let mut rules = vec![json!({"port":[53,853],"action":"route","outbound":"fcae-exit"})];
+        let mut rules = vec![json!({"port":53,"action":"route","outbound":"fcae-direct"})];
         let domains = self.rules.iter().any(|rule| rule.kind == "domain");
         if domains {
             rules.push(json!({"action":"sniff","sniffer":["tls","http","quic"],"timeout":"500ms"}));
@@ -335,13 +335,11 @@ pub fn apply_singbox(
         })
         .cloned()
         .collect();
-    let mut rules = guards;
-    rules.extend(
-        compiled["route"]["rules"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default(),
-    );
+    let mut compiled_rules = compiled["route"]["rules"].as_array().cloned().unwrap_or_default();
+    // DNS bypass must precede process guards and a TCP-only tunnel's UDP reject.
+    let mut rules = vec![compiled_rules.remove(0)];
+    rules.extend(guards);
+    rules.extend(compiled_rules);
     value["outbounds"] = compiled["outbounds"].clone();
     value["dns"] = compiled["dns"].clone();
     value["route"]["default_domain_resolver"] =
@@ -392,8 +390,7 @@ pub fn apply_mihomo(
             }
         ));
     };
-    push("DST-PORT,53".into(), true);
-    push("DST-PORT,853".into(), true);
+    push("DST-PORT,53".into(), false);
     for rule in &policy.rules {
         let mut conditions = Vec::new();
         if rule.kind == "ip" {

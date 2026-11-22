@@ -178,6 +178,7 @@ static std::atomic<uintptr_t> s_ui_window{0};
 // Tick count at which an elevated relaunch succeeded; the window thread ends
 // this process once the hand-off window has passed. Zero while none is pending.
 static std::atomic<DWORD> s_elevation_handoff_at{0};
+static std::atomic<HANDLE> s_elevation_child{nullptr};
 static std::atomic<bool> s_elevation_pending{false};
 // How long the copy that asked for elevation may look like it is still there
 // after the elevated process has started. Only long enough for the shell to
@@ -484,6 +485,10 @@ static uint64_t config_signature() {
     h = fnv_cstr(h, g_app.firefox_location);
     h = fnv_cstr(h, g_app.firefox_server);
     h = fnv_value(h, g_app.firefox_transport);
+    h = fnv_value(h, g_app.ur_socks_port);
+    h = fnv_value(h, g_app.ur_http_port);
+    h = fnv_value(h, g_app.ur_socks_enabled);
+    h = fnv_value(h, g_app.ur_http_enabled);
     h = fnv_value(h, g_app.tor_socks_port);
     h = fnv_cstr(h, g_app.psiphon_region);
     h = fnv_cstr(h, g_app.psiphon_region_list);
@@ -654,6 +659,10 @@ void ui_request_redraw() {
 #endif
 }
 
+bool ui_runtime_ready() {
+    return s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready;
+}
+
 /// Finish an elevation hand-off from the window thread.
 ///
 /// `PostQuitMessage` only posts to the calling thread's queue, so the exit the
@@ -666,6 +675,20 @@ void ui_handoff_tick() {
     // The elevated child has presented its first frame before this is armed.
     if (GetTickCount() - at >= kHandoffWindowMs) {
         s_elevation_handoff_at.store(0, std::memory_order_relaxed);
+        HANDLE child = s_elevation_child.exchange(nullptr, std::memory_order_acq_rel);
+        if (child) {
+            const DWORD state = WaitForSingleObject(child, 0);
+            DWORD exit_code = 0;
+            if (state != WAIT_TIMEOUT) {
+                GetExitCodeProcess(child, &exit_code);
+                CloseHandle(child);
+                fcae_ui_diagnostic(10, exit_code);
+                g_app.add_log(FCAE_LOG_ERROR, "[ui] Administrator copy exited during handoff; keeping this window open. Check deps/logs.txt.");
+                s_elevation_pending.store(false, std::memory_order_release);
+                return;
+            }
+            CloseHandle(child);
+        }
         g_app.running.store(false);
         const HWND hwnd = reinterpret_cast<HWND>(s_ui_window.load());
         if (hwnd != nullptr) {
@@ -1190,6 +1213,10 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "chain_exit_0") s_loaded_legacy_chain_exits[0] = atoi(val.c_str());
     else if (key == "chain_exit_1") s_loaded_legacy_chain_exits[1] = atoi(val.c_str());
     else if (key == "chain_exit_2") s_loaded_legacy_chain_exits[2] = atoi(val.c_str());
+    else if (key == "urnetwork_socks_port") g_app.ur_socks_port = (uint16_t)parse_port(val, g_app.ur_socks_port);
+    else if (key == "urnetwork_http_port") g_app.ur_http_port = (uint16_t)parse_port(val, g_app.ur_http_port);
+    else if (key == "urnetwork_socks_enabled") g_app.ur_socks_enabled = atoi(val.c_str()) != 0;
+    else if (key == "urnetwork_http_enabled") g_app.ur_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "firefox_account_id") snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", val.c_str());
     else if (key == "firefox_location") snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s", val.c_str());
     else if (key == "firefox_server") snprintf(g_app.firefox_server, sizeof(g_app.firefox_server), "%s", val.c_str());
@@ -1421,6 +1448,10 @@ static bool save_config(bool quiet = false) {
     fprintf(f, "frag_max_delay=%d\n", g_app.frag_max_delay);
     fprintf(f, "socks_port=%u\n", (unsigned)g_app.socks_port);
     fprintf(f, "http_port=%u\n", (unsigned)g_app.http_port);
+    fprintf(f, "urnetwork_socks_port=%u\n", (unsigned)g_app.ur_socks_port);
+    fprintf(f, "urnetwork_http_port=%u\n", (unsigned)g_app.ur_http_port);
+    fprintf(f, "urnetwork_socks_enabled=%d\n", g_app.ur_socks_enabled ? 1 : 0);
+    fprintf(f, "urnetwork_http_enabled=%d\n", g_app.ur_http_enabled ? 1 : 0);
     fprintf(f, "firefox_socks_port=%u\n", (unsigned)g_app.firefox_socks_port);
     fprintf(f, "firefox_http_port=%u\n", (unsigned)g_app.firefox_http_port);
     fprintf(f, "xray_socks_port=%u\n", (unsigned)g_app.xray_socks_port);
@@ -1697,12 +1728,12 @@ static bool load_config_from(const std::string& path) {
         // is the one that moves the carrier itself: Tor carries there, so Tor is
         // the protocol and the transport the profile names is what rides it.
         int exit_hop = -1;
-        if (s_loaded_tor_mode == 2) {
+        if (!s_loaded_chain_transports && s_loaded_tor_mode == 2) {
             apply_transport(kTorTransport);
             exit_hop = stored_is_hop ? 0 : stored;
-        } else if (s_loaded_tor_mode == 1) {
+        } else if (!s_loaded_chain_transports && s_loaded_tor_mode == 1) {
             exit_hop = kTorTransport;
-        } else if (s_loaded_tor_mode == 3) {
+        } else if (!s_loaded_chain_transports && s_loaded_tor_mode == 3) {
             exit_hop = kPsiphonTransport;
         }
         if (exit_hop >= 0 && g_app.chain_transports.empty()) {
@@ -2029,7 +2060,7 @@ void ui_init() {
         int argc = 0;
         LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         if (argv) {
-            if (argc == 3 && std::wcscmp(argv[1], L"--fcae-wait-parent") == 0) {
+            if (argc >= 3 && std::wcscmp(argv[1], L"--fcae-wait-parent") == 0) {
                 wchar_t* end = nullptr;
                 unsigned long pid = std::wcstoul(argv[2], &end, 10);
                 if (end != argv[2] && *end == L'\0' && pid != 0 && pid != GetCurrentProcessId())
@@ -2810,6 +2841,8 @@ static void firefox_account_rows(const std::string& root) {
     ImGui::Spacing();
 }
 
+#include "shared_account_ui.h"
+
 static void firefox_location_combo() {
     std::vector<FirefoxLocationOption> options = s_firefox_location_options;
     const std::string saved = g_app.firefox_location;
@@ -2833,13 +2866,11 @@ static void firefox_location_combo() {
         options.push_back({saved, saved + " (saved location)", ""});
         selected_index = (int)options.size() - 1;
     }
-    std::vector<const char*> labels;
-    labels.reserve(options.size());
-    for (const auto& option : options) labels.push_back(option.label.c_str());
-    if (ImGui::Combo("Region", &selected_index, labels.data(), (int)labels.size())) {
-        snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s",
-                 options[(size_t)selected_index].value.c_str());
-    }
+    std::vector<std::pair<std::string, std::string>> rows;
+    for (const auto& option : options) rows.emplace_back(option.value, option.label);
+    std::string value = options[(size_t)selected_index].value;
+    if (account_region_combo("firefox", value, rows))
+        snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s", value.c_str());
 }
 
 static uint64_t firefox_account_submit(const std::string& request) {
@@ -4015,12 +4046,7 @@ static void render_firefox_add_account() {
         ImGui::OpenPopup("Add Firefox account");
         s_firefox_add_popup_open = false;
     }
-    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    // Prose dialog: wraps, so the width is a readable measure rather than the
-    // length of its longest sentence.
-    ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
-    constrain_modal();
-    if (!ImGui::BeginPopupModal("Add Firefox account", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
+    if (!begin_account_dialog("Add Firefox account", 520)) return;
     if (s_firefox_add_should_close) {
         s_firefox_add_should_close = false;
         ImGui::CloseCurrentPopup();
@@ -4029,8 +4055,7 @@ static void render_firefox_add_account() {
     }
     s_firefox_captcha_embedded = true;
     render_firefox_captcha_content();
-    UiText::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
-    UiText::InputText("Password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
+    account_identity_fields(g_app.firefox_email, sizeof(g_app.firefox_email), g_app.firefox_password, sizeof(g_app.firefox_password));
     ImGui::BeginDisabled(g_app.firefox_job != 0 || !g_app.firefox_email[0] || !g_app.firefox_password[0]);
     if (ImGui::Button("Sign in")) {
         const std::string root = firefox_json_escape(data_dir().c_str());
@@ -4062,11 +4087,7 @@ static void render_firefox_code_prompt() {
         ImGui::OpenPopup("Firefox account security code");
         s_firefox_code_popup_open = false;
     }
-    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    // Prose dialog: see above.
-    ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Appearing);
-    constrain_modal();
-    if (!ImGui::BeginPopupModal("Firefox account security code", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
+    if (!begin_account_dialog("Firefox account security code", 500)) return;
     if (s_firefox_code_should_close) {
         s_firefox_code_should_close = false;
         ImGui::CloseCurrentPopup();
@@ -4373,7 +4394,7 @@ void render_ui() {
         float btn_w = narrow ? (std::max)(action_btn_min, ImGui::GetContentRegionAvail().x - pair_reserve)
                              : action_btn_min;
         bool show_disconnect = connected || busy || tun_paused;
-        bool connect_disabled = startup;
+        bool connect_disabled = startup || ur_account_busy();
 #ifdef _WIN32
         connect_disabled |= s_elevation_pending.load(std::memory_order_acquire);
 #endif
@@ -4502,6 +4523,10 @@ void render_ui() {
                         sei.hwnd = consent_owner;
                         sei.lpVerb = L"runas";
                         sei.lpFile = exe_path.c_str();
+                        const auto slash = exe_path.find_last_of(L"\\/");
+                        const std::wstring work_dir = slash == std::wstring::npos
+                            ? std::wstring() : exe_path.substr(0, slash);
+                        sei.lpDirectory = work_dir.empty() ? nullptr : work_dir.c_str();
                         wchar_t handoff_args[192];
                         std::swprintf(handoff_args, 192, L"--fcae-wait-parent %lu --fcae-window %ld %ld %ld %ld %d",
                                       static_cast<unsigned long>(GetCurrentProcessId()), bounds.left, bounds.top,
@@ -4522,12 +4547,21 @@ void render_ui() {
                             // itself proof that elevation succeeded.
                             if (sei.hProcess && wait==WAIT_OBJECT_0+1)
                                 wait=WaitForSingleObject(ready,5000);
-                            const bool confirmed=wait==WAIT_OBJECT_0;
-                            if (sei.hProcess) CloseHandle(sei.hProcess);
+                            bool confirmed=wait==WAIT_OBJECT_0;
+                            DWORD exit_code = STILL_ACTIVE;
+                            if (sei.hProcess && GetExitCodeProcess(sei.hProcess, &exit_code)
+                                    && exit_code != STILL_ACTIVE) {
+                                confirmed = false;
+                                fcae_ui_diagnostic(10, exit_code);
+                            }
+                            if (!confirmed) fcae_ui_diagnostic(11, wait);
                             if (confirmed) {
+                                s_elevation_child.store(sei.hProcess, std::memory_order_release);
+                                fcae_ui_diagnostic(9, child_pid);
                                 s_elevation_handoff_at.store(GetTickCount() | 1u, std::memory_order_relaxed);
                             } else {
-                                g_app.add_log(FCAE_LOG_ERROR, "[ui] Administrator handoff was not confirmed; keeping this window open. Check Windows UAC / compatibility policy and try running this executable as administrator.");
+                                if (sei.hProcess) CloseHandle(sei.hProcess);
+                                g_app.add_log(FCAE_LOG_ERROR, "[ui] Administrator handoff was not confirmed; keeping this window open. The elevated copy did not finish initialization. Check deps/logs.txt (or %LOCALAPPDATA%/FCAE_VPN/logs/logs.txt) and Windows UAC / compatibility policy.");
                                 s_elevation_pending.store(false, std::memory_order_release);
                             }
                             ui_request_redraw();

@@ -25,6 +25,8 @@
 
 #include "ui_render.h"
 
+extern "C" void fcae_ui_diagnostic(uint32_t event, uint32_t value);
+
 static ID3D11Device*           g_pd3dDevice       = nullptr;
 static ID3D11DeviceContext*    g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*         g_pSwapChain       = nullptr;
@@ -463,6 +465,13 @@ static bool read_elevated_window(ElevatedWindow& handoff) {
             std::swprintf(name, 96, L"Local\\FCAE.UI.Ready.%lu", pid);
             handoff.ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, name);
         }
+        if (!handoff.ready) {
+            const DWORD error = GetLastError();
+            fcae_ui_diagnostic(12, error);
+            LocalFree(args);
+            MessageBoxW(nullptr, L"The administrator handoff event could not be opened. The original FCAE window has been kept open. Close extra copies and retry CONNECT.", L"FCAE: administrator handoff failed", MB_OK | MB_ICONERROR);
+            return false;
+        }
         if (handoff.ready && count == 9 && std::wcscmp(args[3], L"--fcae-window") == 0) {
             long values[5] = {};
             bool valid = true;
@@ -494,6 +503,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Kick the runtime/config initializer off first: it does not touch ImGui
     // or the window, so engine setup overlaps window and D3D creation
     // instead of serializing behind it.
+    fcae_ui_diagnostic(8, GetCurrentProcessId());
     ElevatedWindow handoff;
     if (!read_elevated_window(handoff)) return ERROR_ELEVATION_REQUIRED;
     ui_init();
@@ -691,8 +701,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         const HRESULT presented = g_pSwapChain->Present(1, 0);
         if (presented == S_OK) {
             g_has_presented_frame = true;
-            if (handoff.ready) {
-                SetEvent(handoff.ready);
+            if (handoff.ready && ui_runtime_ready()) {
+                if (!SetEvent(handoff.ready)) {
+                    fcae_ui_diagnostic(12, GetLastError());
+                } else {
+                    fcae_ui_diagnostic(13, GetCurrentProcessId());
+                }
                 CloseHandle(handoff.ready);
                 handoff.ready = nullptr;
                 SetForegroundWindow(hWnd);

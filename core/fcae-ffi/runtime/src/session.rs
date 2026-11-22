@@ -1297,6 +1297,7 @@ fn configure_internal_listeners(config: &mut SessionConfig, exit: &SessionConfig
     let is_tor = has_tor && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain);
     let (socks, http) = match &config.listener_policy {
         Some(p) if is_tor => (p.tor_socks, p.tor_http),
+        Some(p) if config.backend == FcaeBackend::URnetwork => (p.urnetwork_socks, p.urnetwork_http),
         Some(p) if config.backend == FcaeBackend::Firefox => (p.firefox_socks, p.firefox_http),
         Some(p) if config.backend == FcaeBackend::Aether => (p.aether_socks, p.aether_http),
         Some(p) if config.backend == FcaeBackend::Xray => (p.xray_socks, p.xray_http),

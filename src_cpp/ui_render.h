@@ -157,6 +157,8 @@ struct AppState {
     static constexpr uint16_t kFirefoxDefaultHttpPort = 1826;
     uint16_t firefox_socks_port = kFirefoxDefaultSocksPort;
     uint16_t firefox_http_port  = kFirefoxDefaultHttpPort;
+    uint16_t ur_socks_port = 1833, ur_http_port = 1834;
+    bool ur_socks_enabled = true, ur_http_enabled = false;
     // The cores get their own pairs. Aether (1819/1820), Tor (1821/1822),
     // Psiphon (1823/1824) and Firefox (1825/1826) already hold theirs, and the
     // engine refuses a listener that would clash with one of them.
@@ -428,6 +430,10 @@ struct AppState {
         return mtu_valid && mtu >= 1280 && mtu <= 9000 ? mtu : 0xffffffffu;
     }
 
+    bool final_listener_is_urnetwork() const {
+        return chain_transports.empty() ? backend == FCAE_BACKEND_URNETWORK : chain_transports.back() == 11;
+    }
+
     bool final_listener_is_firefox() const {
         if (!chain_transports.empty()) return chain_transports.back() == 10;
         return backend == 2;
@@ -557,7 +563,7 @@ struct AppState {
             case 3: return kXrayDefaultSocksPort;
             case 4: return kSingBoxDefaultSocksPort;
             case 5: return kMihomoDefaultSocksPort;
-            default: return final_listener_is_firefox() ? kFirefoxDefaultSocksPort : 1819;
+            default: return final_listener_is_firefox() ? kFirefoxDefaultSocksPort : final_listener_is_urnetwork() ? 1833 : 1819;
         }
     }
 
@@ -575,7 +581,7 @@ struct AppState {
             case 3: return pinned_or(xray_socks_port, kXrayDefaultSocksPort, true);
             case 4: return pinned_or(singbox_socks_port, kSingBoxDefaultSocksPort, true);
             case 5: return pinned_or(mihomo_socks_port, kMihomoDefaultSocksPort, true);
-            default: return final_listener_is_firefox() ? firefox_socks_port : socks_port;
+            default: return final_listener_is_firefox() ? firefox_socks_port : final_listener_is_urnetwork() ? ur_socks_port : socks_port;
         }
     }
 
@@ -584,7 +590,7 @@ struct AppState {
             case 3: return pinned_or(xray_http_port, kXrayDefaultHttpPort, false);
             case 4: return pinned_or(singbox_http_port, kSingBoxDefaultHttpPort, false);
             case 5: return pinned_or(mihomo_http_port, kMihomoDefaultHttpPort, false);
-            default: return final_listener_is_firefox() ? firefox_http_port : http_port;
+            default: return final_listener_is_firefox() ? firefox_http_port : final_listener_is_urnetwork() ? ur_http_port : http_port;
         }
     }
 
@@ -593,7 +599,7 @@ struct AppState {
             case 3: return xray_socks_enabled;
             case 4: return singbox_socks_enabled;
             case 5: return mihomo_socks_enabled;
-            default: return final_listener_is_firefox() ? firefox_socks_enabled : socks_enabled;
+            default: return final_listener_is_firefox() ? firefox_socks_enabled : final_listener_is_urnetwork() ? ur_socks_enabled : socks_enabled;
         }
     }
 
@@ -602,7 +608,7 @@ struct AppState {
             case 3: return xray_http_enabled;
             case 4: return singbox_http_enabled;
             case 5: return mihomo_http_enabled;
-            default: return final_listener_is_firefox() ? firefox_http_enabled : http_enabled;
+            default: return final_listener_is_firefox() ? firefox_http_enabled : final_listener_is_urnetwork() ? ur_http_enabled : http_enabled;
         }
     }
 
@@ -817,6 +823,10 @@ struct AppState {
             ",\"aetherHttp\":" + (http_enabled ? "true" : "false") +
             ",\"aetherSocksPort\":" + port(socks_port) +
             ",\"aetherHttpPort\":" + port(http_port) +
+            ",\"urnetworkSocks\":" + (ur_socks_enabled ? "true" : "false") +
+            ",\"urnetworkHttp\":" + (ur_http_enabled ? "true" : "false") +
+            ",\"urnetworkSocksPort\":" + port(ur_socks_port) +
+            ",\"urnetworkHttpPort\":" + port(ur_http_port) +
             ",\"firefoxSocks\":" + (firefox_socks_enabled ? "true" : "false") +
             ",\"firefoxHttp\":" + (firefox_http_enabled ? "true" : "false") +
             ",\"firefoxSocksPort\":" + port(firefox_socks_port) +
@@ -961,6 +971,7 @@ void ui_request_redraw();
 void ui_set_window_handle(void* window);
 /// Act on a pending elevation hand-off; called by the frame loop.
 void ui_handoff_tick();
+bool ui_runtime_ready();
 
 /// Bookkeeping after a frame was actually painted. Called by ui_frame().
 void ui_note_frame_drawn();

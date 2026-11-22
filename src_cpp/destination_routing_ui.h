@@ -33,15 +33,6 @@ inline void destination_routing_ui() {
         else error[0]=0;
         mode=g_app.destination_mode;
     }
-    ImGui::TextWrapped("%s",mode==0
-        ? "Off: saved destination rules are ignored. Your normal tunnel and app-routing settings still apply."
-        : mode==1
-            ? "Whitelist: only matching traffic uses the selected tunnel/exit chain; other traffic goes DIRECT."
-            : "Blacklist: matching traffic goes DIRECT; other traffic uses the selected tunnel/exit chain.");
-    if(mode==1 && !g_app.destination_has_rules())ImGui::TextWrapped("The whitelist is empty: non-DNS traffic goes DIRECT until you add a matching rule.");
-    if(mode!=0)ImGui::TextWrapped("DNS remains on the protected tunnel path. Domain matching uses available DNS/hostname or TLS, HTTP and QUIC metadata; encrypted or absent hostnames cannot be inferred.");
-    ImGui::TextWrapped("*.example.com matches subdomains only, not example.com itself. Add example.com separately to match the root domain.");
-    ImGui::TextWrapped("Changes apply on the next connection.");
     ImGui::Separator();
     ImGui::BeginDisabled(!available);
     ImGui::Combo("Rule type",&kind,kinds,3);

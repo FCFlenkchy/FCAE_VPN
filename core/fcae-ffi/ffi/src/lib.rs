@@ -849,15 +849,23 @@ fn sponsor_proxy_for(config: &config::SessionConfig) -> Option<String> {
 pub extern "C" fn fcae_ui_diagnostic(event: u32, value: u32) {
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     {
+        // The elevated child can fail before fcae_init installs the logger.
+        if event == 8 { crash_log::init(); }
         let message = match event {
             0 => format!("[ui] TUN engine selected: {value}"),
             1 => format!("[ui] connect clicked: mode={} TUN engine={}", value >> 16, value & 0xffff),
             2 => "[ui] requesting administrator elevation".to_string(),
-            3 => format!("[ui] elevated process launched: pid={value}; this process will exit"),
+            3 => format!("[ui] elevated process launched: pid={value}; waiting for initialized UI; shared diagnostic log: deps/logs.txt (or per-user log fallback)"),
             4 => format!("[ui] administrator elevation failed: Windows error {value}"),
             5 => "[ui] normal shutdown requested".to_string(),
             6 => format!("[ui] elevated handoff from pid={value}"),
             7 => format!("[ui] elevated handoff wait result=0x{value:08X} (0=parent exited, 0x102=timeout)"),
+            8 => format!("[ui] Windows GUI startup: pid={value}"),
+            9 => format!("[ui] administrator handoff confirmed: pid={value}; original window will close"),
+            10 => format!("[ui] administrator child exited before handoff: exit code 0x{value:08X}"),
+            11 => format!("[ui] administrator handoff not confirmed: wait result 0x{value:08X}"),
+            12 => format!("[ui] administrator handoff event failed: Windows error {value}"),
+            13 => format!("[ui] initialized administrator UI ready: pid={value}"),
             _ => return,
         };
         crash_log::record_log(&message);

@@ -383,8 +383,7 @@ fn configuration(
         }
         TunEngine::Mihomo => {
             let mut rules = vec![
-                "DST-PORT,53,fcae-tun-exit".to_owned(),
-                "DST-PORT,853,fcae-tun-exit".to_owned(),
+                "DST-PORT,53,fcae-tun-direct".to_owned(),
             ];
             let process = |path: &str, out: &str| {
                 let mut regex = if cfg!(windows) {

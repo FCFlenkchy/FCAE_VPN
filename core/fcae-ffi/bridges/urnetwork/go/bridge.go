@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,7 @@ import (
 )
 
 type urRequest struct {
+	AccountID string `json:"account_id"`
 	Op        string `json:"op"`
 	Dir       string `json:"data_dir"`
 	Email     string `json:"email"`
@@ -45,7 +47,19 @@ type urRequest struct {
 	Tun       bool   `json:"tun"`
 	ID        uint64 `json:"id"`
 }
+type urAccount struct {
+	ID           string                        `json:"id"`
+	Email        string                        `json:"email"`
+	Network      string                        `json:"network"`
+	Client       string                        `json:"client,omitempty"`
+	Instance     string                        `json:"instance,omitempty"`
+	Registration *ur.RegisterNetworkClientArgs `json:"registration,omitempty"`
+}
 type urStore struct {
+	Selected     string                        `json:"selected,omitempty"`
+	Accounts     []urAccount                   `json:"accounts,omitempty"`
+	Locations    []map[string]string           `json:"locations,omitempty"`
+	LocationsAt  int64                         `json:"locations_at,omitempty"`
 	Email        string                        `json:"email,omitempty"`
 	Network      string                        `json:"network,omitempty"`
 	Client       string                        `json:"client,omitempty"`
@@ -81,13 +95,58 @@ func urLoad(dir string) (urStore, error) {
 	if e != nil {
 		return s, errors.New("cannot read URnetwork account")
 	}
-	if len(b) > 65536 {
+	if len(b) > 2*1024*1024 {
 		return s, errors.New("URnetwork account exceeds size limit")
 	}
 	e = json.Unmarshal(b, &s)
+	if e == nil && s.Network != "" && s.Selected == "" {
+		s.Selected = urAccountID(s.Email, s.Network)
+		s.remember()
+	}
 	return s, e
 }
+func urAccountID(email, token string) string {
+	identity := strings.ToLower(strings.TrimSpace(email))
+	if identity == "" {
+		identity = token
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:16])
+}
+func (s *urStore) remember() {
+	if s.Network == "" || s.Selected == "" {
+		return
+	}
+	a := urAccount{s.Selected, s.Email, s.Network, s.Client, s.Instance, s.Registration}
+	for i := range s.Accounts {
+		if s.Accounts[i].ID == a.ID {
+			s.Accounts[i] = a
+			return
+		}
+	}
+	s.Accounts = append(s.Accounts, a)
+}
+func (s *urStore) activate(id string) bool {
+	for _, a := range s.Accounts {
+		if a.ID == id {
+			s.Selected, s.Email, s.Network, s.Client, s.Instance, s.Registration = a.ID, a.Email, a.Network, a.Client, a.Instance, a.Registration
+			return true
+		}
+	}
+	return false
+}
+func urSnapshot(s *urStore) map[string]any {
+	rows := []map[string]string{}
+	for _, a := range s.Accounts {
+		rows = append(rows, map[string]string{"id": a.ID, "email": a.Email})
+	}
+	return map[string]any{"email": s.Email, "signed_in": s.Network != "", "selected": s.Selected, "accounts": rows, "region": s.Region, "transport": s.Transport, "locations": s.Locations, "locations_stale": time.Now().Unix()-s.LocationsAt >= 900}
+}
 func urSave(dir string, s *urStore) error {
+	s.remember()
+	if len(s.Accounts) > 32 {
+		return errors.New("URnetwork account limit reached (32)")
+	}
 	parent := filepath.Dir(urPath(dir))
 	if e := os.MkdirAll(parent, 0700); e != nil {
 		return errors.New("cannot create URnetwork account directory")
@@ -98,6 +157,9 @@ func urSave(dir string, s *urStore) error {
 	b, e := json.Marshal(s)
 	if e != nil {
 		return e
+	}
+	if len(b) > 2*1024*1024 {
+		return errors.New("URnetwork account store exceeds size limit")
 	}
 	f, e := os.CreateTemp(parent, ".account-*")
 	if e != nil {
@@ -196,9 +258,15 @@ func ur_call(raw *C.char) (out *C.char) {
 		return urResult(nil, errors.New("cannot load URnetwork account"))
 	}
 	if r.Op == "load" {
-		return urResult(map[string]any{"email": s.Email, "signed_in": s.Network != "", "region": s.Region, "transport": s.Transport}, nil)
+		return urResult(urSnapshot(&s), nil)
 	}
 	if r.Op == "save" {
+		urMu.Lock()
+		busy := len(urSessions) > 0
+		urMu.Unlock()
+		if busy {
+			return urResult(nil, errors.New("disconnect URnetwork before changing settings"))
+		}
 		if !urTransportValid(r.Transport) {
 			return urResult(nil, errors.New("unsupported URnetwork transport"))
 		}
@@ -211,25 +279,47 @@ func ur_call(raw *C.char) (out *C.char) {
 		s.Transport = r.Transport
 		return urResult(map[string]bool{"ok": true}, urSave(dir, &s))
 	}
-	if r.Op == "logout" {
-		urMu.Lock()
-		busy := len(urSessions) > 0
-		urMu.Unlock()
-		if busy {
-			return urResult(nil, errors.New("disconnect URnetwork before signing out"))
-		}
-		s.Network = ""
-		s.Client = ""
-		s.Email = ""
-		s.Instance = ""
-		s.Registration = nil
-		return urResult(map[string]bool{"ok": true}, urSave(dir, &s))
-	}
+	// The directory lock serializes account changes with start/credential refresh.
 	urMu.Lock()
 	busy := len(urSessions) > 0
 	urMu.Unlock()
 	if busy {
-		return urResult(nil, errors.New("disconnect URnetwork before account or location requests"))
+		return urResult(nil, errors.New("disconnect URnetwork before changing accounts or locations"))
+	}
+	if r.Op == "select" {
+		if !s.activate(r.AccountID) {
+			return urResult(nil, errors.New("URnetwork account not found"))
+		}
+		err := urSave(dir, &s)
+		return urResult(urSnapshot(&s), err)
+	}
+	if r.Op == "remove" || r.Op == "logout" {
+		id := r.AccountID
+		if id == "" {
+			id = s.Selected
+		}
+		found := false
+		for i, a := range s.Accounts {
+			if a.ID == id {
+				s.Accounts = append(s.Accounts[:i], s.Accounts[i+1:]...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return urResult(nil, errors.New("URnetwork account not found"))
+		}
+		if id == s.Selected {
+			s.Selected, s.Email, s.Network, s.Client, s.Instance, s.Registration = "", "", "", "", "", nil
+			if len(s.Accounts) > 0 {
+				s.activate(s.Accounts[0].ID)
+			}
+		}
+		err := urSave(dir, &s)
+		return urResult(urSnapshot(&s), err)
+	}
+	if r.Op == "regions" && s.LocationsAt > 0 && time.Now().Unix()-s.LocationsAt < 900 {
+		return urResult(urSnapshot(&s), nil)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -294,12 +384,26 @@ func ur_call(raw *C.char) (out *C.char) {
 		if token == "" {
 			return urResult(nil, errors.New("URnetwork did not return an account credential"))
 		}
+		if len(s.Accounts) >= 32 {
+			id := urAccountID(r.Email, token)
+			exists := false
+			for _, a := range s.Accounts {
+				if a.ID == id {
+					exists = true
+				}
+			}
+			if !exists {
+				return urResult(nil, errors.New("URnetwork account limit reached (32)"))
+			}
+		}
+		s.Selected = urAccountID(r.Email, token)
 		s.Network = token
 		s.Client = ""
 		s.Registration = nil
 		s.Instance = ""
 		s.Email = r.Email
-		return urResult(map[string]bool{"signed_in": true}, urSave(dir, &s))
+		err := urSave(dir, &s)
+		return urResult(urSnapshot(&s), err)
 	case "regions":
 		if s.Network == "" {
 			return urResult(nil, errors.New("sign in to URnetwork first"))
@@ -325,7 +429,10 @@ func ur_call(raw *C.char) (out *C.char) {
 					}
 				}
 			}
-			return urResult(map[string]any{"locations": rows}, nil)
+			s.Locations = rows
+			s.LocationsAt = time.Now().Unix()
+			err := urSave(dir, &s)
+			return urResult(urSnapshot(&s), err)
 		case <-ctx.Done():
 			return urResult(nil, errors.New("URnetwork location request timed out"))
 		}

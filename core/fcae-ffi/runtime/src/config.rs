@@ -418,6 +418,10 @@ impl ChainHop {
 pub struct ListenerPolicy {
     pub aether_socks: bool,
     pub aether_http: bool,
+    pub urnetwork_socks: bool,
+    pub urnetwork_http: bool,
+    pub urnetwork_socks_port: u16,
+    pub urnetwork_http_port: u16,
     pub firefox_socks: bool,
     pub firefox_http: bool,
     pub tor_socks: bool,
@@ -448,6 +452,10 @@ impl Default for ListenerPolicy {
         Self {
             aether_socks: true,
             aether_http: false,
+            urnetwork_socks: true,
+            urnetwork_http: false,
+            urnetwork_socks_port: 0,
+            urnetwork_http_port: 0,
             firefox_socks: true,
             firefox_http: false,
             tor_socks: true,
@@ -483,7 +491,8 @@ impl ListenerPolicy {
             FcaeBackend::Xray => (self.xray_socks_port, self.xray_http_port),
             FcaeBackend::SingBox => (self.singbox_socks_port, self.singbox_http_port),
             FcaeBackend::Mihomo => (self.mihomo_socks_port, self.mihomo_http_port),
-            FcaeBackend::Psiphon | FcaeBackend::URnetwork => (0, 0),
+            FcaeBackend::URnetwork => (self.urnetwork_socks_port, self.urnetwork_http_port),
+            FcaeBackend::Psiphon => (0, 0),
         }
     }
 }
@@ -1111,6 +1120,10 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             Some(ListenerPolicy {
                 aether_socks: flag("aetherSocks", defaults.aether_socks),
                 aether_http: flag("aetherHttp", defaults.aether_http),
+                urnetwork_socks: flag("urnetworkSocks", defaults.urnetwork_socks),
+                urnetwork_http: flag("urnetworkHttp", defaults.urnetwork_http),
+                urnetwork_socks_port: port("urnetworkSocksPort"),
+                urnetwork_http_port: port("urnetworkHttpPort"),
                 firefox_socks: flag("firefoxSocks", defaults.firefox_socks),
                 firefox_http: flag("firefoxHttp", defaults.firefox_http),
                 tor_socks: flag("torSocks", defaults.tor_socks),
@@ -1152,7 +1165,8 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         // This used to be dropped here — the flag was set by the UI, parsed
         // by nothing, and the supervisor chained nothing, so Psiphon always
         // dialled the underlay directly instead of through Aether.
-        through_tunnel: raw._reserved[0] & !FCAE_CONFIG_TUN_HTTP != 0,
+        // Only bit zero is the legacy chain flag; TUN/private-route bits are unrelated.
+        through_tunnel: raw._reserved[0] & 1 != 0,
     };
 
     cfg.aether = parse_aether(&raw.aether)?;

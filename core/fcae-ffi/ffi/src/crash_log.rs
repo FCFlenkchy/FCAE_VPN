@@ -9,7 +9,17 @@ const MAX_LOG: usize = 256 * 1024 - 128;
 const MAX_PANIC: usize = 16 * 1024;
 const KEEP_LOG: usize = 128 * 1024;
 
-struct Log { file: File, path: PathBuf, bytes: usize }
+struct Log {
+    file: File, path: PathBuf, bytes: usize,
+    #[cfg(windows)]
+    append: File,
+}
+impl Log {
+    fn writer(&mut self) -> &mut File {
+        #[cfg(windows)] { &mut self.append }
+        #[cfg(not(windows))] { &mut self.file }
+    }
+}
 static LOG: OnceLock<Mutex<Log>> = OnceLock::new();
 static INIT: std::sync::Once = std::sync::Once::new();
 
@@ -47,9 +57,35 @@ fn prepare(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// Named per-path mutexes serialize rotation and writes between parent and
+// elevated child. No lifetime file lock: both processes keep logs.txt open.
+#[cfg(windows)]
+struct FileGate(*mut std::ffi::c_void);
+#[cfg(windows)]
+impl Drop for FileGate {
+    fn drop(&mut self) { unsafe { ReleaseMutex(self.0); CloseHandle(self.0); } }
+}
+#[cfg(windows)]
+fn file_gate(path: &Path, timeout: u32) -> std::io::Result<FileGate> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    path.to_string_lossy().replace('/', "\\").to_lowercase().hash(&mut hash);
+    let name: Vec<u16> = format!("Local\\FCAE.Log.{:016x}", hash.finish()).encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        if handle.is_null() { return Err(std::io::Error::last_os_error()); }
+        let wait = WaitForSingleObject(handle, timeout);
+        if wait == 0 || wait == 0x80 { return Ok(FileGate(handle)); }
+        CloseHandle(handle);
+        Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "log writer busy"))
+    }
+}
+
 fn open_log(dir: &Path) -> std::io::Result<(File, usize)> {
-    prepare(dir)?;
     let path = dir.join("logs.txt");
+    #[cfg(windows)]
+    let _gate = file_gate(&path, 5000)?;
+    prepare(dir)?;
     let mut opts = OpenOptions::new();
     opts.read(true).write(true).append(true).create(true);
     #[cfg(unix)]
@@ -82,7 +118,8 @@ fn open_log(dir: &Path) -> std::io::Result<(File, usize)> {
             return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "log file is a reparse point"));
         }
     }
-    // One writer per file; a second instance may use the fallback directory.
+    // Unix retains its lifetime lock; Windows coordinates each record across processes.
+    #[cfg(not(windows))]
     file.try_lock().map_err(|_| std::io::Error::from(std::io::ErrorKind::WouldBlock))?;
     let mut size = file.metadata()?.len();
     if size > (MAX_LOG - MAX_PANIC) as u64 {
@@ -103,26 +140,44 @@ pub(crate) fn record(message: &str) {
     if let Some(log) = LOG.get() {
         // The panic may have interrupted a thread holding the log lock.
         if let Ok(mut log) = log.try_lock() {
+            #[cfg(windows)]
+            let Ok(_gate) = file_gate(&log.path, 0) else { return };
+            #[cfg(windows)]
+            {
+                let Ok(size) = log.file.seek(SeekFrom::End(0)) else { return };
+                log.bytes = size as usize;
+            }
             let remaining = MAX_LOG.saturating_sub(log.bytes);
             let bytes = message.as_bytes();
             let n = bytes.len().min(remaining);
             let mut written = 0;
             while written < n {
-                match log.file.write(&bytes[written..n]) {
+                match log.writer().write(&bytes[written..n]) {
                     Ok(0) => break,
                     Ok(count) => { written += count; log.bytes += count; }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
             }
-            let _ = log.file.flush();
+            let _ = log.writer().flush();
         }
     }
 }
 
 pub(crate) fn record_log(message: &str) {
+    #[cfg(windows)]
+    let tagged = format!("[pid {}] {message}", std::process::id());
+    #[cfg(windows)]
+    let message = tagged.as_str();
     let Some(lock) = LOG.get() else { return };
     let Ok(mut log) = lock.lock() else { return };
+    #[cfg(windows)]
+    let Ok(_gate) = file_gate(&log.path, 5000) else { return };
+    #[cfg(windows)]
+    {
+        let Ok(size) = log.file.seek(SeekFrom::End(0)) else { return };
+        log.bytes = size as usize;
+    }
     let limit = MAX_LOG - MAX_PANIC;
     let mut end = message.len().min(limit.saturating_sub(32));
     while !message.is_char_boundary(end) { end -= 1; }
@@ -142,13 +197,11 @@ pub(crate) fn record_log(message: &str) {
             }
         }
         if log.file.set_len(0).is_err() || log.file.seek(SeekFrom::Start(0)).is_err() { return; }
-        if log.file.write_all(&tail).is_err() { return; }
+        if log.writer().write_all(&tail).is_err() { return; }
         log.bytes = tail.len();
     }
-    if log.file.write_all(message[..end].as_bytes()).is_ok() {
-        log.bytes += end;
-        if log.file.write_all(suffix.as_bytes()).is_ok() { log.bytes += suffix.len(); }
-    }
+    let line = format!("{}{}", &message[..end], suffix);
+    if log.writer().write_all(line.as_bytes()).is_ok() { log.bytes += line.len(); }
 }
 
 pub fn init() {
@@ -163,11 +216,20 @@ pub fn init() {
             SIGNAL_FD.store(file.as_raw_fd(), std::sync::atomic::Ordering::Relaxed);
         }
         #[cfg(windows)]
-        {
+        let append = {
             use std::os::windows::io::AsRawHandle;
-            EXCEPTION_FILE.store(file.as_raw_handle(), std::sync::atomic::Ordering::Relaxed);
-        }
-        if LOG.set(Mutex::new(Log { file, path, bytes })).is_err() { return; }
+            use std::os::windows::fs::OpenOptionsExt;
+            let Ok(append) = OpenOptions::new().append(true).access_mode(0x0000_0004)
+                .custom_flags(0x0020_0000).open(&path) else { return };
+            if let Ok(exception) = append.try_clone() {
+                let _ = EXCEPTION_APPEND.set(exception);
+                if let Some(exception) = EXCEPTION_APPEND.get() {
+                    EXCEPTION_FILE.store(exception.as_raw_handle(), std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            append
+        };
+        if LOG.set(Mutex::new(Log { file, path, bytes, #[cfg(windows)] append })).is_err() { return; }
         record(&format!("FCAE {} pid {} started\n", env!("CARGO_PKG_VERSION"), std::process::id()));
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -237,6 +299,8 @@ fn install_native_handler() {
 }
 
 #[cfg(windows)]
+static EXCEPTION_APPEND: OnceLock<File> = OnceLock::new();
+#[cfg(windows)]
 static EXCEPTION_FILE: std::sync::atomic::AtomicPtr<std::ffi::c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 #[cfg(windows)]
 static EXCEPTION_RECORDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -276,6 +340,10 @@ static PREVIOUS_FILTER: OnceLock<Option<Filter>> = OnceLock::new();
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
+    fn CreateMutexW(attributes: *const std::ffi::c_void, owner: i32, name: *const u16) -> *mut std::ffi::c_void;
+    fn WaitForSingleObject(handle: *mut std::ffi::c_void, timeout: u32) -> u32;
+    fn ReleaseMutex(handle: *mut std::ffi::c_void) -> i32;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     fn SetUnhandledExceptionFilter(filter: Option<Filter>) -> Option<Filter>;
     fn AddVectoredExceptionHandler(first: u32, handler: Option<Filter>) -> *mut std::ffi::c_void;
     fn GetCurrentThreadId() -> u32;
