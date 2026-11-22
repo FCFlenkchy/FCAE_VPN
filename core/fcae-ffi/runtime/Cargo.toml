@@ -34,6 +34,3 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 
 [build-dependencies]
 fcae-build.workspace = true
-
-[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
-netstat2 = "0.11"

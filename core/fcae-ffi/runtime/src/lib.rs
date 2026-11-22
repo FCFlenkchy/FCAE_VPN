@@ -29,7 +29,6 @@
 //! which keeps this one unit-testable as ordinary Rust.
 
 pub mod destination_routing;
-pub mod process_lookup;
 pub mod desktop_flow_routing;
 pub mod desktop_app_routing;
 pub mod backend;

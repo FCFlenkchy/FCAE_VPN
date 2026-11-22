@@ -7,7 +7,6 @@
 
 pub mod config;
 pub mod destination_routing;
-mod process_lookup;
 #[cfg(any(windows,target_os="linux",target_os="macos"))]
 pub mod app_routing;
 
@@ -23,7 +22,6 @@ use fcae_runtime::Result;
 // Exported by `bridges/singbox/go/bridge.go` through the shared archive. The
 // prefix is per core: one Go package cannot export `start` twice.
 extern "C" {
-    fn sb_set_process_lookup(callback: process_lookup::Callback);
     fn sb_check(config: *const c_char) -> *mut c_char;
     fn sb_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
     fn sb_stop(handle: u64);
