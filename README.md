@@ -150,7 +150,8 @@ Outputs:
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C SOCKS5 tunnel engine, runs in-process.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon tunnel core library.
 - **[Xray-core](https://github.com/XTLS/Xray-core)** — Proxy core, in-process.
-- **[sing-box](https://github.com/SagerNet/sing-box)** — Proxy core, in-process.
+- **[sing-box](https://github.com/SagerNet/sing-box)** — Proxy core, in-process. ([sing-tun](https://github.com/MetaCubeX/sing-tun) is also available as a separate TUN engine.)
+- **[Mihomo](https://github.com/MetaCubeX/mihomo)** — Proxy core and TUN engine, in-process.
 - **[qpack](https://github.com/quic-go/qpack)** — QPACK header compression behind the quic-go forks in that archive. Psiphon's fork predates qpack 0.6's API while sing-box's and Xray-core's require it, so `core/fcae-ffi/gomods/qpack` carries one version with both, instead of pinning one the other half cannot build against.
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend for MASQUE protocol support.
 - **[Wintun](https://www.wintun.net/)** — A TUN driver for Windows by WireGuard. Provides a high-performance network interface at Layer 3 for tunneling traffic.

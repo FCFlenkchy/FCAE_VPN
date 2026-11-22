@@ -74,6 +74,7 @@ extern "C" {
 #define FCAE_TUN_ENGINE_SINGBOX 3
 #define FCAE_TUN_ENGINE_XRAY 4
 #define FCAE_TUN_ENGINE_MIHOMO 5
+#define FCAE_TUN_ENGINE_METACUBEX_SING_TUN 6
 
 /* Enumerations */
 
@@ -665,7 +666,7 @@ FcaeStatus fcae_backend_info(uint32_t index, FcaeBackendInfo *out);
 /* How many backends fcae_backend_info() can describe. */
 uint32_t   fcae_backend_count(void);
 
-/* How many TUN engines fcae_tun_engine_info() can describe. Constant (6):
+/* How many TUN engines fcae_tun_engine_info() can describe. Constant (7):
  * unavailable engines are reported, not hidden, so the UI can say why. */
 uint32_t   fcae_tun_engine_count(void);
 
@@ -805,4 +806,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x8eb060a209cd2ecc */
+/* fcae-abi-fingerprint: 0x297b4bbb5e5f1062 */

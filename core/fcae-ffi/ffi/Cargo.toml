@@ -44,13 +44,14 @@ zeptun = ["dep:fcae-bridge-zeptun"]
 hev = ["dep:fcae-bridge-hev-socks5-tunnel"]
 # Xray-core backend. Its Go code is compiled into the same archive as tun2socks
 # and Psiphon, which is why this also pulls the Go bridge in.
-xray = ["dep:fcae-bridge-xray", "fcae-go-bridge/xray"]
+xray = ["dep:fcae-bridge-xray", "fcae-go-bridge/xray", "tun"]
 # sing-box backend, in the same archive.
 # Captured-flow app routing uses the desktop TUN supervisor even in builds
 # selecting singbox without the default feature set.
 singbox = ["dep:fcae-bridge-singbox", "fcae-go-bridge/singbox", "tun"]
 # Both extra cores.
-mihomo = ["dep:fcae-bridge-mihomo", "fcae-go-bridge/mihomo"]
+mihomo = ["dep:fcae-bridge-mihomo", "fcae-go-bridge/mihomo", "tun"]
+metacubex-tun = ["dep:fcae-bridge-metacubex-tun", "fcae-go-bridge/metacubex-tun", "tun"]
 cores = ["xray", "singbox", "mihomo"]
 # Tor egress inside the Aether engine. OFF by default: it pulls in arti-client
 # and a statically built liblzma, which need a C cross-toolchain on the
@@ -70,6 +71,7 @@ fcae-bridge-hev-socks5-tunnel = { workspace = true, optional = true }
 fcae-bridge-xray = { workspace = true, optional = true }
 fcae-bridge-singbox = { workspace = true, optional = true }
 fcae-bridge-mihomo = { workspace = true, optional = true }
+fcae-bridge-metacubex-tun = { workspace = true, optional = true }
 libc.workspace = true
 log.workspace = true
 once_cell.workspace = true

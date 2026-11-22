@@ -19,6 +19,7 @@ members = [
     "bridges/xray",
     "bridges/singbox",
     "bridges/mihomo",
+    "bridges/metacubex-tun",
     "firefox",
     "bridges/firefox",
 ]
@@ -44,6 +45,7 @@ fcae-bridge-hev-socks5-tunnel = { path = "bridges/hev-socks5-tunnel" }
 fcae-bridge-xray = { path = "bridges/xray" }
 fcae-bridge-singbox = { path = "bridges/singbox" }
 fcae-bridge-mihomo = { path = "bridges/mihomo" }
+fcae-bridge-metacubex-tun = { path = "bridges/metacubex-tun" }
 fcae-firefox-bridge = { path = "bridges/firefox" }
 # Nothing of the engine is switched on implicitly. Today its only default is
 # `default = []`, so this pins the intent: Tor is asked for by name (the

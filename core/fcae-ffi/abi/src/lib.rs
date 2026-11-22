@@ -51,6 +51,7 @@ pub const FCAE_TUN_ENGINE_HEV: u64 = 2;
 pub const FCAE_TUN_ENGINE_SINGBOX: u64 = 3;
 pub const FCAE_TUN_ENGINE_XRAY: u64 = 4;
 pub const FCAE_TUN_ENGINE_MIHOMO: u64 = 5;
+pub const FCAE_TUN_ENGINE_METACUBEX_SING_TUN: u64 = 6;
 
 // Enumerations
 

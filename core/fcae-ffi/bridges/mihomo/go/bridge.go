@@ -5,6 +5,13 @@ package main
 /*
 #include <stdint.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <unistd.h>
+#include <fcntl.h>
+static int mihomo_dup_mobile_fd(int fd) { return fcntl(fd,F_DUPFD_CLOEXEC,3); }
+#else
+static int mihomo_dup_mobile_fd(int fd) { return -1; }
+#endif
 typedef void (*mihomo_log_fn)(int level, const char *msg);
 static void mihomo_invoke_log(mihomo_log_fn fn, int level, const char *msg) {
     if (fn != NULL) fn(level, msg);
@@ -18,6 +25,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"runtime"
 	"sync"
 	"unsafe"
 
@@ -203,6 +211,7 @@ func mihomoStart(text *C.char, handle *C.uint64_t, allowTun bool) (result *C.cha
 	if allowTun {
 		var extra struct {
 			Addresses []string `json:"fcae-tun-addresses"`
+			FD        *int     `json:"fcae-mobile-fd"`
 		}
 		if err = json.Unmarshal(data, &extra); err != nil {
 			return C.CString(err.Error())
@@ -223,6 +232,14 @@ func mihomoStart(text *C.char, handle *C.uint64_t, allowTun bool) (result *C.cha
 		if len(parsed.General.Tun.Inet4Address) != 1 {
 			return C.CString("Mihomo TUN requires one IPv4 address")
 		}
+
+		if extra.FD != nil {
+			if *extra.FD < 0 || (runtime.GOOS != "android" && runtime.GOOS != "ios") {
+				return C.CString("system TUN descriptor requires a mobile VPN host")
+			}
+			parsed.General.Tun.FileDescriptor = *extra.FD
+			parsed.General.Tun.AutoDetectInterface = false
+		}
 		parsed.General.Tun.AutoRoute = false
 		parsed.General.Tun.AutoRedirect = false
 	}
@@ -232,6 +249,11 @@ func mihomoStart(text *C.char, handle *C.uint64_t, allowTun bool) (result *C.cha
 	parsed.IPTables.Enable = false
 	parsed.NTP.Enable = false
 	parsed.NTP.WriteToSystem = false
+	if allowTun {
+		if error := mihomoOwnTunFd(parsed); error != nil {
+			return error
+		}
+	}
 	executor.ApplyConfig(parsed, true)
 	if allowTun {
 		actual := listener.GetTunConf()
@@ -405,7 +427,13 @@ func mihomoAttachTun(parsed *config.Config, handle *C.uint64_t) *C.char {
 	tunnel.UpdateProxies(proxies, tunnel.Providers())
 	tunnel.UpdateRules(rules, mihomoBase.SubRules, tunnel.RuleProviders())
 	tunnel.SetMode(tunnel.Rule)
-	tunnel.SetFindProcessMode(parsed.General.FindProcessMode)
+	if runtime.GOOS != "android" && runtime.GOOS != "ios" {
+		tunnel.SetFindProcessMode(parsed.General.FindProcessMode)
+	}
+	if error := mihomoOwnTunFd(parsed); error != nil {
+		mihomoDetachTun()
+		return error
+	}
 	listener.ReCreateTun(parsed.General.Tun, tunnel.Tunnel)
 	actual := listener.GetTunConf()
 	if !actual.Enable || actual.Device != parsed.General.Tun.Device {
@@ -460,4 +488,15 @@ func mihomo_tun_running(id C.uint64_t) C.int {
 		return 1
 	}
 	return 0
+}
+
+func mihomoOwnTunFd(parsed *config.Config) *C.char {
+	if (runtime.GOOS == "android" || runtime.GOOS == "ios") && parsed.General.Tun.FileDescriptor >= 0 {
+		fd := int(C.mihomo_dup_mobile_fd(C.int(parsed.General.Tun.FileDescriptor)))
+		if fd < 0 {
+			return C.CString("duplicate system VPN descriptor failed")
+		}
+		parsed.General.Tun.FileDescriptor = fd
+	}
+	return nil
 }

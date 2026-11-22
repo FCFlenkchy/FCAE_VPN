@@ -284,6 +284,7 @@ pub enum TunEngine {
     SingBox,
     Xray,
     Mihomo,
+    MetaSingTun,
 }
 
 /// TUN parameters. Owned by the supervisor, not the backend: whichever
@@ -1500,9 +1501,10 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             3 => TunEngine::SingBox,
             4 => TunEngine::Xray,
             5 => TunEngine::Mihomo,
+            6 => TunEngine::MetaSingTun,
             _ => {
                 return Err(CoreError::InvalidConfig(
-                    "tun_engine must be 0..5 (tun2socks, zeptun, hev, sing-box, xray, mihomo)".into(),
+                    "tun_engine must be 0..6 (tun2socks, zeptun, hev, sing-box, xray, mihomo, MetaCubeX/sing-tun)".into(),
                 ))
             }
         },

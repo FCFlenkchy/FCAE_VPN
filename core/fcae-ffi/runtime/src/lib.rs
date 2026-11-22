@@ -30,7 +30,10 @@
 
 pub mod destination_routing;
 #[cfg(any(windows,target_os="linux",target_os="macos"))]
-pub mod core_tun;
+pub mod proxy_core_tun;
+#[cfg(any(target_os="android",target_os="ios"))]
+#[path="mobile_proxy_core_tun.rs"]
+pub mod proxy_core_tun;
 pub mod desktop_flow_routing;
 pub mod desktop_app_routing;
 pub mod backend;

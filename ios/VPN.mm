@@ -125,7 +125,7 @@ void ios_vpn_poll() {
 }
 FcaeStatus ios_start(const FcaeConfig* config) {
     if (!config) return FCAE_NULL_ARGUMENT;
-    if (config->mode!=FCAE_MODE_TUN || config->tun_engine>FCAE_TUN_ENGINE_HEV) {
+    if (config->mode!=FCAE_MODE_TUN || config->tun_engine>FCAE_TUN_ENGINE_METACUBEX_SING_TUN) {
         report(FCAEError(@"iOS requires TUN mode with tun2socks, Zeptun or HEV; PROXY-only mode is not supported."));
         return FCAE_INVALID_CONFIG;
     }

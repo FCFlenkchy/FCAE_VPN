@@ -50,13 +50,13 @@ impl Drop for Live {
     }
 }
 #[derive(Default)]
-pub struct CoreTunBridge {
+pub struct ProxyCoreTunBridge {
     live: Mutex<Option<Live>>,
     cleanup: Mutex<Option<JoinHandle<()>>>,
     operation: Mutex<()>,
     cancelled: AtomicBool,
 }
-impl CoreTunBridge {
+impl ProxyCoreTunBridge {
     pub fn new() -> Self {
         Self::default()
     }
@@ -202,7 +202,7 @@ fn device_name(cfg: &SessionConfig) -> Result<String> {
         Ok(cfg.tun.name.clone())
     }
 }
-impl CoreTunBridge {
+impl ProxyCoreTunBridge {
     pub fn stop(&self, timeout: Duration) {
         self.cancelled.store(true, Ordering::Release);
         if let Some(live) = lock(&self.live).take() {
@@ -287,7 +287,7 @@ impl CoreTunBridge {
         result
     }
 }
-impl Drop for CoreTunBridge {
+impl Drop for ProxyCoreTunBridge {
     fn drop(&mut self) {
         self.stop(Duration::ZERO);
         self.wait_cleanup();
@@ -332,6 +332,16 @@ fn configuration(
         addresses.push(v6.clone());
     }
     match cfg.tun.engine {
+        TunEngine::MetaSingTun => {
+            if policy.is_some() {
+                return Err(CoreError::InvalidConfig(
+                    "Select sing-box or Mihomo TUN for desktop per-app routing".into(),
+                ));
+            }
+            Ok(
+                json!({"name":device,"mtu":cfg.tun.mtu,"addresses":addresses,"socks":socks.to_string(),"udp":udp}),
+            )
+        }
         TunEngine::Xray => {
             if policy.is_some() {
                 return Err(CoreError::InvalidConfig(

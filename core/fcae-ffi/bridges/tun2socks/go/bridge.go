@@ -1215,6 +1215,7 @@ const (
 	engineXray
 	engineSingBox
 	enginePsiphon
+	engineMetaTun
 	engineKindCount
 )
 

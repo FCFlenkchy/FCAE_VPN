@@ -5583,10 +5583,9 @@ void render_ui() {
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Text("TUN engine");
                 ImGui::SameLine(0, 8);
-                FcaeTunEngineInfo tei[6];
-                const char* te_names[6];
-                uint32_t te_n = fcae_tun_engine_count();
-                if (te_n > 6) te_n = 6;
+                const uint32_t te_n = fcae_tun_engine_count();
+                std::vector<FcaeTunEngineInfo> tei(te_n);
+                std::vector<const char*> te_names(te_n);
                 // The closed combo previews the selected entry, so it is sized to
                 // the widest name: "hev-socks5-tunnel" was cut in half the moment
                 // it was picked, the popup beside it having always been wide enough.
@@ -5604,7 +5603,7 @@ void render_ui() {
                 if (te_width > te_room) te_width = te_room;
                 ImGui::PushItemWidth(te_width);
                 int te_sel = (g_app.tun_engine >= 0 && g_app.tun_engine < (int)te_n) ? g_app.tun_engine : 0;
-                if (ImGui::Combo("##tun_engine", &te_sel, te_names, (int)te_n)) {
+                if (ImGui::Combo("##tun_engine", &te_sel, te_names.data(), (int)te_n)) {
                     g_app.tun_engine = te_sel;
                     fcae_ui_diagnostic(0, uint32_t(te_sel));
                 }

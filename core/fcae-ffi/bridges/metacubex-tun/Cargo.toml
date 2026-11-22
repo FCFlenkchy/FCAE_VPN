@@ -1,0 +1,10 @@
+[package]
+name = "fcae-bridge-metacubex-tun"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fcae-runtime.workspace = true
+fcae-go-bridge = { workspace = true, features = ["metacubex-tun"] }

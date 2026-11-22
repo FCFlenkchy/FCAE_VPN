@@ -154,3 +154,5 @@ pub fn register() {
     install_validator();
     fcae_runtime::registry::register(FcaeBackend::SingBox, || Arc::new(SingBoxBackend));
 }
+
+pub fn tun_ffi()->CoreFfi {CoreFfi{start:sb_tun_start,stop:sb_tun_stop,running:sb_tun_running,..SingBoxDialect::FFI}}

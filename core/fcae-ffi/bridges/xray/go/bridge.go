@@ -17,6 +17,15 @@ package main
 /*
 #include <stdint.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <unistd.h>
+#include <fcntl.h>
+static int xray_dup_mobile_fd(int fd) { return fcntl(fd,F_DUPFD_CLOEXEC,3); }
+static void xray_close_mobile_fd(int fd) { close(fd); }
+#else
+static int xray_dup_mobile_fd(int fd) { return -1; }
+static void xray_close_mobile_fd(int fd) {}
+#endif
 
 // Host log sink, implemented on the Rust side; see bridges/xray/src/lib.rs.
 // Declared here so cgo lets Go call back into the host.
@@ -35,7 +44,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unsafe"
@@ -217,6 +229,11 @@ func xray_check(text *C.char) (result *C.char) {
 //
 //export xray_start
 func xray_start(config *C.char, handle *C.uint64_t) *C.char {
+	xrayMobileFdMu.Lock()
+	defer xrayMobileFdMu.Unlock()
+	return xrayStart(config, handle)
+}
+func xrayStart(config *C.char, handle *C.uint64_t) *C.char {
 	text := C.GoString(config)
 	configOptions, err := xcore.LoadConfig("json", bytes.NewReader([]byte(text)))
 	if err != nil {
@@ -502,6 +519,12 @@ func xrayDetachTunLocked(id uint64, tun xrayTunAttachment) {
 
 //export xray_tun_start
 func xray_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
+	release, err := xrayMobileDescriptor(text)
+	if err != nil {
+		return C.CString(err.Error())
+	}
+	defer release()
+
 	if text == nil || handle == nil {
 		return C.CString("missing Xray TUN arguments")
 	}
@@ -515,7 +538,7 @@ func xray_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	}
 	if parent == 0 {
 		xrayMu.Unlock()
-		return xray_start(text, handle)
+		return xrayStart(text, handle)
 	}
 	defer xrayMu.Unlock()
 	for _, tun := range xrayTuns {
@@ -621,4 +644,49 @@ func xray_tun_running(id C.uint64_t) C.int {
 	}
 	xrayMu.Unlock()
 	return xray_running(id)
+}
+
+var xrayMobileFdMu sync.Mutex
+
+func xrayMobileDescriptor(text *C.char) (func(), error) {
+	xrayMobileFdMu.Lock()
+	unlock := func() { xrayMobileFdMu.Unlock() }
+	if text == nil {
+		return unlock, nil
+	}
+	var raw struct {
+		FD *int `json:"fcae-mobile-fd"`
+	}
+	if err := json.Unmarshal([]byte(C.GoString(text)), &raw); err != nil {
+		unlock()
+		return nil, err
+	}
+	if raw.FD == nil {
+		return unlock, nil
+	}
+	if *raw.FD < 0 || (runtime.GOOS != "android" && runtime.GOOS != "ios") {
+		unlock()
+		return nil, fmt.Errorf("system TUN descriptor requires a mobile VPN host")
+	}
+	privateFd := int(C.xray_dup_mobile_fd(C.int(*raw.FD)))
+	if privateFd < 0 {
+		unlock()
+		return nil, fmt.Errorf("duplicate system VPN descriptor failed")
+	}
+	const key = "xray.tun.fd"
+	old, exists := os.LookupEnv(key)
+	if err := os.Setenv(key, strconv.Itoa(privateFd)); err != nil {
+		C.xray_close_mobile_fd(C.int(privateFd))
+		unlock()
+		return nil, err
+	}
+	return func() {
+		if exists {
+			_ = os.Setenv(key, old)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+		C.xray_close_mobile_fd(C.int(privateFd))
+		unlock()
+	}, nil
 }

@@ -84,7 +84,7 @@ static void core_log(FcaeLogLevel level,const char* message,void*) {
             for (NSUInteger i=0;i<packets.count;i++) {
                 NSData* packet=packets[i];
                 if (!packet.length || packet.length>9000) continue;
-                // All three Darwin fd engines use the same four-byte address-family header.
+                // The Darwin packet engines use the same four-byte address-family header.
                 const uint8_t version=(*(const uint8_t*)packet.bytes)>>4;
                 if (version!=4 && version!=6) continue;
                 uint32_t family=htonl(version==6?AF_INET6:AF_INET);
@@ -114,7 +114,7 @@ static void core_log(FcaeLogLevel level,const char* message,void*) {
         }
         self->_config=[[FCAEConfig alloc] initWithDictionary:payload];
         if (!FCAEContainer() || !self->_config || self->_config->value.mode!=FCAE_MODE_TUN ||
-                self->_config->value.tun_engine>FCAE_TUN_ENGINE_HEV) {
+                self->_config->value.tun_engine>FCAE_TUN_ENGINE_METACUBEX_SING_TUN) {
             [self reject:FCAEError(@"Missing/incompatible session; open FCAE and connect again.")];return;
         }
         const auto& config=self->_config->value;

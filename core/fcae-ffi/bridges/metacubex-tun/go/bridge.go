@@ -1,0 +1,343 @@
+//go:build fcae_metacubex_tun
+
+package main
+
+/*
+#include <stdint.h>
+#include <stdlib.h>
+#ifndef _WIN32
+#include <unistd.h>
+#include <fcntl.h>
+static int mtun_dup_fd(int fd) { return fcntl(fd,F_DUPFD_CLOEXEC,3); }
+static void mtun_close_fd(int fd) { close(fd); }
+#else
+static int mtun_dup_fd(int fd) { return -1; }
+static void mtun_close_fd(int fd) {}
+#endif
+*/
+import "C"
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/netip"
+	"runtime"
+	"sync"
+	"time"
+	"unsafe"
+
+	tun "github.com/metacubex/sing-tun"
+	"github.com/metacubex/sing/common/buf"
+	"github.com/metacubex/sing/common/bufio"
+	"github.com/metacubex/sing/common/logger"
+	M "github.com/metacubex/sing/common/metadata"
+	N "github.com/metacubex/sing/common/network"
+	"github.com/metacubex/sing/common/udpnat"
+	"github.com/metacubex/sing/protocol/socks"
+)
+
+type mtunCore struct {
+	cancel  context.CancelFunc
+	device  tun.Tun
+	stack   tun.Stack
+	handler *mtunHandler
+}
+
+func (c *mtunCore) close() {
+	c.cancel()
+	if c.handler != nil {
+		c.handler.close()
+	}
+	// Stop packet reads before dismantling the userspace stack.
+	if c.device != nil {
+		_ = c.device.Close()
+	}
+	if c.stack != nil {
+		_ = c.stack.Close()
+	}
+}
+
+var mtunMu sync.Mutex
+var mtunNext uint64
+var mtunCores = make(map[uint64]*mtunCore)
+
+//export mtun_start
+func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
+	if text == nil || handle == nil {
+		return C.CString("missing sing-tun start arguments")
+	}
+	*handle = 0
+	var cfg struct {
+		Name      string   `json:"name"`
+		MTU       uint32   `json:"mtu"`
+		Addresses []string `json:"addresses"`
+		Socks     string   `json:"socks"`
+		UDP       bool     `json:"udp"`
+		FD        *int     `json:"fd"`
+	}
+	if err := json.Unmarshal([]byte(C.GoString(text)), &cfg); err != nil {
+		return C.CString(err.Error())
+	}
+	socksAddr, err := netip.ParseAddrPort(cfg.Socks)
+	if err != nil || !socksAddr.Addr().IsLoopback() || socksAddr.Port() == 0 {
+		return C.CString("sing-tun requires the session's loopback SOCKS exit")
+	}
+	if cfg.MTU < 1280 || cfg.MTU > 9000 || len(cfg.Name) == 0 || len(cfg.Name) > 64 {
+		return C.CString("invalid sing-tun interface settings")
+	}
+	options := tun.Options{Name: cfg.Name, MTU: cfg.MTU, DNSMode: tun.DNSModeDisabled, AutoRoute: false}
+	for _, address := range cfg.Addresses {
+		prefix, e := netip.ParsePrefix(address)
+		if e != nil {
+			return C.CString(e.Error())
+		}
+		if prefix.Addr().Is4() {
+			options.Inet4Address = append(options.Inet4Address, prefix)
+		} else {
+			options.Inet6Address = append(options.Inet6Address, prefix)
+		}
+	}
+	if len(options.Inet4Address) != 1 {
+		return C.CString("sing-tun needs one IPv4 interface address")
+	}
+	mobile := runtime.GOOS == "android" || runtime.GOOS == "ios"
+	if mobile && (cfg.FD == nil || *cfg.FD < 0) {
+		return C.CString("sing-tun requires the mobile VPN host's packet descriptor")
+	}
+	if cfg.FD != nil && !mobile {
+		return C.CString("external sing-tun descriptors are mobile-only")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	core := &mtunCore{cancel: cancel}
+	owned := false
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = C.CString(fmt.Sprintf("sing-tun startup panic: %v", failure))
+		}
+		if !owned {
+			core.close()
+		}
+	}()
+	if mobile {
+		fd := int(C.mtun_dup_fd(C.int(*cfg.FD)))
+		if fd < 0 {
+			return C.CString("cannot duplicate the system VPN descriptor")
+		}
+		options.FileDescriptor = fd
+	}
+	core.device, err = tun.New(options)
+	if err != nil {
+		if mobile {
+			C.mtun_close_fd(C.int(options.FileDescriptor))
+		}
+		return C.CString("sing-tun interface: " + err.Error())
+	}
+	handler := &mtunHandler{ctx: ctx, socks: M.SocksaddrFromNetIP(socksAddr), udp: cfg.UDP, active: make(map[io.Closer]struct{})}
+	handler.nat = udpnat.New[netip.AddrPort](120, handler)
+	core.handler = handler
+	core.stack, err = tun.NewStack("gvisor", tun.StackOptions{Context: ctx, Tun: core.device, TunOptions: options, Handler: handler, Logger: logger.NOP(), UDPTimeout: 120 * time.Second, ICMPTimeout: 10 * time.Second})
+	if err != nil {
+		return C.CString("sing-tun stack: " + err.Error())
+	}
+	if err = core.stack.Start(); err != nil {
+		return C.CString("sing-tun stack start: " + err.Error())
+	}
+	mtunMu.Lock()
+	mtunNext++
+	id := mtunNext
+	mtunCores[id] = core
+	mtunMu.Unlock()
+	engineStarted(engineMetaTun)
+	owned = true
+	*handle = C.uint64_t(id)
+	return nil
+}
+
+//export mtun_stop
+func mtun_stop(id C.uint64_t) {
+	mtunMu.Lock()
+	core := mtunCores[uint64(id)]
+	delete(mtunCores, uint64(id))
+	mtunMu.Unlock()
+	if core != nil {
+		core.close()
+		engineStopped(engineMetaTun)
+	}
+}
+
+//export mtun_stop_all
+func mtun_stop_all() {
+	mtunMu.Lock()
+	cores := mtunCores
+	mtunCores = make(map[uint64]*mtunCore)
+	mtunMu.Unlock()
+	for _, core := range cores {
+		core.close()
+	}
+	engineReclaimed(engineMetaTun)
+}
+
+//export mtun_running
+func mtun_running(id C.uint64_t) C.int {
+	mtunMu.Lock()
+	core := mtunCores[uint64(id)]
+	mtunMu.Unlock()
+	if core != nil && core.handler.ctx.Err() == nil {
+		return 1
+	}
+	return 0
+}
+
+//export mtun_string_free
+func mtun_string_free(message *C.char) { C.free(unsafe.Pointer(message)) }
+
+type mtunHandler struct {
+	ctx    context.Context
+	socks  M.Socksaddr
+	udp    bool
+	nat    *udpnat.Service[netip.AddrPort]
+	mu     sync.Mutex
+	active map[io.Closer]struct{}
+}
+
+func (h *mtunHandler) add(c io.Closer) bool {
+	h.mu.Lock()
+	if h.ctx.Err() != nil {
+		h.mu.Unlock()
+		_ = c.Close()
+		return false
+	}
+	h.active[c] = struct{}{}
+	h.mu.Unlock()
+	return true
+}
+func (h *mtunHandler) remove(c io.Closer) { h.mu.Lock(); delete(h.active, c); h.mu.Unlock() }
+func (h *mtunHandler) close() {
+	h.mu.Lock()
+	active := h.active
+	h.active = make(map[io.Closer]struct{})
+	h.mu.Unlock()
+	for c := range active {
+		_ = c.Close()
+	}
+}
+func (h *mtunHandler) NewError(context.Context, error) {}
+func (h *mtunHandler) PrepareConnection(network string, _ M.Socksaddr, _ M.Socksaddr, _ tun.DirectRouteContext, _ time.Duration) (tun.DirectRouteDestination, error) {
+	// SOCKS carries TCP/UDP only. Never turn unsupported traffic into DIRECT.
+	if network != N.NetworkTCP && network != N.NetworkUDP {
+		return nil, tun.ErrDrop
+	}
+	return nil, nil
+}
+func (h *mtunHandler) NewConnection(_ context.Context, conn net.Conn, metadata M.Metadata) error {
+	if !h.add(conn) {
+		return net.ErrClosed
+	}
+	defer func() { h.remove(conn); _ = conn.Close() }()
+	dialer := &mtunDialer{handler: h}
+	client := socks.NewClient(dialer, h.socks, socks.Version5, "", "")
+	remote, err := client.DialContext(h.ctx, "tcp", metadata.Destination)
+	dialer.finish(err != nil)
+	if err != nil {
+		return err
+	}
+	defer remote.Close()
+	return bufio.CopyConn(h.ctx, conn, remote)
+}
+func (h *mtunHandler) NewPacket(_ context.Context, key netip.AddrPort, buffer *buf.Buffer, metadata M.Metadata, init func(N.PacketConn) N.PacketWriter) {
+	if !h.udp || h.ctx.Err() != nil {
+		buffer.Release()
+		return
+	}
+	h.nat.NewPacket(h.ctx, key, buffer, metadata, init)
+}
+func (h *mtunHandler) NewPacketConnection(_ context.Context, conn N.PacketConn, metadata M.Metadata) error {
+	if !h.udp {
+		_ = conn.Close()
+		return fmt.Errorf("the session exit does not carry UDP")
+	}
+	if !h.add(conn) {
+		return net.ErrClosed
+	}
+	defer func() { h.remove(conn); _ = conn.Close() }()
+	dialer := &mtunDialer{handler: h}
+	client := socks.NewClient(dialer, h.socks, socks.Version5, "", "")
+	remote, err := client.ListenPacket(h.ctx, metadata.Destination)
+	dialer.finish(err != nil)
+	if err != nil {
+		return err
+	}
+	defer remote.Close()
+	outbound := bufio.NewPacketConn(remote)
+	touch := func() {
+		deadline := time.Now().Add(120 * time.Second)
+		_ = conn.SetReadDeadline(deadline)
+		_ = outbound.SetReadDeadline(deadline)
+	}
+	touch()
+	return bufio.CopyPacketConn(h.ctx, &mtunIdlePacket{conn, touch}, &mtunIdlePacket{outbound, touch})
+}
+
+type mtunIdlePacket struct {
+	N.PacketConn
+	touch func()
+}
+
+func (p *mtunIdlePacket) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	p.touch()
+	return p.PacketConn.WritePacket(buffer, destination)
+}
+
+// Track even SOCKS handshake sockets: cancellation must unblock handshakes and
+// UDP control connections, not just already established application streams.
+type mtunTrackedConn struct {
+	net.Conn
+	owner *mtunHandler
+	once  sync.Once
+}
+
+func (c *mtunTrackedConn) Close() error {
+	var err error
+	c.once.Do(func() { c.owner.remove(c); err = c.Conn.Close() })
+	return err
+}
+
+type mtunDialer struct {
+	handler     *mtunHandler
+	connections []net.Conn
+}
+
+func (d *mtunDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if destination.Addr.IsUnspecified() {
+		destination.Addr = d.handler.socks.Addr
+	}
+	if !destination.Addr.IsLoopback() {
+		return nil, fmt.Errorf("sing-tun SOCKS relay must remain on loopback")
+	}
+	raw, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, network, destination.String())
+	if err != nil {
+		return nil, err
+	}
+	conn := &mtunTrackedConn{Conn: raw, owner: d.handler}
+	if !d.handler.add(conn) {
+		return nil, net.ErrClosed
+	}
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	d.connections = append(d.connections, conn)
+	return conn, nil
+}
+func (d *mtunDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
+	return nil, fmt.Errorf("direct UDP sockets are disabled")
+}
+func (d *mtunDialer) finish(failed bool) {
+	for _, conn := range d.connections {
+		if failed {
+			_ = conn.Close()
+		} else {
+			_ = conn.SetDeadline(time.Time{})
+		}
+	}
+}

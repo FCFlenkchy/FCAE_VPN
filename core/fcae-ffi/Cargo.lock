@@ -1724,6 +1724,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcae-bridge-metacubex-tun"
+version = "2.0.0"
+dependencies = [
+ "fcae-go-bridge",
+ "fcae-runtime",
+]
+
+[[package]]
 name = "fcae-bridge-mihomo"
 version = "2.0.0"
 dependencies = [
@@ -1796,6 +1804,7 @@ dependencies = [
  "fcae-abi",
  "fcae-bridge-aether",
  "fcae-bridge-hev-socks5-tunnel",
+ "fcae-bridge-metacubex-tun",
  "fcae-bridge-mihomo",
  "fcae-bridge-psiphon",
  "fcae-bridge-singbox",

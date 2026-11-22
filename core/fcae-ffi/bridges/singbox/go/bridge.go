@@ -17,6 +17,13 @@ package main
 /*
 #include <stdint.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <unistd.h>
+#include <fcntl.h>
+static int sb_dup_mobile_fd(int fd) { return fcntl(fd,F_DUPFD_CLOEXEC,3); }
+#else
+static int sb_dup_mobile_fd(int fd) { return -1; }
+#endif
 
 // Host log sink, implemented on the Rust side; see bridges/singbox/src/lib.rs.
 // Declared here so cgo lets Go call back into the host.
@@ -34,6 +41,8 @@ import (
 	"context"
 	stdjson "encoding/json"
 	"fmt"
+	"net/netip"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -49,7 +58,11 @@ import (
 	sblog "github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/route"
+	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/control"
 	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/logger"
+	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service"
 )
 
@@ -215,7 +228,11 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 		}
 	}()
 	ctx := include.Context(service.ContextWithDefaultRegistry(base))
-	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(text))
+	ctx, clean, err := sbMobileContext(ctx, text)
+	if err != nil {
+		return C.CString(err.Error())
+	}
+	options, err := json.UnmarshalExtendedContext[option.Options](ctx, clean)
 	if err != nil {
 		return C.CString("sing-box: config: " + err.Error())
 	}
@@ -441,7 +458,11 @@ func sb_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	defer sbMu.Unlock()
 	base := sbCores[parent]
 	ctx := service.ExtendContext(base.ctx)
-	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(C.GoString(text)))
+	ctx, clean, err := sbMobileContext(ctx, C.GoString(text))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+	options, err := json.UnmarshalExtendedContext[option.Options](ctx, clean)
 	if err != nil {
 		return C.CString("sing-box TUN: " + err.Error())
 	}
@@ -544,3 +565,128 @@ func sb_tun_running(id C.uint64_t) C.int {
 	sbMu.Unlock()
 	return sb_running(id)
 }
+
+// Mobile hosts supply packets and own routes/DNS/app selection. This platform
+// adapter lets the native sing-box TUN inbound consume that descriptor without
+// privileged interface creation, Android package scans or route discovery.
+func sbMobileContext(ctx context.Context, text string) (context.Context, []byte, error) {
+	if !strings.Contains(text, `"fcae-mobile-fd"`) {
+		return ctx, []byte(text), nil
+	}
+	var raw map[string]stdjson.RawMessage
+	if err := stdjson.Unmarshal([]byte(text), &raw); err != nil {
+		return ctx, nil, err
+	}
+	encoded, ok := raw["fcae-mobile-fd"]
+	if !ok {
+		return ctx, []byte(text), nil
+	}
+	var fd int
+	if err := stdjson.Unmarshal(encoded, &fd); err != nil {
+		return ctx, nil, err
+	}
+	if fd < 0 || (runtime.GOOS != "android" && runtime.GOOS != "ios") {
+		return ctx, nil, fmt.Errorf("system TUN descriptor is valid only in the mobile VPN host")
+	}
+	delete(raw, "fcae-mobile-fd")
+	clean, err := stdjson.Marshal(raw)
+	if err != nil {
+		return ctx, nil, err
+	}
+	ctx = service.ExtendContext(ctx)
+	service.MustRegister[adapter.PlatformInterface](ctx, &sbMobilePlatform{fd: fd})
+	return ctx, clean, nil
+}
+
+type sbMobilePlatform struct{ fd int }
+
+func (*sbMobilePlatform) Initialize(adapter.NetworkManager) error { return nil }
+func (*sbMobilePlatform) UsePlatformInterface() bool              { return true }
+func (p *sbMobilePlatform) OpenInterface(o *tun.Options, _ option.TunPlatformOptions) (tun.Tun, error) {
+	fd := int(C.sb_dup_mobile_fd(C.int(p.fd)))
+	if fd < 0 {
+		return nil, fmt.Errorf("duplicate system VPN descriptor failed")
+	}
+	o.FileDescriptor = fd
+	o.AutoRoute = false
+	o.EXP_ExternalConfiguration = true
+	o.EXP_MultiPendingPackets = false
+	o.EXP_SendMsgX = false
+	device, err := tun.New(*o)
+	return device, err
+}
+func (*sbMobilePlatform) ProcessPlatformOptions(option.TunPlatformOptions) error { return nil }
+func (*sbMobilePlatform) UsePlatformAutoDetectInterfaceControl() bool            { return false }
+func (*sbMobilePlatform) AutoDetectInterfaceControl(int) error {
+	return fmt.Errorf("mobile TUN uses only the protected loopback session exit")
+}
+func (*sbMobilePlatform) UsePlatformDefaultInterfaceMonitor() bool { return true }
+func (*sbMobilePlatform) CreateDefaultInterfaceMonitor(logger.Logger) tun.DefaultInterfaceMonitor {
+	return &sbMobileMonitor{}
+}
+func (*sbMobilePlatform) UsePlatformNetworkInterfaces() bool                     { return true }
+func (*sbMobilePlatform) NetworkInterfaces() ([]adapter.NetworkInterface, error) { return nil, nil }
+func (*sbMobilePlatform) UnderNetworkExtension() bool                            { return runtime.GOOS == "ios" }
+func (*sbMobilePlatform) NetworkExtensionIncludeAllNetworks() bool               { return false }
+func (*sbMobilePlatform) ClearDNSCache()                                         {}
+func (*sbMobilePlatform) RequestPermissionForWIFIState() error {
+	return fmt.Errorf("Wi-Fi state is not exposed to the packet engine")
+}
+func (*sbMobilePlatform) ReadWIFIState(context.Context) adapter.WIFIState { return adapter.WIFIState{} }
+func (*sbMobilePlatform) UsePlatformConnectionOwnerFinder() bool          { return false }
+func (*sbMobilePlatform) FindConnectionOwner(*adapter.FindConnectionOwnerRequest) (*adapter.ConnectionOwner, error) {
+	return nil, fmt.Errorf("app selection is owned by the mobile VPN host")
+}
+func (*sbMobilePlatform) UsePlatformWIFIMonitor() bool  { return false }
+func (*sbMobilePlatform) UsePlatformNotification() bool { return false }
+func (*sbMobilePlatform) SendNotification(*adapter.Notification) error {
+	return fmt.Errorf("notifications are owned by the host")
+}
+func (*sbMobilePlatform) CancelNotification(string, int32) error { return nil }
+func (*sbMobilePlatform) MyInterfaceAddress() []netip.Addr       { return nil }
+func (*sbMobilePlatform) UsePlatformNeighborResolver() bool      { return false }
+func (*sbMobilePlatform) StartNeighborMonitor(adapter.NeighborUpdateListener) error {
+	return fmt.Errorf("neighbor lookup is not available in the packet adapter")
+}
+func (*sbMobilePlatform) CloseNeighborMonitor(adapter.NeighborUpdateListener) error { return nil }
+func (*sbMobilePlatform) UsePlatformShell() bool                                    { return false }
+func (*sbMobilePlatform) CheckPlatformShell() error {
+	return fmt.Errorf("shell access is disabled in the packet adapter")
+}
+func (*sbMobilePlatform) OpenShellSession(*adapter.PlatformUser, string, []string, string, int32, int32) (adapter.ShellSession, error) {
+	return nil, fmt.Errorf("shell access is disabled in the packet adapter")
+}
+func (*sbMobilePlatform) LookupUser(string) (*adapter.PlatformUser, error) {
+	return nil, fmt.Errorf("user lookup is not available")
+}
+func (*sbMobilePlatform) LookupSFTPServer() (string, error) {
+	return "", fmt.Errorf("SFTP is disabled")
+}
+func (*sbMobilePlatform) ReadSystemSSHHostKey() ([]byte, error) {
+	return nil, fmt.Errorf("SSH is disabled")
+}
+func (*sbMobilePlatform) TailscaleHostname() string { return "" }
+func (*sbMobilePlatform) UsePlatformBridge() bool   { return false }
+func (*sbMobilePlatform) CreateBridge(adapter.BridgeOptions) (adapter.BridgeSession, error) {
+	return nil, fmt.Errorf("bridge creation is disabled")
+}
+func (*sbMobilePlatform) UsePlatformAutoRedirect() bool { return false }
+func (*sbMobilePlatform) CreateAutoRedirect(adapter.AutoRedirectOptions) (adapter.AutoRedirectSession, error) {
+	return nil, fmt.Errorf("automatic redirection is disabled")
+}
+
+// No underlying-interface selection is needed: this engine's only outbound is
+// the already protected loopback SOCKS listener; the VPN host owns connectivity.
+type sbMobileMonitor struct{}
+
+func (*sbMobileMonitor) Start() error                         { return nil }
+func (*sbMobileMonitor) Close() error                         { return nil }
+func (*sbMobileMonitor) DefaultInterface() *control.Interface { return nil }
+func (*sbMobileMonitor) OverrideAndroidVPN() bool             { return false }
+func (*sbMobileMonitor) AndroidVPNEnabled() bool              { return true }
+func (*sbMobileMonitor) RegisterCallback(tun.DefaultInterfaceUpdateCallback) *list.Element[tun.DefaultInterfaceUpdateCallback] {
+	return new(list.Element[tun.DefaultInterfaceUpdateCallback])
+}
+func (*sbMobileMonitor) UnregisterCallback(*list.Element[tun.DefaultInterfaceUpdateCallback]) {}
+func (*sbMobileMonitor) RegisterMyInterface(string)                                           {}
+func (*sbMobileMonitor) MyInterfaces() []string                                               { return nil }

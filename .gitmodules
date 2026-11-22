@@ -25,3 +25,6 @@
 [submodule "core/mihomo"]
 	path = core/mihomo
 	url = https://github.com/MetaCubeX/mihomo.git
+[submodule "core/metacubex-sing-tun"]
+	path = core/metacubex-sing-tun
+	url = https://github.com/MetaCubeX/sing-tun.git
