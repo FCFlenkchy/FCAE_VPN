@@ -210,8 +210,10 @@ impl Policy {
         if !socks.ip().is_loopback() || socks.port() == 0 || listen == 0 {
             return Err(invalid("destination routing requires loopback listeners"));
         }
-        let mut rules = vec![json!({"port":53,"action":"route","outbound":"fcae-direct"})];
         let domains = self.rules.iter().any(|rule| rule.kind == "domain");
+        // Only DNS captured by this router is handled here. Resolve over the
+        // selected exit before any destination policy; never block host DNS.
+        let mut rules = vec![json!({"port":53,"action":"hijack-dns"})];
         if domains {
             rules.push(json!({"action":"sniff","sniffer":["tls","http","quic"],"timeout":"500ms"}));
         }
@@ -233,33 +235,63 @@ impl Policy {
             exit["network"] = json!("tcp");
         }
         let direct = json!({"type":"direct","tag":"fcae-direct"});
-        #[cfg(target_os = "macos")]
-        let direct = {
-            let output = crate::tun_dns::run("route", &["-n", "get", "default"])?;
-            let name = output
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("interface:"))
-                .map(str::trim)
-                .filter(|name| {
-                    !name.is_empty()
-                        && name.len() <= 15
-                        && *name != "lo0"
-                        && name
-                            .bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
-                })
-                .ok_or_else(|| {
-                    invalid("no pre-capture egress interface for destination routing")
-                })?;
-            let mut direct = direct;
-            direct["bind_interface"] = json!(name);
-            direct
-        };
         Ok(
-            json!({"log":{"level":"warn"},"inbounds":[{"type":"socks","tag":"fcae-destinations","listen":"127.0.0.1","listen_port":listen}],"dns":{"servers":[{"type":"local","tag":"fcae-system"}]},"outbounds":[exit,direct],"route":{"default_domain_resolver":"fcae-system","auto_detect_interface":cfg!(any(windows,target_os="linux",target_os="macos")),"rules":rules,"final":default}}),
+            json!({"log":{"level":"info"},"inbounds":[{"type":"socks","tag":"fcae-destinations","listen":"127.0.0.1","listen_port":listen}],"dns":{"servers":[{"type":if udp {"udp"} else {"tcp"},"tag":"fcae-system","server":"1.1.1.1","detour":"fcae-exit"}],"reverse_mapping":true},"outbounds":[exit,direct],"route":{"default_domain_resolver":"fcae-system","auto_detect_interface":cfg!(any(windows,target_os="linux",target_os="macos")),"rules":rules,"final":default}}),
         )
     }
 }
+/// Compile before capture routes are installed, retaining the session DNS choice.
+pub fn session_config(
+    policy: &Policy,
+    cfg: &crate::config::SessionConfig,
+    socks: SocketAddr,
+    listen: u16,
+    udp: bool,
+) -> Result<Value> {
+    let mut value = policy.config(socks, listen, udp)?;
+    #[cfg(windows)]
+    {
+        value["outbounds"][1]["bind_interface"] =
+            json!(crate::windows_tun::physical_egress_interface()?);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = crate::tun_dns::run("route", &["-n", "get", "default"])?;
+        let name = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("interface:"))
+            .map(str::trim)
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= 15
+                    && *name != "lo0"
+                    && name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
+            })
+            .ok_or_else(|| invalid("no pre-capture egress interface for destination routing"))?;
+        value["outbounds"][1]["bind_interface"] = json!(name);
+    }
+    let servers = crate::tun_dns::servers(cfg)?;
+    if let Some(server) = servers.first() {
+        value["dns"]["servers"][0]["server"] = json!(server);
+    }
+    log::info!(
+        "[destination-routing] {}: matches {}, other traffic {}; captured TCP/UDP DNS through tunnel; {} rules",
+        if !policy.active() {
+            "DNS-only"
+        } else if policy.mode == 1 {
+            "Include"
+        } else {
+            "Exclude"
+        },
+        if policy.mode == 1 { "tunnel" } else { "DIRECT" },
+        if policy.mode == 1 { "DIRECT" } else { "tunnel" },
+        policy.rules.len()
+    );
+    Ok(value)
+}
+
 pub fn decode(text: Option<String>) -> Result<(Option<Policy>, Option<String>)> {
     let Some(text) = text else {
         return Ok((None, None));
@@ -311,6 +343,12 @@ pub fn uses_native(cfg: &crate::config::SessionConfig) -> bool {
     }
 }
 
+/// Native Mihomo delegates DNS to the shared stage so TCP-only exits can
+/// answer UDP DNS too. Native sing-box handles its own DNS action directly.
+pub fn uses_shared_stage(cfg: &crate::config::SessionConfig) -> bool {
+    !uses_native(cfg) || cfg.tun.engine == crate::config::TunEngine::Mihomo
+}
+
 /// Install the same sing-box rule grammar directly in its selected TUN core.
 pub fn apply_singbox(
     cfg: &crate::config::SessionConfig,
@@ -324,7 +362,7 @@ pub fn apply_singbox(
     let Some(policy) = cfg.destinations.as_ref() else {
         return Ok(());
     };
-    let compiled = policy.config(socks, 1, udp)?;
+    let compiled = session_config(policy, cfg, socks, 1, udp)?;
     // Keep the TUN platform/process guards, then evaluate destination policy.
     let guards: Vec<Value> = value["route"]["rules"]
         .as_array()
@@ -335,8 +373,11 @@ pub fn apply_singbox(
         })
         .cloned()
         .collect();
-    let mut compiled_rules = compiled["route"]["rules"].as_array().cloned().unwrap_or_default();
-    // DNS bypass must precede process guards and a TCP-only tunnel's UDP reject.
+    let mut compiled_rules = compiled["route"]["rules"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    // Captured DNS must precede process guards and destination matches.
     let mut rules = vec![compiled_rules.remove(0)];
     rules.extend(guards);
     rules.extend(compiled_rules);
@@ -363,7 +404,7 @@ pub fn apply_mihomo(
         return Ok(());
     };
     policy.validate()?;
-    let mut rules: Vec<String> = value["rules"]
+    let guards: Vec<String> = value["rules"]
         .as_array()
         .into_iter()
         .flatten()
@@ -373,6 +414,8 @@ pub fn apply_mihomo(
         })
         .map(str::to_owned)
         .collect();
+    let mut rules = vec!["DST-PORT,53,fcae-tun-exit".to_owned()];
+    rules.extend(guards);
     let mut push = |condition: String, exit: bool| {
         if exit && !udp {
             rules.push(if condition == "MATCH" {
@@ -390,7 +433,6 @@ pub fn apply_mihomo(
             }
         ));
     };
-    push("DST-PORT,53".into(), false);
     for rule in &policy.rules {
         let mut conditions = Vec::new();
         if rule.kind == "ip" {

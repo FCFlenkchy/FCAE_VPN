@@ -254,7 +254,7 @@ impl FlowPolicy {
         let own = native_path(own);
         let mut rules = vec![
             json!({"ip_cidr":addresses,"action":"reject"}),
-            json!({"port":53,"action":"route","outbound":"fcae-direct"}),
+            json!({"port":53,"action":"route","outbound":"fcae-exit"}),
             json!({"process_path":[own],"action":"route","outbound":"fcae-direct"}),
         ];
         #[cfg(windows)]

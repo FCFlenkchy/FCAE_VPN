@@ -421,7 +421,7 @@ impl TunBridge for TunEngines {
 
     fn check_health(&self, cfg: &config::SessionConfig) -> Result<(), CoreError> {
         #[cfg(feature="singbox")]
-        if cfg.destinations.is_some() && !fcae_runtime::destination_routing::uses_native(cfg){self.destinations.check_health()?;}
+        if fcae_runtime::destination_routing::uses_shared_stage(cfg){self.destinations.check_health()?;}
         #[cfg(target_os="macos")]
         if cfg.uses_macos_ne(){return self.macos_ne.check_health(cfg);}
         #[cfg(all(feature="singbox",any(windows,target_os="linux",target_os="macos")))]

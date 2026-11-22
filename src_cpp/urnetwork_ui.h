@@ -1,11 +1,31 @@
 #pragma once
+#include "account_request_status.h"
 
 static bool s_ur_open = false, s_ur_visible = false, s_ur_add = false, s_ur_code_prompt = false;
 static bool s_ur_add_close = false, s_ur_code_close = false, s_ur_signed_in = false, s_ur_verify = false;
 static bool s_ur_dirty = false, s_ur_save_failed = false;
 static uint64_t s_ur_job = 0;
-static bool ur_account_busy() { return s_ur_job != 0 || s_ur_dirty; }
 static std::string s_ur_op, s_ur_status, s_ur_region, s_ur_selected;
+static uint64_t s_ur_status_revision = 0;
+static AccountRequestStatusTimer s_ur_status_timer;
+static void ur_set_status(const std::string& text) {
+    s_ur_status = text;
+    ++s_ur_status_revision;
+    ui_request_redraw();
+}
+// Reads/region refreshes do not lock the main Connect button. Account writes
+// and unsaved settings still serialize with session startup.
+static bool ur_account_busy() {
+    return s_ur_dirty || (s_ur_job && s_ur_op != "load" && s_ur_op != "regions");
+}
+static bool ur_requests_working() {
+    return s_ur_job || (s_ur_dirty && !s_ur_save_failed);
+}
+static void ur_request_status() {
+    if (ur_requests_working()) ImGui::TextUnformatted("Working…");
+    else if (!s_ur_status.empty()) ImGui::TextWrapped("%s", s_ur_status.c_str());
+}
+
 static char s_ur_email[320] = {}, s_ur_password[1024] = {}, s_ur_code[512] = {};
 static int s_ur_transport = 0;
 static double s_ur_regions_after = 0, s_ur_poll_after = 0;
@@ -23,7 +43,8 @@ static void ur_submit(const char* op, const std::string& fields = {}) {
     s_ur_job = fcae_urnetwork_account_submit(request.c_str());
     std::fill(request.begin(), request.end(), '\0');
     s_ur_op = op;
-    s_ur_status = s_ur_job ? "Working…" : "Cannot queue URnetwork operation.";
+    if (!s_ur_job && s_ur_op == "save") s_ur_save_failed = true;
+    ur_set_status(s_ur_job ? "" : "Cannot queue URnetwork operation.");
     ui_request_redraw();
 }
 static void ur_snapshot(const std::string& json) {
@@ -49,7 +70,8 @@ static void ur_poll() {
     const uint32_t size = fcae_urnetwork_job_poll(s_ur_job, nullptr, 0);
     if (!size || size > 4 * 1024 * 1024) {
         fcae_urnetwork_job_release(s_ur_job); s_ur_job = 0;
-        s_ur_status = "URnetwork account job is unavailable."; return;
+        if (s_ur_op == "save") { s_ur_dirty = true; s_ur_save_failed = true; }
+        ur_set_status("URnetwork account job is unavailable."); return;
     }
     std::vector<char> bytes(size + 1);
     fcae_urnetwork_job_poll(s_ur_job, bytes.data(), (uint32_t)bytes.size());
@@ -58,26 +80,26 @@ static void ur_poll() {
     if (status == "pending") return;
     fcae_urnetwork_job_release(s_ur_job); s_ur_job = 0;
     if (status != "done") {
-        s_ur_status = firefox_json_string(json, "error");
+        ur_set_status(firefox_json_string(json, "error"));
         if (s_ur_op == "save") { s_ur_dirty = true; s_ur_save_failed = true; }
         if (s_ur_op == "regions") s_ur_regions_after = ui_now_seconds() + 300;
         return;
     }
-    if (s_ur_op == "save") { s_ur_status.clear(); return; }
+    if (s_ur_op == "save") { ur_set_status("Saved."); return; }
     if (s_ur_op == "login" || s_ur_op == "verify" || s_ur_op == "code-login") {
         s_ur_verify = firefox_json_bool(json, "verification_required");
         if (s_ur_verify) {
             s_ur_add_close = true; s_ur_code_close = false; s_ur_code_prompt = true;
-            s_ur_status = firefox_json_bool(json, "send_failed")
+            ur_set_status(firefox_json_bool(json, "send_failed")
                 ? "The verification email could not be sent. Close and retry sign-in."
-                : "Enter the verification code sent to your email.";
+                : "Enter the verification code sent to your email.");
             return;
         }
         s_ur_add_close = s_ur_code_close = true;
         s_ur_verify = false; ur_clear_secrets();
     }
     ur_snapshot(json);
-    s_ur_status.clear();
+    ur_set_status("Done.");
 }
 static void open_urnetwork_settings() { s_ur_open = true; if (!s_ur_dirty) ur_submit("load"); }
 static void render_urnetwork_settings() {
@@ -85,26 +107,33 @@ static void render_urnetwork_settings() {
     if (s_ur_open) { ImGui::OpenPopup("URnetwork settings"); s_ur_open = false; s_ur_visible = true; }
     const bool disconnected = g_app.ffi_state.load() == FCAE_STATE_DISCONNECTED || g_app.ffi_state.load() == FCAE_STATE_ERROR;
     const bool editable = disconnected && !g_app.start_busy.load();
-    if (s_ur_visible && !s_ur_job && editable) {
+    if (!s_ur_job && editable) {
         if (s_ur_dirty && !s_ur_save_failed) {
             ur_submit("save", ",\"region\":\"" + firefox_json_escape(s_ur_region.c_str())
                 + "\",\"transport\":\"" + s_ur_modes[s_ur_transport] + "\"");
             if (s_ur_job) s_ur_dirty = false;
-        } else if (s_ur_signed_in && !s_ur_verify && ui_now_seconds() >= s_ur_regions_after) {
+        } else if (s_ur_visible && s_ur_signed_in && !s_ur_verify && ui_now_seconds() >= s_ur_regions_after) {
             s_ur_regions_after = ui_now_seconds() + 300;
             ur_submit("regions");
         }
     }
+    if (s_ur_status_timer.expired(ur_requests_working(), s_ur_status_revision,
+            !s_ur_status.empty(), ui_now_seconds())) {
+        s_ur_status.clear();
+        ui_request_redraw();
+    }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(.5f, .5f));
     ImGui::SetNextWindowSize(modal_size(640, 560), ImGuiCond_Always);
     if (!ImGui::BeginPopupModal("URnetwork settings", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) return;
+    ur_request_status();
     ImGui::BeginChild("##ur_scroll", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8));
-    ImGui::BeginDisabled(s_ur_job != 0 || !editable);
+    ImGui::BeginDisabled(!editable);
     if (account_region_combo("urnetwork", s_ur_region, s_ur_regions)) { s_ur_dirty = true; s_ur_save_failed = false; }
     ImGui::TextUnformatted("Transport"); ImGui::SetNextItemWidth(-1);
     const char* labels[] = {"Auto", "HTTP/1.1 (H1)", "HTTP/3 (H3)", "DNS", "DNS pump"};
     if (ImGui::Combo("##ur_transport", &s_ur_transport, labels, 5)) { s_ur_dirty = true; s_ur_save_failed = false; }
     ImGui::SeparatorText("Accounts");
+    ImGui::BeginDisabled(s_ur_job != 0);
     for (const auto& account : s_ur_accounts) {
         ImGui::PushID(account.first.c_str());
         if (ImGui::RadioButton("##selected", account.first == s_ur_selected))
@@ -119,21 +148,19 @@ static void render_urnetwork_settings() {
     if (ImGui::Button("Add new account")) {
         ur_clear_secrets(); s_ur_email[0] = 0;
         s_ur_verify = false; s_ur_add_close = s_ur_code_close = false; s_ur_add = true;
-        s_ur_status.clear();
+        ur_set_status("");
     }
     if (s_ur_verify) { ImGui::SameLine(); if (ImGui::Button("Continue verification")) s_ur_code_prompt = true; }
+    ImGui::EndDisabled();
     ImGui::SeparatorText("Local listeners");
     listener_row("URnetwork SOCKS5", &g_app.ur_socks_enabled, &g_app.ur_socks_port, 1, 65535);
     listener_row("URnetwork HTTP", &g_app.ur_http_enabled, &g_app.ur_http_port, 1, 65535);
     ImGui::EndDisabled();
     backend_log_combo("URnetwork log level", 6, g_app.urnetwork_log);
-    if (!s_ur_status.empty()) ImGui::TextWrapped("%s", s_ur_status.c_str());
     if (s_ur_save_failed && ImGui::Button("Retry saving settings")) s_ur_save_failed = false;
     ImGui::EndChild();
-    // Finish queued autosaves before allowing the settings dialog to close.
-    ImGui::BeginDisabled(s_ur_dirty || s_ur_job != 0);
+    // Closing the dialog does not cancel requests or discard queued autosaves.
     if (ImGui::Button("Close")) { ur_clear_secrets(); s_ur_visible = false; ImGui::CloseCurrentPopup(); }
-    ImGui::EndDisabled();
     if (s_ur_add) { ImGui::OpenPopup("Add URnetwork account"); s_ur_add = false; }
     if (begin_account_dialog("Add URnetwork account", 520)) {
         if (s_ur_add_close) { s_ur_add_close = false; ImGui::CloseCurrentPopup(); }
@@ -154,10 +181,8 @@ static void render_urnetwork_settings() {
                 ur_clear_secrets();
             }
             ImGui::EndDisabled();
-            if (!s_ur_status.empty()) ImGui::TextWrapped("%s", s_ur_status.c_str());
-            ImGui::BeginDisabled(s_ur_job != 0);
-            if (ImGui::Button("Cancel")) { ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
-            ImGui::EndDisabled();
+            ur_request_status();
+            if (ImGui::Button("Later")) { ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
         }
         ImGui::EndPopup();
     }
@@ -174,10 +199,8 @@ static void render_urnetwork_settings() {
                 ur_clear_secrets();
             }
             ImGui::EndDisabled();
-            if (!s_ur_status.empty()) ImGui::TextWrapped("%s", s_ur_status.c_str());
-            ImGui::BeginDisabled(s_ur_job != 0);
-            if (ImGui::Button("Close")) { ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
-            ImGui::EndDisabled();
+            ur_request_status();
+            if (ImGui::Button("Later")) { ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
         }
         ImGui::EndPopup();
     }

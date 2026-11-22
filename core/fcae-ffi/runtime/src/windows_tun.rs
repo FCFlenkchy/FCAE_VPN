@@ -203,6 +203,19 @@ fn non_loopback_ipv6_present() -> Result<bool> {
     result
 }
 
+// Snapshot the physical interface before split-default capture routes exist.
+// Interface binding keeps DIRECT destinations (not just the carrier peer) out
+// of the TUN after those routes are installed.
+pub(crate) fn physical_egress_interface() -> Result<String> {
+    let route = best_route(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)))?;
+    let mut alias = [0u16; 257];
+    checked(unsafe { ConvertInterfaceLuidToAlias(&route.InterfaceLuid, alias.as_mut_ptr(), alias.len()) },
+        "query DIRECT egress interface")?;
+    let len = alias.iter().position(|c| *c == 0).unwrap_or(alias.len());
+    if len == 0 { return Err(CoreError::Internal("DIRECT egress has no interface alias".into())); }
+    Ok(String::from_utf16_lossy(&alias[..len]))
+}
+
 fn best_route(peer: IpAddr) -> Result<MIB_IPFORWARD_ROW2> {
     let mut row = MIB_IPFORWARD_ROW2::default();
     let mut source = SOCKADDR_INET::default();
@@ -369,7 +382,6 @@ pub struct TunGuard {
     addresses: Vec<MIB_UNICASTIPADDRESS_ROW>,
     interfaces: Vec<InterfaceChange>,
     dns: Option<DnsGuard>,
-    dns_firewall: Option<crate::windows_dns_firewall::DnsFirewall>,
     ipv6_unavailable: bool,
 }
 
@@ -404,8 +416,7 @@ impl TunGuard {
         log::info!("[tun] resolving Windows TUN adapter");
         let (luid, index, guid) = adapter_with_preference(&cfg.tun.name,prefer_shared_guid)?;
         log::info!("[tun] adapter found; configuring bypass routes");
-        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, dns_firewall: None, ipv6_unavailable: false };
-        guard.dns_firewall = Some(crate::windows_dns_firewall::DnsFirewall::install(index, unsafe { luid.Value })?);
+        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, ipv6_unavailable: false };
         for (position, peer) in peers.into_iter().enumerate() {
             // The endpoint the engine was told to use must be kept off the
             // device or the session flaps, so that one still fails loudly.
@@ -738,7 +749,6 @@ impl Drop for TunGuard {
             if current.Family == AF_INET { current.SitePrefixLength = 0; }
             cleanup(unsafe { SetIpInterfaceEntry(&mut current) }, "restore TUN interface settings");
         }
-        drop(self.dns_firewall.take());
     }
 }
 

@@ -22,6 +22,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -232,7 +233,18 @@ func mtun_running(id C.uint64_t) C.int {
 	mtunMu.Lock()
 	core := mtunCores[uint64(id)]
 	mtunMu.Unlock()
+	return mtunHealth(core)
+}
+
+func mtunHealth(core *mtunCore) C.int {
 	if core != nil && core.handler.ctx.Err() == nil {
+		if health, ok := core.device.(interface{ PacketReadError() error }); ok {
+			if err := health.PacketReadError(); err != nil {
+				mtunLogf(1, "Wintun packet reader stopped: %v", err)
+				core.cancel()
+				return 0
+			}
+		}
 		return 1
 	}
 	return 0
@@ -278,7 +290,11 @@ func (h *mtunHandler) close() {
 		_ = c.Close()
 	}
 }
-func (h *mtunHandler) NewError(context.Context, error) {}
+func (h *mtunHandler) NewError(_ context.Context, err error) {
+	if err != nil && h.ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
+		mtunLogf(4, "packet forwarding: %v", err)
+	}
+}
 func (h *mtunHandler) PrepareConnection(network string, _ M.Socksaddr, _ M.Socksaddr, _ tun.DirectRouteContext, _ time.Duration) (tun.DirectRouteDestination, error) {
 	// SOCKS carries TCP/UDP only. Never turn unsupported traffic into DIRECT.
 	if network != N.NetworkTCP && network != N.NetworkUDP {
@@ -286,7 +302,12 @@ func (h *mtunHandler) PrepareConnection(network string, _ M.Socksaddr, _ M.Socks
 	}
 	return nil, nil
 }
-func (h *mtunHandler) NewConnection(_ context.Context, conn net.Conn, metadata M.Metadata) error {
+func (h *mtunHandler) NewConnection(_ context.Context, conn net.Conn, metadata M.Metadata) (result error) {
+	defer func() {
+		if result != nil {
+			h.NewError(h.ctx, fmt.Errorf("TCP %s: %w", metadata.Destination, result))
+		}
+	}()
 	if !h.add(conn) {
 		return net.ErrClosed
 	}
@@ -311,7 +332,12 @@ func (h *mtunHandler) NewPacket(_ context.Context, key netip.AddrPort, buffer *b
 	}
 	h.nat.NewPacket(h.ctx, key, buffer, metadata, init)
 }
-func (h *mtunHandler) NewPacketConnection(_ context.Context, conn N.PacketConn, metadata M.Metadata) error {
+func (h *mtunHandler) NewPacketConnection(_ context.Context, conn N.PacketConn, metadata M.Metadata) (result error) {
+	defer func() {
+		if result != nil {
+			h.NewError(h.ctx, fmt.Errorf("UDP %s: %w", metadata.Destination, result))
+		}
+	}()
 	if !h.udp {
 		_ = conn.Close()
 		return fmt.Errorf("the session exit does not carry UDP")

@@ -23,7 +23,7 @@ inline void destination_routing_ui() {
     const bool available=fcae_destination_routing_available();
     if(!available)ImGui::TextDisabled("Destination routing unavailable in this build.");
     ImGui::BeginChild("##destination_body",ImVec2(0,-ImGui::GetFrameHeightWithSpacing()),ImGuiChildFlags_None);
-    ImGui::TextUnformatted("Destination split tunneling (global for this list)");
+    ImGui::TextUnformatted("Destination split tunneling");
     ImGui::SetNextItemWidth(-1);
     int mode=g_app.destination_mode;
     if(ImGui::Combo("##destination_mode",&mode,modes,3)) {
@@ -33,6 +33,9 @@ inline void destination_routing_ui() {
         else error[0]=0;
         mode=g_app.destination_mode;
     }
+    ImGui::TextWrapped("%s", mode==1 ? "Matches: tunnel. Other traffic: DIRECT. DNS: tunnel." :
+        mode==2 ? "Matches: DIRECT. Other traffic: tunnel. DNS: tunnel." :
+        "Destination rules are saved but inactive. DNS: tunnel.");
     ImGui::Separator();
     ImGui::BeginDisabled(!available);
     ImGui::Combo("Rule type",&kind,kinds,3);

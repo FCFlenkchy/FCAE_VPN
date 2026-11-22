@@ -1,6 +1,7 @@
 #include "ui_text_input.h"
 #include "ui_media_fit.h"
 #include "ui_render.h"
+#include "account_request_status.h"
 #if !defined(ANDROID)
 #include "platform_app_routing_ui.h"
 #endif
@@ -760,6 +761,7 @@ static void firefox_poll_captcha();
 static void firefox_poll_job();
 static void firefox_poll_background();
 static void firefox_expire_status(double now);
+static bool firefox_requests_working();
 static void firefox_refresh_usage(double now);
 
 static void autosave_config(double now);
@@ -2908,23 +2910,11 @@ static void firefox_submit(const std::string& request, const char* pending) {
 }
 
 static void firefox_expire_status(double now) {
-    static std::string observed;
-    static uint64_t observed_revision = 0;
-    static double deadline = 0.0;
-    if (observed_revision != s_firefox_status_revision || observed != g_app.firefox_status) {
-        observed_revision = s_firefox_status_revision;
-        observed = g_app.firefox_status;
-        deadline = 0.0;
-    }
-    if (observed.empty() || g_app.firefox_job) {
-        deadline = 0.0;
-        return;
-    }
-    if (deadline == 0.0) deadline = now + 3.0;
-    if (now >= deadline) {
+    static AccountRequestStatusTimer timer;
+    if (timer.expired(firefox_requests_working(), s_firefox_status_revision,
+            g_app.firefox_status[0] != 0, now)) {
         g_app.firefox_status[0] = 0;
-        observed.clear();
-        deadline = 0.0;
+        ui_request_redraw();
     }
 }
 
@@ -3113,6 +3103,14 @@ static bool s_firefox_region_cached = false;
 static uint64_t s_firefox_usage_job = 0;
 static std::string s_firefox_usage_account;
 static std::vector<std::string> s_firefox_usage_queue;
+
+static bool firefox_requests_working() {
+    return g_app.firefox_job || s_firefox_region_job || s_firefox_usage_job || !s_firefox_usage_queue.empty();
+}
+static void firefox_request_status() {
+    if (firefox_requests_working()) ImGui::TextUnformatted("Working…");
+    else if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
+}
 
 static void firefox_start_regions(bool cached) {
     if (s_firefox_region_job) return;
@@ -4015,6 +4013,7 @@ static void render_firefox_settings() {
     s_firefox_settings_visible = true;
     s_firefox_captcha_embedded = true;
     render_firefox_captcha_content();
+    firefox_request_status();
     ImGui::BeginChild("##firefox_scroll",
         ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8.0f),
         ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
@@ -4030,8 +4029,6 @@ static void render_firefox_settings() {
         ImGui::TextWrapped("Could not save or load the relay URL. Use a valid HTTP or HTTPS URL; the previous setting may still be active.");
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     firefox_account_rows(root);
-    if (g_app.firefox_job) ImGui::TextDisabled("Account operation in progress…");
-    if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     listener_row("Firefox SOCKS5", &g_app.firefox_socks_enabled, &g_app.firefox_socks_port, 1, 65535);
     listener_row("Firefox HTTP", &g_app.firefox_http_enabled, &g_app.firefox_http_port, 1, 65535);
@@ -4078,8 +4075,7 @@ static void render_firefox_add_account() {
         firefox_submit(request, "Signing in to Firefox Accounts…");
     }
     ImGui::EndDisabled();
-    if (g_app.firefox_job) ImGui::TextDisabled("Account operation in progress…");
-    if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
+    firefox_request_status();
     if (ImGui::Button("Close")) {
         if (!g_app.firefox_job && !s_firefox_unblock_required) {
             g_app.firefox_password[0] = 0;
@@ -4119,7 +4115,7 @@ static void render_firefox_code_prompt() {
     if (!email_link) {
         UiText::InputText(verification ? "Verification code" : "Unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
     }
-    if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
+    firefox_request_status();
     ImGui::BeginDisabled(g_app.firefox_job != 0 || (!email_link && !g_app.firefox_code[0]));
     if (verification && ImGui::Button(email_link ? "Continue after opening link" : "Verify")) {
         const char* operation = g_app.firefox_totp ? "verify_totp" : email_link ? "confirm_email_link" : "verify_email";

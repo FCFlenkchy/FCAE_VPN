@@ -34,9 +34,20 @@ impl DestinationRouter {
         Self::default()
     }
     pub fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<Endpoints> {
-        if fcae_runtime::destination_routing::uses_native(cfg) { return Ok(endpoints.clone()); }
-        let Some(policy) = cfg.destinations.as_ref() else {
+        if !fcae_runtime::destination_routing::uses_shared_stage(cfg) {
             return Ok(endpoints.clone());
+        }
+        // Off/empty policies still carry captured DNS through the exit. The
+        // shared DNS handler also translates UDP DNS for TCP-only exits.
+        let dns_only = fcae_runtime::destination_routing::Policy {
+            schema: 1,
+            mode: 2,
+            rules: Vec::new(),
+        };
+        let policy = if fcae_runtime::destination_routing::uses_native(cfg) {
+            &dns_only
+        } else {
+            cfg.destinations.as_ref().unwrap_or(&dns_only)
         };
         let mut slot = lock(&self.live);
         if let Some(live) = slot.as_ref() {
@@ -49,7 +60,13 @@ impl DestinationRouter {
         let listen = reserved
             .local_addr()
             .map_err(|error| CoreError::Internal(error.to_string()))?;
-        let config = policy.config(socks, listen.port(), endpoints.udp || endpoints.psiphon_dns)?;
+        let config = fcae_runtime::destination_routing::session_config(
+            policy,
+            cfg,
+            socks,
+            listen.port(),
+            endpoints.udp || endpoints.psiphon_dns,
+        )?;
         let text = CString::new(config.to_string())
             .map_err(|error| CoreError::InvalidConfig(error.to_string()))?;
         unsafe {

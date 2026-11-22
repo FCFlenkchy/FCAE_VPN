@@ -51,7 +51,7 @@ xray = ["dep:fcae-bridge-xray", "fcae-go-bridge/xray", "tun"]
 singbox = ["dep:fcae-bridge-singbox", "fcae-go-bridge/singbox", "tun"]
 # Both extra cores.
 mihomo = ["dep:fcae-bridge-mihomo", "fcae-go-bridge/mihomo", "tun"]
-sing-tun = ["dep:fcae-bridge-sing-tun", "fcae-go-bridge/sing-tun", "tun"]
+sing-tun = ["dep:fcae-bridge-sing-tun", "fcae-go-bridge/sing-tun", "singbox", "tun"]
 urnetwork = ["tun", "fcae-go-bridge/urnetwork"]
 cores = ["xray", "singbox", "mihomo"]
 # Tor egress inside the Aether engine. OFF by default: it pulls in arti-client

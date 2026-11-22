@@ -469,7 +469,20 @@ fn assemble(
                 .expect("host Wintun GUID");
             let native=native.replace(create,"adapter, err := wintun.OpenAdapter(options.Name)\n if err != nil { adapter, err = wintun.CreateAdapter(options.Name, TunnelType, fcaeAdapterGUID()) }");
             let native=format!("{native}\nfunc fcaeAdapterGUID() *windows.GUID {{ value, err := windows.GUIDFromString(\"{{{guid}}}\"); if err != nil {{ panic(err) }}; return &value }}\n");
+            // A dead Wintun read loop must not remain reported as Connected.
+            // Keep this compatibility hook in the staged copy, not the gitlink.
+            let field = "close       atomic.Int32";
+            assert_eq!(native.matches(field).count(), 1, "review sing-tun read health hook");
+            let native = native.replace(field, "close       atomic.Int32\n fcaeReadError atomic.Pointer[error]");
+            let native = format!("{native}\nfunc (t *NativeTun) PacketReadError() error {{ p := t.fcaeReadError.Load(); if p != nil {{ return *p }}; return nil }}\n");
             std::fs::write(native_path, native).expect("stage shared adapter identity");
+            let endpoint_path = staged.join("tun_windows_gvisor.go");
+            let endpoint = std::fs::read_to_string(&endpoint_path).expect("read Windows packet endpoint");
+            let read_failure = "if err != nil {\n\t\t\tbreak\n\t\t}";
+            assert_eq!(endpoint.matches(read_failure).count(), 1, "review sing-tun packet reader");
+            std::fs::write(endpoint_path, endpoint.replace(read_failure,
+                "if err != nil {\n e.tun.fcaeReadError.Store(&err)\n break\n }"))
+                .expect("stage packet reader health");
             staged
         } else {
             source
