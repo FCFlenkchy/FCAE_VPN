@@ -8,6 +8,4 @@ fn main() {
     let target = fcae_build::target::Target::from_cargo_env();
     fcae_build::wintun::stage_and_emit(target, "FCAE_WINTUN_DLL");
     fcae_build::cronet::stage_and_emit(target, "FCAE_CRONET_DLL");
-    fcae_build::split_driver::stage_and_emit(target)
-        .unwrap_or_else(|error| panic!("split-tunnel driver packaging failed: {error}"));
 }

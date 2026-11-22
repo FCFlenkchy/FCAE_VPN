@@ -89,30 +89,16 @@ public:
             ImGui::EndCombo();
         }
         ImGui::EndDisabled();
-        if (inventory_ && (mode_ != 0 || !editable_)) {
+        if (inventory_) {
             const std::string label = editable_ ? std::string(draft_only_ ? "Edit app draft (" : "Select Apps (") + std::to_string(selected_.size()) + ")"
                                                : (application_action_ ? "Choose application for controlled launch" : "View running applications");
             if (ImGui::Button(label.c_str())) open_picker_ = true;
         }
+        if (ImGui::GetContentRegionAvail().x > ImGui::CalcTextSize("Add destination").x + ImGui::GetStyle().FramePadding.x*2 + ImGui::GetStyle().ItemSpacing.x) ImGui::SameLine();
+        destination_routing_ui();
         if (!capability_reason_.empty())
             UiText::TextColoredWrapped(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled), "%s", capability_reason_.c_str());
-        if (editable_ && !draft_only_) ImGui::TextWrapped("App routing applies on the next connection. Restart the app or reconnect its network sessions to apply fully.");
-        if (deferred_apply_ && editable_) {
-            if (!draft_only_ && mode_ == 2 && selected_.empty()) ImGui::TextWrapped("No exclusions: all captured apps use the VPN.");
-            ImGui::BeginDisabled(!dirty_ || (mode_ == 1 && selected_.empty()));
-            if (ImGui::Button(draft_only_ ? "Save app draft" : "Apply app policy")) dispatch_save();
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::BeginDisabled(!dirty_);
-            if (ImGui::Button("Cancel app changes")) {
-                mode_ = saved_mode_; selected_ = saved_selected_; dirty_ = false;
-                retain_selected_rows(); filter_dirty_ = true;
-            }
-            ImGui::EndDisabled();
-            if (dirty_) ImGui::TextDisabled(draft_only_ ? "Unsaved draft changes." : "Unapplied changes — the saved connection policy is unchanged.");
-        }
         if (platform_controls_) platform_controls_();
-        destination_routing_ui();
     }
 
     void picker() {
@@ -140,12 +126,11 @@ public:
             reset_scroll_ = true;
         }
         if (editable_) {
-            if (ImGui::Checkbox("Selected apps only", &selected_only_)) filter_dirty_ = true;
-            if (manual_executable_) {
+            if (manual_executable_ && draft_only_) {
                 ImGui::SetNextItemWidth(-FLT_MIN);
-                UiText::InputTextWithHint("##manual_app", draft_only_ ? "Bundle identifier, e.g. com.example.app" : "Absolute executable path (validated on connect)", manual_path_, sizeof(manual_path_));
+                UiText::InputTextWithHint("##manual_app", "Bundle identifier", manual_path_, sizeof(manual_path_));
                 ImGui::BeginDisabled(!manual_path_[0]);
-                if (ImGui::Button(draft_only_ ? "Add bundle identifier" : "Add executable")) {
+                if (ImGui::Button("Add bundle identifier")) {
                     selected_.insert(manual_path_);
                     retain_selected_rows(); manual_path_[0] = 0; filter_dirty_ = true; save();
                 }
@@ -228,7 +213,7 @@ private:
     std::string folded_query_;
     char query_[256]{};
     char manual_path_[4096]{};
-    bool selected_only_ = false, manual_executable_ = false;
+    bool manual_executable_ = false;
     uint64_t revision_ = 0;
     unsigned allowed_modes_ = 7u;
     int mode_ = 0;
@@ -253,7 +238,7 @@ private:
         // needs no sort or PackageManager calls on a render/search frame.
         for (bool selected : {true, false})
             for (size_t index = 0; index < apps_.size(); ++index)
-                if ((!editable_ || !selected_only_ || selected) && (selected_.count(apps_[index].id) != 0) == selected &&
+                if ((selected_.count(apps_[index].id) != 0) == selected &&
                     (folded_query_.empty() || apps_[index].search.find(folded_query_) != std::string::npos))
                     filtered_.push_back(index);
         filter_dirty_ = false;

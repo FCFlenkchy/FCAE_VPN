@@ -119,6 +119,7 @@ impl FlowTunBridge {
         }
         let mut id = 0;
         unsafe {
+            super::sb_set_process_lookup(Some(super::process_lookup::lookup));
             let error = super::sb_start(text.as_ptr(), &mut id);
             if !error.is_null() {
                 let message = CStr::from_ptr(error).to_string_lossy().into_owned();

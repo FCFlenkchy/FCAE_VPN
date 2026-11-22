@@ -213,6 +213,10 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 	if err != nil {
 		return C.CString("sing-box: config: " + err.Error())
 	}
+	ctx, err = appProcessContext(ctx, text)
+	if err != nil {
+		return C.CString("app process lookup: " + err.Error())
+	}
 	created, err := box.New(box.Options{Context: ctx, Options: options})
 	if err != nil {
 		return C.CString("sing-box: " + err.Error())

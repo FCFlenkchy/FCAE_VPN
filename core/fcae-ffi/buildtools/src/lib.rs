@@ -6,14 +6,14 @@
 //! copy it.
 //!
 //! Here each concern is a module, and a crate's `build.rs` becomes a few
-//! calls. Pinned kernel-driver artifacts use SHA-256 verification.
+//! calls. Nothing in this crate has dependencies, so it never bloats build
+//! time.
 
 pub mod cronet;
 pub mod go;
 pub mod header;
 pub mod target;
 pub mod wintun;
-pub mod split_driver;
 
 /// Emit a `cargo:warning=` line (the only way a build script can talk to the
 /// user).

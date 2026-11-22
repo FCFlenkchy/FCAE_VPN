@@ -68,6 +68,12 @@ static inline void core_json_escape_into(std::string& out, const std::string& te
     }
 }
 
+#if defined(FCAE_IOS) || defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
+inline ImTextureID app_routing_icon(const std::string&) {return ImTextureID{};}
+#else
+ImTextureID app_routing_icon(const std::string& executable);
+#endif
+
 struct AppState {
     std::atomic<bool> running{true};
     std::atomic<int>  ffi_state{FCAE_STATE_DISCONNECTED};

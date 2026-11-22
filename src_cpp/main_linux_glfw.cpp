@@ -31,6 +31,43 @@
 // straight from the extracted archive.
 #include "icon_data.h"
 
+#include <dlfcn.h>
+#include <unordered_map>
+#include <filesystem>
+#include "app_icon_hints.h"
+static std::unordered_map<std::string,GLuint> app_icon_textures;
+static void release_app_icons(){for(const auto& entry:app_icon_textures)if(entry.second)glDeleteTextures(1,&entry.second);app_icon_textures.clear();}
+ImTextureID app_routing_icon(const std::string& executable) {
+    auto found=app_icon_textures.find(executable);if(found!=app_icon_textures.end())return (ImTextureID)(intptr_t)found->second;
+    if(app_icon_textures.size()>=512)return ImTextureID{};
+    static void* gtk=dlopen("libgtk-3.so.0",RTLD_LAZY|RTLD_LOCAL);
+    if(!gtk)return ImTextureID{};
+    using Init=int(*)(int*,char***);using Theme=void*(*)();using Load=void*(*)(void*,const char*,int,int,void**);
+    using File=void*(*)(const char*,int,int,int,void**);using Int=int(*)(void*);using Pixels=unsigned char*(*)(void*);using Unref=void(*)(void*);
+    static auto init=(Init)dlsym(gtk,"gtk_init_check");static auto theme=(Theme)dlsym(gtk,"gtk_icon_theme_get_default");static auto load=(Load)dlsym(gtk,"gtk_icon_theme_load_icon");
+    static auto file=(File)dlsym(gtk,"gdk_pixbuf_new_from_file_at_scale");static auto width=(Int)dlsym(gtk,"gdk_pixbuf_get_width");static auto height=(Int)dlsym(gtk,"gdk_pixbuf_get_height");
+    static auto stride=(Int)dlsym(gtk,"gdk_pixbuf_get_rowstride");static auto channels=(Int)dlsym(gtk,"gdk_pixbuf_get_n_channels");static auto pixels=(Pixels)dlsym(gtk,"gdk_pixbuf_get_pixels");static auto unref=(Unref)dlsym(gtk,"g_object_unref");
+    static bool ready=[&]{
+        auto disable_locale=(void(*)())dlsym(gtk,"gtk_disable_setlocale");if(disable_locale)disable_locale();
+        return init&&theme&&load&&file&&width&&height&&stride&&channels&&pixels&&unref&&init(nullptr,nullptr);
+    }();
+    if(!ready)return ImTextureID{};
+    std::string name=AppIconHints::get(executable);if(name.empty())name=std::filesystem::path(executable).filename().string();
+    void* bitmap=!name.empty()&&name[0]=='/'?file(name.c_str(),48,48,1,nullptr):load(theme(),name.c_str(),48,0,nullptr);
+    GLuint texture=0;
+    if(bitmap){
+        int w=width(bitmap),h=height(bitmap),row=stride(bitmap),n=channels(bitmap);auto data=pixels(bitmap);
+        if(w>0&&h>0&&w<=256&&h<=256&&(n==3||n==4)&&row>=w*n&&data){
+            std::vector<unsigned char> rgba(w*h*4);
+            for(int y=0;y<h;++y)for(int x=0;x<w;++x){auto src=data+y*row+x*n;auto dst=rgba.data()+(y*w+x)*4;dst[0]=src[0];dst[1]=src[1];dst[2]=src[2];dst[3]=n==4?src[3]:255;}
+            glGenTextures(1,&texture);glBindTexture(GL_TEXTURE_2D,texture);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+            glPixelStorei(GL_UNPACK_ALIGNMENT,1);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,rgba.data());
+        }
+        unref(bitmap);
+    }
+    app_icon_textures.emplace(executable,texture);return (ImTextureID)(intptr_t)texture;
+}
+
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
     static GLuint textures[3] = {};
     static uint64_t loaded[3] = {};
@@ -278,6 +315,7 @@ int main(int argc, char** argv) {
 
     ui_set_window_handle(nullptr);
     ui_shutdown();
+    release_app_icons();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

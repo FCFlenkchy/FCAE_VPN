@@ -1,4 +1,5 @@
 #pragma once
+#include "app_icon_hints.h"
 
 // Read-only process inventory. Discovering an executable is NOT routing or
 // authorizing it; enforcement providers must resolve identities independently.
@@ -112,13 +113,14 @@ inline void installed_applications(const std::atomic<bool>& cancelled,
                     }
                     close(fd);
                 }
-                std::istringstream input(contents);std::string line,name,exec;bool group=false,hidden=false;size_t bytes=0;
+                std::istringstream input(contents);std::string line,name,exec,icon;bool group=false,hidden=false;size_t bytes=0;
                 while(std::getline(input,line)&& (bytes+=line.size())<65536) {
                     if(!line.empty()&&line.back()=='\r')line.pop_back();
                     if(!line.empty()&&line.front()=='['){group=line=="[Desktop Entry]";continue;}
                     if(!group)continue;
                     if(line.rfind("Name=",0)==0)name=line.substr(5);
                     if(line.rfind("Exec=",0)==0)exec=line.substr(5);
+                    if(line.rfind("Icon=",0)==0)icon=line.substr(5);
                     if(line=="Hidden=true" || line=="NoDisplay=true")hidden=true;
                 }
                 if(!hidden&&!exec.empty()) {
@@ -144,7 +146,7 @@ inline void installed_applications(const std::atomic<bool>& cancelled,
                                     if(std::filesystem::is_regular_file(candidate,error)){executable=candidate;break;}error.clear();
                                 }
                             }
-                            if(executable.is_absolute())add(path_utf8(executable),name.empty()?path_utf8(path.stem()):name);
+                            if(executable.is_absolute()){AppIconHints::set(path_utf8(executable),icon);add(path_utf8(executable),name.empty()?path_utf8(path.stem()):name);}
                         }
                     }
                 }
@@ -266,8 +268,8 @@ inline InventoryResult running_applications(const std::atomic<bool>& cancelled) 
         const auto ka = search_key(a.label), kb = search_key(b.label);
         return ka == kb ? a.id < b.id : ka < kb;
     });
-    result.status = "Installed launch targets and running executable paths; protected processes and packaged/sandboxed apps may be omitted. Helpers must be selected explicitly. Discovery is not an enforcement acknowledgement.";
-    if (inspected >= limit) result.status += " Inventory limit reached.";
+    result.status.clear();
+    if (inspected >= limit) result.status = "Application list limit reached.";
     return result;
 }
 

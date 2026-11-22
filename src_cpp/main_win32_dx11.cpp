@@ -49,6 +49,40 @@ static std::function<void()> g_draw_frame;
 static int g_created_width  = 0;
 static int g_created_height = 0;
 
+#include <unordered_map>
+#include <shellapi.h>
+static std::unordered_map<std::string,ID3D11ShaderResourceView*> app_icon_views;
+static void release_app_icons() {
+    for(auto& entry:app_icon_views)if(entry.second)entry.second->Release();
+    app_icon_views.clear();
+}
+ImTextureID app_routing_icon(const std::string& executable) {
+    if(!g_pd3dDevice)return ImTextureID{};
+    auto found=app_icon_views.find(executable);if(found!=app_icon_views.end())return (ImTextureID)(intptr_t)found->second;
+    if(app_icon_views.size()>=512)return ImTextureID{};
+    ID3D11ShaderResourceView* view=nullptr;
+    const int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,executable.c_str(),-1,nullptr,0);
+    if(count>0) {
+        std::wstring path(count,L'\0');MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,executable.c_str(),-1,path.data(),count);
+        SHFILEINFOW info{};
+        if(SHGetFileInfoW(path.c_str(),0,&info,sizeof(info),SHGFI_ICON|SHGFI_LARGEICON)&&info.hIcon) {
+            BITMAPINFO bitmap{};bitmap.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bitmap.bmiHeader.biWidth=48;bitmap.bmiHeader.biHeight=-48;bitmap.bmiHeader.biPlanes=1;bitmap.bmiHeader.biBitCount=32;bitmap.bmiHeader.biCompression=BI_RGB;
+            void* pixels=nullptr;HDC dc=CreateCompatibleDC(nullptr);HBITMAP dib=dc?CreateDIBSection(dc,&bitmap,DIB_RGB_COLORS,&pixels,nullptr,0):nullptr;
+            if(dib&&pixels){
+                auto old=SelectObject(dc,dib);memset(pixels,0,48*48*4);DrawIconEx(dc,0,0,info.hIcon,48,48,0,nullptr,DI_NORMAL);
+                auto bytes=static_cast<unsigned char*>(pixels);bool alpha=false;for(int i=0;i<48*48;++i)alpha|=bytes[i*4+3]!=0;
+                if(!alpha)for(int i=0;i<48*48;++i)bytes[i*4+3]=255;
+                D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=48;desc.MipLevels=desc.ArraySize=1;desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+                D3D11_SUBRESOURCE_DATA data{};data.pSysMem=pixels;data.SysMemPitch=48*4;ID3D11Texture2D* texture=nullptr;
+                if(SUCCEEDED(g_pd3dDevice->CreateTexture2D(&desc,&data,&texture))){g_pd3dDevice->CreateShaderResourceView(texture,nullptr,&view);texture->Release();}
+                SelectObject(dc,old);
+            }
+            if(dib)DeleteObject(dib);if(dc)DeleteDC(dc);DestroyIcon(info.hIcon);
+        }
+    }
+    app_icon_views.emplace(executable,view);return (ImTextureID)(intptr_t)view;
+}
+
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
     const int index = slot >= 0 && slot < 3 ? slot : 0;
     ID3D11Texture2D*& texture = g_sponsor_textures[index];
@@ -87,6 +121,7 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
 }
 
 static void release_sponsor_textures() {
+    release_app_icons();
     for (int i = 0; i < 3; ++i) {
         if (g_sponsor_views[i]) { g_sponsor_views[i]->Release(); g_sponsor_views[i] = nullptr; }
         if (g_sponsor_textures[i]) { g_sponsor_textures[i]->Release(); g_sponsor_textures[i] = nullptr; }

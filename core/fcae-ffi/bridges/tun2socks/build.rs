@@ -326,6 +326,7 @@ fn assemble(
         fcae_build::go::track_sources(shim.parent().expect("shim directory"));
         copy(&shim, &module.join(name));
         if dir == "singbox" {
+            copy(&shim.with_file_name("process_routing.go"), &module.join("process_routing.go"));
             copy(
                 &shim.with_file_name("cronet_ios.c"),
                 &module.join("cronet_ios.c"),

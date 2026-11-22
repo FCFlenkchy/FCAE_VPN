@@ -837,8 +837,6 @@ pub unsafe extern "C" fn fcae_start_with_app_routing(cfg:*const FcaeConfig,routi
             let provider_available=if policy.as_ref().is_some_and(|policy|policy.provider=="macos_ne"){fcae_app_routing_macos_ne_available()}else{fcae_app_routing_flow_available()};
             if !provider_available{return Err(CoreError::BackendUnavailable("requested desktop application routing provider"));}
             if parsed.mode!=FcaeMode::Tun{return Err(CoreError::InvalidConfig("desktop per-app routing requires TUN mode, not proxy mode".into()));}
-            #[cfg(all(windows,target_pointer_width="64"))]
-            if fcae_runtime::windows_app_routing_control::needed(){return Err(CoreError::InvalidConfig("disable the experimental Windows OS-bypass draft before using captured-flow routing".into()));}
         }
         fcae_runtime::desktop_flow_routing::submitted(policy.as_ref());
         parsed.app_routing=policy;
@@ -1090,14 +1088,7 @@ pub extern "C" fn fcae_app_routing_flow_available()->bool {
     {false}
 }
 
-/// Reports package availability only, not installed driver/enforcement health.
-#[no_mangle]
-pub extern "C" fn fcae_app_routing_experimental_windows_available() -> bool {
-    cfg!(all(windows, target_pointer_width = "64")) && fcae_runtime::windows_split_driver_package::AVAILABLE
-}
-
-/// App-owned routing operation. Linux launch work runs on its routing worker;
-/// Windows kernel installation runs only on the VPN supervisor, never here.
+/// App-owned userspace routing operation.
 /// # Safety
 /// request must be NUL terminated; out must have capacity bytes; active, if non-NULL,
 /// must point to writable bool storage.

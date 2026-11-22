@@ -625,11 +625,7 @@ uint32_t fcae_core_listeners(const char *config, int32_t backend,
 /* True if the process can create a TUN device (admin/root). */
 bool       fcae_is_privileged(void);
 
-/* App-managed experimental controlled launch. Request is JSON with action
- * status/launch/stop/recover; launch requires executable and non-root uid. Stop ends
- * all processes in the app-owned launch scope. Output is a plain status message.
- * out needs at least 4096 bytes; active may be NULL. */
-/* Package availability, not an acknowledgement of installed enforcement. */
+/* In-app userspace routing policy. Output buffers need at least 4096 bytes. */
 /* Host callback is registered once before sessions and stays alive until shutdown. */
 typedef bool (*FcaeMacosAppRoutingControl)(const char*, char*, uint32_t, void*);
 void fcae_app_routing_register_macos_ne(FcaeMacosAppRoutingControl, void*);
@@ -637,7 +633,6 @@ bool fcae_app_routing_macos_ne_available(void);
 bool fcae_app_routing_flow_available(void);
 bool fcae_destination_routing_available(void);
 FcaeStatus fcae_destination_rules_validate(const char* text, char* output, uint32_t capacity);
-bool fcae_app_routing_experimental_windows_available(void);
 /* Immutable per-session desktop policy snapshot. NULL uses the current draft. */
 FcaeStatus fcae_start_with_app_routing(const FcaeConfig *config, const char *routing);
 FcaeStatus fcae_app_routing_request(const char *request, char *out,

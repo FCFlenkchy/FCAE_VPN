@@ -92,6 +92,32 @@ struct MetalTextureSlot {
 static MetalTextureSlot g_slots[3];
 static id<MTLDevice> g_device = nil;
 
+#include <unordered_map>
+static std::unordered_map<std::string,id<MTLTexture>> app_icon_textures;
+static void release_app_icons(){for(auto& entry:app_icon_textures)[entry.second release];app_icon_textures.clear();}
+ImTextureID app_routing_icon(const std::string& executable){
+    if(g_device==nil)return ImTextureID{};
+    auto found=app_icon_textures.find(executable);if(found!=app_icon_textures.end())return (ImTextureID)(intptr_t)(__bridge void*)found->second;
+    if(app_icon_textures.size()>=512)return ImTextureID{};
+    id<MTLTexture> texture=nil;
+    @autoreleasepool {
+        NSString* path=[NSString stringWithUTF8String:executable.c_str()];
+        if(path){
+            NSRange bundle=[path rangeOfString:@".app/" options:NSBackwardsSearch];if(bundle.location!=NSNotFound)path=[path substringToIndex:bundle.location+4];
+            NSImage* icon=[[NSWorkspace sharedWorkspace] iconForFile:path];
+            NSBitmapImageRep* bitmap=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:48 pixelsHigh:48 bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:48*4 bitsPerPixel:32];
+            if(icon&&bitmap){
+                [NSGraphicsContext saveGraphicsState];[NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap]];
+                [icon drawInRect:NSMakeRect(0,0,48,48) fromRect:NSZeroRect operation:NSCompositingOperationCopy fraction:1.0];[NSGraphicsContext restoreGraphicsState];
+                MTLTextureDescriptor* descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:48 height:48 mipmapped:NO];
+                texture=[g_device newTextureWithDescriptor:descriptor];[texture replaceRegion:MTLRegionMake2D(0,0,48,48) mipmapLevel:0 withBytes:bitmap.bitmapData bytesPerRow:48*4];
+            }
+            [bitmap release];
+        }
+    }
+    app_icon_textures.emplace(executable,texture);return (ImTextureID)(intptr_t)(__bridge void*)texture;
+}
+
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
     const int index = (slot >= 0 && slot < 3) ? slot : 0;
     MetalTextureSlot& entry = g_slots[index];
@@ -127,6 +153,7 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
 }
 
 static void release_sponsor_textures(void) {
+    release_app_icons();
     for (int i = 0; i < 3; ++i) {
         [g_slots[i].texture release];
         g_slots[i].texture = nil;

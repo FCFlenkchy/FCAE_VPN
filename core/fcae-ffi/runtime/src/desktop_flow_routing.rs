@@ -139,7 +139,7 @@ pub fn request(value: &Value) -> Value {
             Ok(policy) => {
                 let mut s = state();
                 s.requested = policy;
-                s.message="Draft saved for the next VPN connection; no installed policy is acknowledged until its selected provider completes activation. No independent crash-persistent kill switch.".into();
+                s.message.clear();
             }
             Err(error) => {
                 return json!({"ok":false,"active":state().active.is_some(),"message":error.to_string()})
@@ -160,7 +160,7 @@ pub fn submitted(policy: Option<&FlowPolicy>) {
 pub fn acknowledge(revision: u64) {
     let mut s = state();
     s.active = Some(revision);
-    s.message=format!("Captured-flow policy revision {revision} installed. Executable attribution is best effort; unknown owners and ports 53/853 use the VPN exit chain. New flows only. No independent crash-persistent kill switch.");
+    s.message="App routing active.".into();
 }
 pub fn acknowledge_macos_ne(revision: u64) {
     let mut s = state();
@@ -171,9 +171,7 @@ pub fn withdrawn(revision: u64) {
     let mut s = state();
     if s.active == Some(revision) {
         s.active = None;
-        s.message =
-            "Captured-flow provider stopped; requested policy is pending the next connection."
-                .into();
+        s.message.clear();
     }
 }
 pub fn degraded(revision: u64, message: &str) {
