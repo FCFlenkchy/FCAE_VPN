@@ -83,6 +83,9 @@
 //! `fcae_runtime::windows_dll::ensure_wintun` places it where the in-process
 //! loader will find it. This bridge embeds nothing itself.
 
+#[cfg(feature = "urnetwork")]
+pub mod urnetwork;
+
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
@@ -573,7 +576,7 @@ impl Tun2SocksBridge {
 impl TunBridge for Tun2SocksBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
         #[cfg(windows)]
-        return fcae_runtime::windows_dll::start_with_driver_repair(
+        return fcae_runtime::windows_dll::start_with_adapter_repair(
             &cfg.tun.name,
             || self.closing.load(Ordering::SeqCst),
             || self.start_once(cfg, endpoints),

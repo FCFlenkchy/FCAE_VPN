@@ -17,17 +17,73 @@ use crate::error::{CoreError, Result};
 use crate::windows_dll::Library;
 
 pub fn is_privileged() -> bool {
+    use windows_sys::Win32::Security::{
+        AllocateAndInitializeSid, CheckTokenMembership, DuplicateToken, FreeSid,
+        SecurityIdentification, SECURITY_NT_AUTHORITY, TOKEN_DUPLICATE,
+    };
     unsafe {
         let mut token = ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 { return false; }
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            log::warn!(
+                "[tun] cannot query process privileges: {}",
+                std::io::Error::last_os_error()
+            );
+            return false;
+        }
         let mut elevation = TOKEN_ELEVATION::default();
         let mut size = 0;
-        let ok = GetTokenInformation(token, TokenElevation, (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32, &mut size);
+        let elevated = GetTokenInformation(
+            token,
+            TokenElevation,
+            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut size,
+        ) != 0
+            && elevation.TokenIsElevated != 0;
         CloseHandle(token);
-        ok != 0 && elevation.TokenIsElevated != 0
+        if elevated {
+            return true;
+        }
+        // Non-split administrator tokens (e.g. UAC disabled) must not keep
+        // relaunching. Deny-only membership on a filtered token is not enough.
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        ) == 0
+        {
+            return false;
+        }
+        let mut impersonation = ptr::null_mut();
+        let mut member = 0;
+        if DuplicateToken(token, SecurityIdentification, &mut impersonation) != 0 {
+            let mut sid = ptr::null_mut();
+            if AllocateAndInitializeSid(
+                &SECURITY_NT_AUTHORITY,
+                2,
+                32,
+                544,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                &mut sid,
+            ) != 0
+            {
+                if CheckTokenMembership(impersonation, sid, &mut member) == 0 {
+                    member = 0;
+                }
+                FreeSid(sid);
+            }
+            CloseHandle(impersonation);
+        }
+        CloseHandle(token);
+        member != 0
     }
 }
+
 
 const ADAPTER_GUID: GUID = GUID::from_u128(crate::config::WINTUN_ADAPTER_GUID_U128);
 /// How long the resolver pin check waits for the tunnel adapter to come up.

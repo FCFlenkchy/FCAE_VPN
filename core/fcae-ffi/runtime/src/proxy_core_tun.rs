@@ -147,7 +147,7 @@ impl ProxyCoreTunBridge {
             Ok(id)
         };
         #[cfg(windows)]
-        let id = crate::windows_dll::start_with_driver_repair(&device, stopped, start)?;
+        let id = crate::windows_dll::start_with_adapter_repair(&device, stopped, start)?;
         #[cfg(not(windows))]
         let id = start()?;
         let core = Core(id, ffi);

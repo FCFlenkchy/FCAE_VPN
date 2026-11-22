@@ -117,6 +117,7 @@ internal object ImGuiSettingsMigration {
             }
             result.append(key).append('=').append(text.replace("\r", "").replace("\n", ";")).append('\n')
         }
+        line("core_transport_base", previous["coreTransportBase"] ?: 11)
         for ((native, legacy) in aliases) line(native, previous[legacy])
         if (previous.containsKey("ipVersion"))
             line("ip_version", when (previous["ipVersion"]) { 1 -> 6; 2 -> 10; else -> 4 })

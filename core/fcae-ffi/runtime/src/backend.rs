@@ -25,6 +25,7 @@ pub enum BackendId {
     Xray,
     SingBox,
     Mihomo,
+    URnetwork,
 }
 
 impl BackendId {
@@ -36,6 +37,7 @@ impl BackendId {
             BackendId::Xray => "xray",
             BackendId::SingBox => "sing-box",
             BackendId::Mihomo => "mihomo",
+            BackendId::URnetwork => "urnetwork",
         }
     }
 }

@@ -7,11 +7,11 @@ inline void destination_routing_ui() {
     if(ImGui::Button("Add destination"))ImGui::OpenPopup(title);
     auto* viewport=ImGui::GetMainViewport();
     const ImVec2 room(std::max(1.0f,viewport->WorkSize.x-24),std::max(1.0f,viewport->WorkSize.y-24));
-    ImGui::SetNextWindowPos(viewport->GetWorkCenter(),ImGuiCond_Appearing,ImVec2(0.5f,0.5f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(640.0f,room.x),std::min(620.0f,room.y)),ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(viewport->GetWorkCenter(),ImGuiCond_Always,ImVec2(0.5f,0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(640.0f,room.x),std::min(620.0f,room.y)),ImGuiCond_Always);
     ImGui::SetNextWindowSizeConstraints(ImVec2(1,1),room);
     bool opened=true;
-    if(!ImGui::BeginPopupModal(title,&opened,ImGuiWindowFlags_NoCollapse))return;
+    if(!ImGui::BeginPopupModal(title,&opened,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize))return;
     static char target[1025]={},ports[1025]={},error[1024]={};
     static int kind=0,protocol=0,editing=-1;
     static std::string editing_row;
@@ -19,17 +19,31 @@ inline void destination_routing_ui() {
     static const char* protocols[]={"TCP + UDP","TCP","UDP"};
     static const char* kind_keys[]={"ip","domain","port"};
     static const char* protocol_keys[]={"both","tcp","udp"};
-    static const char* modes[]={"Include matches in TUN","Exclude matches from TUN (DIRECT)"};
+    static const char* modes[]={"Off", "Include matches (whitelist)", "Exclude matches (blacklist)"};
     const bool available=fcae_destination_routing_available();
     if(!available)ImGui::TextDisabled("Destination routing unavailable in this build.");
     ImGui::BeginChild("##destination_body",ImVec2(0,-ImGui::GetFrameHeightWithSpacing()),ImGuiChildFlags_None);
-    ImGui::BeginDisabled(!available);
-    int mode=g_app.destination_mode==1?0:1;
-    if(ImGui::Combo("Mode",&mode,modes,2)) {
-        int previous=g_app.destination_mode;g_app.destination_mode=mode+1;
-        if(fcae_destination_rules_validate(g_app.destination_policy_json().c_str(),error,sizeof(error))!=FCAE_OK)g_app.destination_mode=previous;
+    ImGui::TextUnformatted("Destination split tunneling (global for this list)");
+    ImGui::SetNextItemWidth(-1);
+    int mode=g_app.destination_mode;
+    if(ImGui::Combo("##destination_mode",&mode,modes,3)) {
+        int previous=g_app.destination_mode;g_app.destination_mode=mode;
+        if(mode!=0 && !available){g_app.destination_mode=previous;snprintf(error,sizeof(error),"Destination routing is unavailable; Off remains available.");}
+        else if(mode!=0 && fcae_destination_rules_validate(g_app.destination_policy_json().c_str(),error,sizeof(error))!=FCAE_OK)g_app.destination_mode=previous;
+        else error[0]=0;
+        mode=g_app.destination_mode;
     }
+    ImGui::TextWrapped("%s",mode==0
+        ? "Off: saved destination rules are ignored. Your normal tunnel and app-routing settings still apply."
+        : mode==1
+            ? "Whitelist: only matching traffic uses the selected tunnel/exit chain; other traffic goes DIRECT."
+            : "Blacklist: matching traffic goes DIRECT; other traffic uses the selected tunnel/exit chain.");
+    if(mode==1 && !g_app.destination_has_rules())ImGui::TextWrapped("The whitelist is empty: non-DNS traffic goes DIRECT until you add a matching rule.");
+    if(mode!=0)ImGui::TextWrapped("DNS remains on the protected tunnel path. Domain matching uses available DNS/hostname or TLS, HTTP and QUIC metadata; encrypted or absent hostnames cannot be inferred.");
+    ImGui::TextWrapped("*.example.com matches subdomains only, not example.com itself. Add example.com separately to match the root domain.");
+    ImGui::TextWrapped("Changes apply on the next connection.");
     ImGui::Separator();
+    ImGui::BeginDisabled(!available);
     ImGui::Combo("Rule type",&kind,kinds,3);
     if(kind!=2)UiText::InputTextWithHint("Target",kind==0?"192.0.2.1 or 192.0.2.0/24":"example.com or *.example.com",target,sizeof(target));
     UiText::InputTextWithHint("Ports","Empty = all ports; e.g. 443,8000-8080",ports,sizeof(ports));

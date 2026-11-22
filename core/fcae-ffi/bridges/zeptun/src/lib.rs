@@ -648,7 +648,7 @@ impl ZeptunBridge {
 impl TunBridge for ZeptunBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &fcae_runtime::backend::Endpoints) -> Result<()> {
         #[cfg(windows)]
-        return fcae_runtime::windows_dll::start_with_driver_repair(adapter_name(cfg), || false, || {
+        return fcae_runtime::windows_dll::start_with_adapter_repair(adapter_name(cfg), || false, || {
             self.start_inner(cfg, endpoints, None)
         });
         #[cfg(not(windows))]
@@ -657,7 +657,7 @@ impl TunBridge for ZeptunBridge {
 
     fn start_cancellable(&self, cfg: &SessionConfig, endpoints: &fcae_runtime::backend::Endpoints, cancel: &CancelToken) -> Result<()> {
         #[cfg(windows)]
-        return fcae_runtime::windows_dll::start_with_driver_repair(adapter_name(cfg), || cancel.is_cancelled(), || {
+        return fcae_runtime::windows_dll::start_with_adapter_repair(adapter_name(cfg), || cancel.is_cancelled(), || {
             self.start_inner(cfg, endpoints, Some(cancel))
         });
         #[cfg(not(windows))]

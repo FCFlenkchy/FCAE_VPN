@@ -28,3 +28,21 @@
 [submodule "core/sing-tun"]
 	path = core/sing-tun
 	url = https://github.com/MetaCubeX/sing-tun.git
+[submodule "core/urnetwork/sdk"]
+	path = core/urnetwork/sdk
+	url = https://github.com/urnetwork/sdk.git
+[submodule "core/urnetwork/connect"]
+	path = core/urnetwork/connect
+	url = https://github.com/urnetwork/connect.git
+[submodule "core/urnetwork/glog"]
+	path = core/urnetwork/glog
+	url = https://github.com/urnetwork/glog.git
+[submodule "core/urnetwork/quic-go"]
+	path = core/urnetwork/quic-go
+	url = https://github.com/urnetwork/quic-go.git
+[submodule "core/urnetwork/goidenticons"]
+	path = core/urnetwork/goidenticons
+	url = https://github.com/urnetwork/goidenticons.git
+[submodule "core/urnetwork/gvisor"]
+	path = core/urnetwork/gvisor
+	url = https://github.com/urnetwork/gvisor.git

@@ -33,6 +33,7 @@ pub fn backend_label(backend: FcaeBackend) -> &'static str {
         FcaeBackend::Xray => "Xray",
         FcaeBackend::SingBox => "sing-box",
         FcaeBackend::Mihomo => "mihomo",
+        FcaeBackend::URnetwork => "urnetwork",
     }
 }
 
@@ -482,7 +483,7 @@ impl ListenerPolicy {
             FcaeBackend::Xray => (self.xray_socks_port, self.xray_http_port),
             FcaeBackend::SingBox => (self.singbox_socks_port, self.singbox_http_port),
             FcaeBackend::Mihomo => (self.mihomo_socks_port, self.mihomo_http_port),
-            FcaeBackend::Psiphon => (0, 0),
+            FcaeBackend::Psiphon | FcaeBackend::URnetwork => (0, 0),
         }
     }
 }
@@ -607,6 +608,7 @@ impl SessionConfig {
     pub fn start_timeout(&self) -> Duration {
         // Psiphon does not scan; its establishment (server list fetch plus
         // handshake, possibly through an upstream proxy) has its own budget.
+        if self.backend == FcaeBackend::URnetwork { return Duration::from_secs(130); }
         if self.backend == FcaeBackend::Psiphon {
             return PSIPHON_START_TIMEOUT;
         }
@@ -1550,6 +1552,10 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         }
     }
 
+    if usize::from(cfg.backend == FcaeBackend::URnetwork)
+        + cfg.chain.iter().filter(|hop| hop.backend == FcaeBackend::URnetwork).count() > 1 {
+        return Err(CoreError::InvalidConfig("URnetwork supports one active device per session; repeated URnetwork hops are not supported".into()));
+    }
     if usize::from(cfg.backend == FcaeBackend::Mihomo)
         + cfg.chain.iter().filter(|hop|hop.backend == FcaeBackend::Mihomo).count() > 1 {
         return Err(CoreError::InvalidConfig("Mihomo's in-process core supports one protocol instance; repeated Mihomo backend/chain hops are not supported".into()));
@@ -1778,7 +1784,7 @@ fn hop_carries_udp(hop: &SessionConfig) -> bool {
         }
         FcaeBackend::Psiphon => false,
         // A generated SOCKS5 inbound always offers UDP ASSOCIATE.
-        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox | FcaeBackend::Mihomo => true,
+        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox | FcaeBackend::Mihomo | FcaeBackend::URnetwork => true,
     }
 }
 

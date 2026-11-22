@@ -791,7 +791,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
 
     // Preserve every ABI backend, including Xray/sing-box/Mihomo. The runtime
     // validates it before starting anything; never substitute Aether here.
-    if (backend < FCAE_BACKEND_AETHER || backend > FCAE_BACKEND_MIHOMO) {
+    if (backend < FCAE_BACKEND_AETHER || backend > FCAE_BACKEND_URNETWORK) {
         LOGE("invalid session backend: %d", backend);
         return JNI_FALSE;
     }
@@ -824,13 +824,13 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
                     .c_str();
                 continue;
             }
-            hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : FCAE_BACKEND_AETHER;
+            hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : transport == 11 ? FCAE_BACKEND_URNETWORK : FCAE_BACKEND_AETHER;
             hop.h2_enabled = transport == 1 || transport == 7 || transport == 9;
             switch (transport) {
                 case 0: case 1: hop.protocol = FCAE_PROTOCOL_MASQUE; break;
                 case 2: hop.protocol = FCAE_PROTOCOL_WIREGUARD; break;
                 case 4: hop.protocol = FCAE_PROTOCOL_TOR; break;
-                case 5: case 10: hop.protocol = FCAE_PROTOCOL_AUTO; break;
+                case 5: case 10: case 11: hop.protocol = FCAE_PROTOCOL_AUTO; break;
                 case 6: case 7: hop.protocol = FCAE_PROTOCOL_MASQUE_IN_MASQUE; break;
                 case 8: case 9: hop.protocol = FCAE_PROTOCOL_WARP_IN_MASQUE; break;
                 default: hop.protocol = FCAE_PROTOCOL_GOOL; break;

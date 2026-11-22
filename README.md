@@ -149,6 +149,7 @@ Outputs:
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for the shared desktop and Android interface.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C SOCKS5 tunnel engine, runs in-process.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon tunnel core library.
+- **[URnetwork](https://github.com/urnetwork)** — Decentralized VPN backend, integrated in-process using the [SDK](https://github.com/urnetwork/sdk) and [Connect](https://github.com/urnetwork/connect) libraries.
 - **[Xray-core](https://github.com/XTLS/Xray-core)** — Proxy core, in-process.
 - **[sing-box](https://github.com/SagerNet/sing-box)** — Proxy core, in-process. ([sing-tun](https://github.com/MetaCubeX/sing-tun) is also available as a separate TUN engine.)
 - **[Mihomo](https://github.com/MetaCubeX/mihomo)** — Proxy core and TUN engine, in-process.

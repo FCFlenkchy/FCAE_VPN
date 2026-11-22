@@ -37,6 +37,7 @@ static BOOL portablePath(NSString* path) {
     NSArray* parts=path.pathComponents;
     if ([parts containsObject:@".."] || [parts containsObject:@"."]) return NO;
     if (parts.count==1) return (path.length<=255 && [path.pathExtension isEqualToString:@"toml"]) || [path isEqualToString:@"psiphon_servers.txt"];
+    if ([path isEqualToString:@"urnetwork/account.json"]) return YES;
     if ([path isEqualToString:@"firefox/relay.json"]) return YES;
     if (parts.count!=4 || ![parts[0] isEqualToString:@"firefox"] || ![parts[1] isEqualToString:@"accounts"]) return NO;
     NSCharacterSet* invalid=[[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"] invertedSet];
@@ -50,7 +51,7 @@ static NSURL* portableURL(NSString* path) {
     return [url.path hasPrefix:[root.path stringByAppendingString:@"/"]] ? url : nil;
 }
 NSDictionary* FCAEExportState(const FcaeConfig& config) {
-    NSMutableArray* paths=[NSMutableArray arrayWithArray:@[@"aether.toml",@"aether-masque.toml",@"aether-wireguard.toml",@"psiphon_servers.txt",@"firefox/relay.json"]];
+    NSMutableArray* paths=[NSMutableArray arrayWithArray:@[@"aether.toml",@"aether-masque.toml",@"aether-wireguard.toml",@"psiphon_servers.txt",@"firefox/relay.json",@"urnetwork/account.json"]];
     if (config.config_path && *config.config_path) {
         NSString* identity=[NSString stringWithUTF8String:config.config_path];
         if (identity && ![paths containsObject:identity.lastPathComponent]) [paths addObject:identity.lastPathComponent];

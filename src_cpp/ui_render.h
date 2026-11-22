@@ -256,8 +256,7 @@ struct AppState {
         return false;
     }
     std::string destination_policy_json() const {
-        // Migrate the former Off value: rule count now controls activation.
-        const int policy_mode=destination_mode==1?1:2;
+        const int policy_mode=destination_mode;
         std::string out="{\"schema\":1,\"mode\":"+std::to_string(policy_mode)+",\"rules\":[";
         std::string rows=destination_rows; size_t start=0; bool first=true;
         while(start<rows.size()) {
@@ -272,7 +271,7 @@ struct AppState {
         return out+"]}";
     }
     const char* routing_document() {
-        if(mode!=1 || !destination_has_rules())return routes_inline[0]?routes_inline:nullptr;
+        if(mode!=1 || destination_mode==0 || (destination_mode==2 && !destination_has_rules()))return routes_inline[0]?routes_inline:nullptr;
         destination_envelope="FCAE-DESTINATIONS/1\n{\"destinations\":"+destination_policy_json()+",\"legacy\":\"";
         core_json_escape_into(destination_envelope,routes_inline);destination_envelope+="\"}";
         return destination_envelope.c_str();
@@ -465,7 +464,7 @@ struct AppState {
             if (std::find(selected.begin(), selected.end(), index) == selected.end())
                 selected.push_back(index);
         };
-        if (backend >= 3) include(kCoreTransportBase + core_selected);
+        if ((backend >= 3 && backend <= 5)) include(kCoreTransportBase + core_selected);
         for (int transport : chain_transports) include(transport);
         if (selected.empty()) return;
         core_library_built += '[';
@@ -511,7 +510,7 @@ struct AppState {
             const CoreConfigEntry* entry = core_config_at(transport);
             if (!entry) return 0;
             core = core_backend_id(entry->backend);
-        } else if (backend >= 3) {
+        } else if ((backend >= 3 && backend <= 5)) {
             const CoreConfigEntry* entry = final_core_config();
             core = entry ? core_backend_id(entry->backend) : backend;
         } else {
@@ -630,14 +629,14 @@ struct AppState {
         c.core.library    = core_library_built.empty() ? nullptr : core_library_built.c_str();
         c.core.log_level  = (core_log >= 0 && core_log <= 5) ? (FcaeEngineLog)core_log
                                                              : FCAE_ENGINE_LOG_OFF;
-        const int main_doc = backend >= 3
+        const int main_doc = (backend >= 3 && backend <= 5)
             ? core_session_index(kCoreTransportBase + core_selected) : -1;
         core_ref_built.clear();
         if (main_doc >= 0 || !core_library_error.empty()) {
             core_ref_built = core_library_error.empty() ? "#" + std::to_string(main_doc) : core_library_error;
             c.core.config_ref = core_ref_built.c_str();
         }
-        const CoreConfigEntry* main_entry = backend >= 3
+        const CoreConfigEntry* main_entry = (backend >= 3 && backend <= 5)
             ? core_config_at(kCoreTransportBase + core_selected) : nullptr;
         c.backend = main_entry ? (FcaeBackend)core_backend_id(main_entry->backend)
                                : (FcaeBackend)backend;
@@ -664,13 +663,13 @@ struct AppState {
                 continue;
             }
             FcaeChainHop hop{};
-            hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : FCAE_BACKEND_AETHER;
+            hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : transport == 11 ? FCAE_BACKEND_URNETWORK : FCAE_BACKEND_AETHER;
             hop.h2_enabled = transport == 1 || transport == 7 || transport == 9;
             switch (transport) {
                 case 0: case 1: hop.protocol = FCAE_PROTOCOL_MASQUE; break;
                 case 2: hop.protocol = FCAE_PROTOCOL_WIREGUARD; break;
                 case 4: hop.protocol = FCAE_PROTOCOL_TOR; break;
-                case 5: case 10: hop.protocol = FCAE_PROTOCOL_AUTO; break;
+                case 5: case 10: case 11: hop.protocol = FCAE_PROTOCOL_AUTO; break;
                 case 6: case 7: hop.protocol = FCAE_PROTOCOL_MASQUE_IN_MASQUE; break;
                 case 8: case 9: hop.protocol = FCAE_PROTOCOL_WARP_IN_MASQUE; break;
                 default: hop.protocol = FCAE_PROTOCOL_GOOL; break;
@@ -681,7 +680,7 @@ struct AppState {
         c.chain.hop_count = (uint32_t)chain_hops_built.size();
         // A saved config has no transport dimension of its own: the profile
         // carries it, and a stale protocol id must not be layered on top.
-        c.protocol         = (main_doc >= 0 || backend >= 3) ? FCAE_PROTOCOL_AUTO
+        c.protocol         = (main_doc >= 0 || (backend >= 3 && backend <= 5)) ? FCAE_PROTOCOL_AUTO
                            : (protocol >= 0 && protocol <= 6) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
         // Mode is shared by every protocol/backend: once the UI selects TUN,
         // never let a Psiphon/Tor mapping silently turn it back into Proxy.

@@ -47,6 +47,7 @@ pub fn resolve(id: FcaeBackend) -> Result<std::sync::Arc<dyn Backend>> {
             FcaeBackend::Xray => "xray",
             FcaeBackend::SingBox => "sing-box",
             FcaeBackend::Mihomo => "mihomo",
+        FcaeBackend::URnetwork => "urnetwork",
         })),
     }
 }
@@ -61,13 +62,14 @@ pub fn available() -> Vec<FcaeBackend> {
 /// `available()` only lists what was compiled in, so a UI iterating it can
 /// never render "Psiphon — not included in this build". This lists all ids so
 /// the caller can show the full menu and explain the gaps.
-pub const ALL: [FcaeBackend; 6] = [
+pub const ALL: [FcaeBackend; 7] = [
     FcaeBackend::Aether,
     FcaeBackend::Psiphon,
     FcaeBackend::Firefox,
     FcaeBackend::Xray,
     FcaeBackend::SingBox,
     FcaeBackend::Mihomo,
+    FcaeBackend::URnetwork,
 ];
 
 /// Registered *and* able to start. A backend can be registered yet be a stub

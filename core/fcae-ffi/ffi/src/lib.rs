@@ -766,6 +766,8 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         fcae_bridge_singbox::register();
         #[cfg(feature = "mihomo")]
         fcae_bridge_mihomo::register();
+        #[cfg(feature = "urnetwork")]
+        fcae_bridge_tun2socks::urnetwork::register();
 
         #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
         let engines = Arc::new(TunEngines {
@@ -1774,6 +1776,8 @@ pub extern "C" fn fcae_set_firefox_protect(
     guard("fcae_set_firefox_protect", || {
         #[cfg(feature = "firefox")]
         fcae_firefox_bridge::set_protect_callback(cb);
+        #[cfg(feature = "urnetwork")]
+        fcae_bridge_tun2socks::urnetwork::set_protect(cb);
         #[cfg(not(feature = "firefox"))]
         let _ = cb;
         Ok(())
@@ -1879,6 +1883,55 @@ pub unsafe extern "C" fn fcae_firefox_relay_get(data_dir: *const c_char, out: *m
     }
     #[cfg(not(feature = "firefox"))]
     { let _ = (data_dir, out, cap); u32::MAX }
+}
+
+/// Submit a URnetwork account operation JSON request. Returns an opaque job ID,
+/// or 0 for an invalid request, a busy queue, or unavailable feature. Secrets are consumed by the
+/// account worker and are never returned by `fcae_urnetwork_job_poll`.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_urnetwork_account_submit(request: *const c_char) -> u64 {
+    #[cfg(feature = "urnetwork")]
+    {
+        return guard_value("fcae_urnetwork_account_submit", 0, || {
+            if request.is_null() {
+                return 0;
+            }
+            let Ok(request) = CStr::from_ptr(request).to_str() else { return 0 };
+            fcae_bridge_tun2socks::urnetwork::submit(request)
+        });
+    }
+    #[cfg(not(feature = "urnetwork"))]
+    {
+        let _ = request;
+        0
+    }
+}
+
+/// Read a job snapshot as JSON. Returns bytes excluding NUL; zero means the
+/// job does not exist (or URnetwork is not compiled in).
+#[no_mangle]
+pub unsafe extern "C" fn fcae_urnetwork_job_poll(id: u64, out: *mut c_char, cap: u32) -> u32 {
+    #[cfg(feature = "urnetwork")]
+    let text = guard_value("fcae_urnetwork_job_poll", String::new(), || {
+        fcae_bridge_tun2socks::urnetwork::poll(id)
+    });
+    #[cfg(not(feature = "urnetwork"))]
+    let text = {
+        let _ = id;
+        String::new()
+    };
+    if !out.is_null() && cap > 0 && !text.is_empty() {
+        fill(std::slice::from_raw_parts_mut(out, cap as usize), &text);
+    }
+    text.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_urnetwork_job_release(id: u64) {
+    #[cfg(feature = "urnetwork")]
+    guard_value("fcae_urnetwork_job_release", (), || fcae_bridge_tun2socks::urnetwork::release(id));
+    #[cfg(not(feature = "urnetwork"))]
+    let _ = id;
 }
 
 /// Submit a Firefox account operation JSON request. Returns an opaque job ID,
@@ -1987,6 +2040,7 @@ fn backend_id_str(id: FcaeBackend) -> &'static str {
         FcaeBackend::Xray => "xray",
         FcaeBackend::SingBox => "sing-box",
         FcaeBackend::Mihomo => "mihomo",
+        FcaeBackend::URnetwork => "urnetwork",
     }
 }
 
@@ -1998,6 +2052,7 @@ fn backend_display_name(id: FcaeBackend) -> &'static str {
         FcaeBackend::Xray => "Xray-core",
         FcaeBackend::SingBox => "sing-box",
         FcaeBackend::Mihomo => "mihomo",
+        FcaeBackend::URnetwork => "URnetwork",
     }
 }
 

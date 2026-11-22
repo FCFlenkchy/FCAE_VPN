@@ -44,6 +44,7 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include "windows_privilege.h"
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <pwd.h>
@@ -110,6 +111,7 @@ static void set_save_status_error(const char* format, ...) {
     ui_request_redraw();
 }
 static bool s_loaded_chain_transports = false;
+static int s_loaded_transport_base = 11;
 static bool s_loaded_socks_port = false;
 static bool s_loaded_http_port = false;
 static bool s_loaded_firefox_socks_port = false;
@@ -1180,6 +1182,7 @@ static bool decode_config_text(const std::string& encoded, char* out, size_t siz
 static void apply_config_kv(const std::string& key, const std::string& val) {
     if (key == "protocol") g_app.protocol = atoi(val.c_str());
     else if (key == "backend") g_app.backend = atoi(val.c_str());
+    else if (key == "core_transport_base") s_loaded_transport_base = atoi(val.c_str());
     else if (key == "chain_transports") {
         g_app.chain_transports = parse_chain_transports(val);
         s_loaded_chain_transports = true;
@@ -1333,7 +1336,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.access_client_secret, sizeof(g_app.access_client_secret), "%s", val.c_str());
     else if (key == "access_email")
         snprintf(g_app.access_email, sizeof(g_app.access_email), "%s", val.c_str());
-    else if (key == "destination_mode") g_app.destination_mode=std::clamp(atoi(val.c_str()),0,2);
+    else if (key == "destination_mode") { char* end=nullptr; long mode=strtol(val.c_str(),&end,10); g_app.destination_mode=end!=val.c_str() && *end==0 && mode>=0 && mode<=2 ? (int)mode : 0; }
     else if (key == "destination_rows_hex") decode_config_text(val,g_app.destination_rows,sizeof(g_app.destination_rows));
     else if (key == "routes_inline")
         snprintf(g_app.routes_inline, sizeof(g_app.routes_inline), "%s", val.c_str());
@@ -1378,6 +1381,7 @@ static bool save_config(bool quiet = false) {
     // Always LF; empty values allowed. Line-based load is robust on Win/Linux.
     fprintf(f, "protocol=%d\n", g_app.protocol);
     fprintf(f, "backend=%d\n", g_app.backend);
+    fprintf(f, "core_transport_base=%d\n", kCoreTransportBase);
     fprintf(f, "chain_transports=%s\n", join_chain_transports(g_app.chain_transports).c_str());
     fprintf(f, "core_selected=%d\n", g_app.core_selected);
     for (size_t i = 0; i < g_app.core_configs.size(); ++i) {
@@ -1596,6 +1600,7 @@ static bool load_config_from(const std::string& path) {
     g_app.desktop_app_platform.clear();
     g_app.desktop_app_provider="captured_flow";
     s_loaded_chain_transports = false;
+    s_loaded_transport_base = 11;
     s_loaded_tor_mode = 0;
     s_loaded_socks_port = false;
     s_loaded_http_port = false;
@@ -1651,6 +1656,10 @@ static bool load_config_from(const std::string& path) {
     fclose(f);
 
     if (applied == 0) { s_config_load_failed = true; return false; }
+    if (s_loaded_transport_base < kCoreTransportBase) {
+        for (int& value : g_app.chain_transports)
+            if (value >= s_loaded_transport_base) value += kCoreTransportBase - s_loaded_transport_base;
+    }
     if (!s_loaded_firefox_socks_enabled) g_app.firefox_socks_enabled = g_app.socks_enabled;
     if (!s_loaded_unified_firefox_http && !s_loaded_firefox_http_enabled)
         g_app.firefox_http_enabled = g_app.http_enabled;
@@ -3309,6 +3318,7 @@ static const char* const kTransportNames[kCoreTransportBase] = {
     "WARP-in-MASQUE (HTTP/3)",
     "WARP-in-MASQUE (HTTP/2)",
     "Firefox IP Protection",
+    "URnetwork",
 };
 
 /// The core a saved-config row is tagged with, lower case and unparenthesised:
@@ -3363,11 +3373,12 @@ static bool transport_is_core(int transport) {
 
 static int current_transport() {
     // A saved config is the main protocol exactly when core_selected names one.
-    if (g_app.backend >= 3) {
+    if ((g_app.backend >= 3 && g_app.backend <= 5)) {
         if (g_app.core_selected >= 0 && g_app.core_selected < (int)g_app.core_configs.size())
             return kCoreTransportBase + g_app.core_selected;
         return kCoreTransportBase + (int)g_app.core_configs.size();
     }
+    if (g_app.backend == 6) return 11;
     if (g_app.backend == 2) return 10;
     if (g_app.backend == 1) return 5;
     if (g_app.protocol == 6) return g_app.h2_enabled ? 9 : 8;
@@ -3384,6 +3395,7 @@ static int transport_carrier(int transport) {
         return AppState::core_backend_id(entry->backend);
     if (transport == 5) return 1;
     if (transport == 10) return 2;
+    if (transport == 11) return 6;
     return 0;
 }
 
@@ -3407,7 +3419,7 @@ static void apply_transport(int transport) {
         case 2: g_app.protocol = 1; break;
         case 3: g_app.protocol = 2; break;
         case 4: g_app.protocol = 4; break;
-        case 5: case 10: g_app.protocol = 3; break;
+        case 5: case 10: case 11: g_app.protocol = 3; break;
         case 6: g_app.protocol = 5; g_app.h2_enabled = false; break;
         case 7: g_app.protocol = 5; g_app.h2_enabled = true; break;
         case 8: g_app.protocol = 6; g_app.h2_enabled = false; break;
@@ -3933,6 +3945,8 @@ static void render_protocol_editor() {
 static char s_firefox_relay_url[4097] = {};
 static bool s_firefox_relay_error = false;
 
+#include "urnetwork_ui.h"
+
 static void open_firefox_settings() {
     s_firefox_relay_url[0] = 0;
     const uint32_t size = fcae_firefox_relay_get(data_dir().c_str(), s_firefox_relay_url, sizeof(s_firefox_relay_url));
@@ -4413,7 +4427,7 @@ void render_ui() {
                     (g_app.backend == 2 || std::find(g_app.chain_transports.begin(), g_app.chain_transports.end() - 1, 10) != g_app.chain_transports.end() - 1);
                 bool uses_aether = g_app.backend == 0 && g_app.protocol != 4;
                 for (int t : g_app.chain_transports)
-                    if (t != 4 && t != 5 && t != 10 && !transport_is_core(t)) uses_aether = true;
+                    if (t != 4 && t != 5 && t != 10 && t != 11 && !transport_is_core(t)) uses_aether = true;
                 const char* disabled = uses_tor && !g_app.tor_socks_enabled ? "Tor SOCKS5" :
                     psi_carrier && !g_app.psiphon_socks_enabled ? "Psiphon SOCKS5" :
                     firefox_carrier && !g_app.firefox_socks_enabled ? "Firefox SOCKS5" :
@@ -4435,7 +4449,12 @@ void render_ui() {
                     return;
                 }
                 // TUN mode requires admin privileges on Windows
-                if (g_app.mode == 1 && !fcae_is_privileged() && !PlatformAppRouting::uses_macos_ne()) {
+                #ifdef _WIN32
+                const bool vpn_privileged=fcae_windows_process_admin(GetCurrentProcess());
+#else
+                const bool vpn_privileged=fcae_is_privileged();
+#endif
+                if (g_app.mode == 1 && !vpn_privileged && !PlatformAppRouting::uses_macos_ne()) {
 #ifdef _WIN32
                     // Save config then relaunch self as administrator.
                     // The elevated instance will start fresh — user clicks CONNECT manually.
@@ -4496,12 +4515,19 @@ void render_ui() {
                             DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
                             fcae_ui_diagnostic(3, child_pid);
                             HANDLE waits[] = {ready, sei.hProcess};
-                            const DWORD wait = WaitForMultipleObjects(sei.hProcess ? 2 : 1, waits, FALSE, 30000);
+                            DWORD wait = WaitForMultipleObjects(sei.hProcess ? 2 : 1, waits, FALSE, 30000);
+                            // Some compatibility launchers exit before the real
+                            // GUI is ready. The child checks its own token before
+                            // it may signal this event; a process launch is not
+                            // itself proof that elevation succeeded.
+                            if (sei.hProcess && wait==WAIT_OBJECT_0+1)
+                                wait=WaitForSingleObject(ready,5000);
+                            const bool confirmed=wait==WAIT_OBJECT_0;
                             if (sei.hProcess) CloseHandle(sei.hProcess);
-                            if (wait == WAIT_OBJECT_0) {
+                            if (confirmed) {
                                 s_elevation_handoff_at.store(GetTickCount() | 1u, std::memory_order_relaxed);
                             } else {
-                                g_app.add_log(FCAE_LOG_ERROR, "[ui] Elevated window did not become ready; keeping this window open");
+                                g_app.add_log(FCAE_LOG_ERROR, "[ui] Administrator handoff was not confirmed; keeping this window open. Check Windows UAC / compatibility policy and try running this executable as administrator.");
                                 s_elevation_pending.store(false, std::memory_order_release);
                             }
                             ui_request_redraw();
@@ -5420,7 +5446,7 @@ void render_ui() {
             };
             const int final_backend = !g_app.chain_transports.empty()
                 ? transport_carrier(g_app.chain_transports.back()) : telem.backend;
-            const char* final_name = final_backend == FCAE_BACKEND_FIREFOX ? "Firefox"
+            const char* final_name = final_backend == FCAE_BACKEND_URNETWORK ? "URnetwork" : final_backend == FCAE_BACKEND_FIREFOX ? "Firefox"
                 : final_backend == FCAE_BACKEND_PSIPHON ? "Psiphon"
                 : final_backend == FCAE_BACKEND_SINGBOX ? "sing-box"
                 : final_backend == FCAE_BACKEND_XRAY ? "Xray" : final_backend == FCAE_BACKEND_MIHOMO ? "Mihomo" : "Aether";
@@ -5516,6 +5542,8 @@ void render_ui() {
             if (ImGui::Button("Protocol")) open_protocol_editor();
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Firefox settings")) open_firefox_settings();
+            if (!narrow) ImGui::SameLine();
+            if (ImGui::Button("URnetwork settings")) open_urnetwork_settings();
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Xray / sing-box / Mihomo settings")) open_core_configs();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
@@ -6096,6 +6124,7 @@ void render_ui() {
     s_firefox_captcha_embedded = false;
     render_core_configs();
     render_firefox_settings();
+    render_urnetwork_settings();
     render_firefox_add_account();
     render_firefox_code_prompt();
     render_firefox_captcha_popup();

@@ -25,10 +25,16 @@ xray = []
 singbox = []
 mihomo = []
 sing-tun = []
+urnetwork = []
 
 [dependencies]
 fcae-runtime.workspace = true
 libc.workspace = true
+fcae-abi.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+zeroize = "1"
 log.workspace = true
 parking_lot.workspace = true
 

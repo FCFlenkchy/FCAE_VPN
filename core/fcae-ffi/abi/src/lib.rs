@@ -34,7 +34,7 @@ pub const FCAE_CONFIG_TUN_ROUTE_PRIVATE: u64 = 0x4000_0000_0000_0000;
 /// transports. Below it, positions follow the built-in transport order. Both
 /// UIs and the runtime share this, so a saved config is pickable everywhere a
 /// built-in transport is. ABI v25.
-pub const FCAE_CORE_TRANSPORT_BASE: u32 = 11;
+pub const FCAE_CORE_TRANSPORT_BASE: u32 = 12;
 
 /// Listener types a saved core config can serve, bitwise. A share link is one
 /// outbound and the bridge builds the session's listeners around it, so it
@@ -89,6 +89,7 @@ pub enum FcaeBackend {
     /// sing-box (`sing-box`), built in and driven through [`FcaeCore`].
     SingBox = 4,
     Mihomo = 5,
+    URnetwork = 6,
 }
 
 /// What a backend supports, so the UI can describe it instead of hardcoding
@@ -878,6 +879,7 @@ impl_try_from_enum!(FcaeBackend, {
     Xray = 3,
     SingBox = 4,
     Mihomo = 5,
+    URnetwork = 6,
 });
 
 impl_try_from_enum!(FcaeProtocol, {

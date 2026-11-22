@@ -178,14 +178,9 @@ impl Policy {
         if text.len() > 65536 {
             return Err(invalid("destination policy exceeds 64 KiB"));
         }
-        let mut value: Self = serde_json::from_str(text)
+        let value: Self = serde_json::from_str(text)
             .map_err(|error| invalid(format!("destination policy: {error}")))?;
         value.validate()?;
-        // Old saved Off policies with rules become the default exclude policy.
-        // Empty policies remain inactive regardless of the selected direction.
-        if value.mode == 0 && !value.rules.is_empty() {
-            value.mode = 2;
-        }
         Ok(value)
     }
     pub fn validate(&self) -> Result<()> {
@@ -208,7 +203,7 @@ impl Policy {
         Ok(())
     }
     pub fn active(&self) -> bool {
-        self.mode != 0 && !self.rules.is_empty()
+        self.mode == 1 || (self.mode == 2 && !self.rules.is_empty())
     }
     pub fn config(&self, socks: SocketAddr, listen: u16, udp: bool) -> Result<Value> {
         self.validate()?;
@@ -229,13 +224,7 @@ impl Policy {
             rules.push(rule.compile(selected)?);
         }
         let default = if self.mode == 1 {
-            if domains {
-                rules
-                    .push(json!({"domain_regex":[".+"],"action":"route","outbound":"fcae-direct"}));
-                "fcae-exit"
-            } else {
-                "fcae-direct"
-            }
+            "fcae-direct"
         } else {
             "fcae-exit"
         };

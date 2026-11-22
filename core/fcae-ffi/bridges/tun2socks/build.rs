@@ -57,7 +57,13 @@ fn main() {
     if cfg!(feature = "stub") {
         // The archive is what exports these symbols; a stub build that also
         // asks for a core would fail at link time with an unhelpful message.
-        if psiphon || xray || singbox || mihomo || cfg!(feature = "sing-tun") {
+        if psiphon
+            || xray
+            || singbox
+            || mihomo
+            || cfg!(feature = "sing-tun")
+            || cfg!(feature = "urnetwork")
+        {
             panic!(
                 "a proxy core needs the live Go archive, but `fcae-go-bridge/stub` is enabled; \
                  drop `stub`, or drop the core that needs it"
@@ -103,6 +109,9 @@ fn main() {
 
     let mut archive = fcae_build::go::CArchive::new(&module, ".", "libfcae_go_bridge");
     archive.target = target;
+    if cfg!(feature = "urnetwork") {
+        archive.tags.push("fcae_urnetwork".into());
+    }
     if mihomo {
         archive.tags.push("fcae_mihomo".into());
         // Native mobile-host mode: VpnService already owns package selection;
@@ -274,6 +283,9 @@ fn cores(psiphon: bool, xray: bool, singbox: bool, mihomo: bool) -> String {
     if mihomo {
         names.push("mihomo");
     }
+    if cfg!(feature = "urnetwork") {
+        names.push("URnetwork");
+    }
     if cfg!(feature = "sing-tun") {
         names.push("MetaCubeX/sing-tun");
     }
@@ -354,6 +366,22 @@ fn assemble(
         }
     }
 
+    if cfg!(feature = "urnetwork") {
+        let source = root.join("core/fcae-ffi/bridges/urnetwork/go");
+        fcae_build::go::track_sources(&source);
+        for entry in std::fs::read_dir(source).expect("URnetwork shim") {
+            let path = entry.expect("URnetwork source").path();
+            if path.extension().is_some_and(|x| x == "go") {
+                copy(
+                    &path,
+                    &module.join(format!(
+                        "ur_{}",
+                        path.file_name().unwrap().to_string_lossy()
+                    )),
+                );
+            }
+        }
+    }
     if mihomo && singbox {
         let source = root.join("core/fcae-ffi/bridges/mihomo/go/expvar/expvar.go");
         fcae_build::rerun_if_changed(&source);
@@ -453,11 +481,52 @@ fn assemble(
         fcae_build::go::track_sources(&source);
         manifest.push_str(&format!("\nrequire github.com/metacubex/mihomo v0.0.0\nreplace github.com/metacubex/mihomo => {}\n",local(&source)));
     }
+    if cfg!(feature = "urnetwork") {
+        // Dependency replacements are deliberately resolved by the archive's
+        // main module, never by editing pinned submodule worktrees.
+        for (directory, name) in [
+            ("sdk", "github.com/urnetwork/sdk"),
+            ("glog", "github.com/urnetwork/glog"),
+            ("quic-go", "github.com/urnetwork/quic-go"),
+            ("goidenticons", "github.com/urnetwork/goidenticons"),
+            ("gvisor", "gvisor.dev/gvisor"),
+        ] {
+            let source = root.join("core/urnetwork").join(directory);
+            assert!(
+                source.join("go.mod").is_file(),
+                "initialize URnetwork submodules"
+            );
+            fcae_build::go::track_sources(&source);
+            manifest.push_str(&format!("\nreplace {name} => {}\n", local(&source)));
+        }
+        let source = root.join("core/urnetwork/connect");
+        fcae_build::go::track_sources(&source);
+        let staged = module.join("urnetwork-connect");
+        if staged.exists() {
+            std::fs::remove_dir_all(&staged).expect("clear URnetwork connect staging");
+        }
+        copy_source_tree(&source, &staged);
+        let path = staged.join("egress.go");
+        let original = std::fs::read_to_string(&path).expect("URnetwork egress source");
+        let signature = "func egressControl(_ string, address string, c syscall.RawConn) error {";
+        assert_eq!(
+            original.matches(signature).count(),
+            1,
+            "review URnetwork egress API"
+        );
+        let patched = original.replace(signature, &format!("{signature}\n if hook := fcaeEgressHook.Load(); hook != nil {{ var inner error; if err := c.Control(func(fd uintptr) {{ inner = (*hook)(fd) }}); err != nil {{ return err }}; if inner != nil {{ return inner }} }}"));
+        let patched = patched.replace(
+            "if index4 == 0 && index6 == 0 {",
+            "if index4 == 0 && index6 == 0 && fcaeEgressHook.Load() == nil {",
+        );
+        std::fs::write(path, format!("{patched}\nvar fcaeEgressHook atomic.Pointer[func(uintptr) error]\nfunc SetFCAEEgressControl(fn func(uintptr) error) {{ fcaeEgressHook.Store(&fn) }}\nfunc FCAEEgressControl(network, address string, raw syscall.RawConn) error {{ return egressControl(network, address, raw) }}\n")).expect("stage URnetwork host egress seam");
+        manifest.push_str(&format!("\nrequire github.com/urnetwork/sdk v0.0.0\nreplace github.com/urnetwork/connect => {}\nreplace github.com/pion/sctp => {}\n", local(&staged), local(&source.join("sctp"))));
+    }
     // Psiphon's quic-go fork decodes with qpack's pre-0.6 API; sing-box's and
     // Xray-core's forks require 0.6. MVS would hand all three 0.6.0, which
     // Psiphon's fork does not compile against, so the override in `gomods/qpack`
     // (0.6.0 plus the two pre-0.6 entry points) stands in for it.
-    if psiphon && (xray || singbox) {
+    if psiphon && (xray || singbox || cfg!(feature = "urnetwork")) {
         let qpack = root.join("core/fcae-ffi/gomods/qpack");
         fcae_build::go::track_sources(&qpack);
         manifest.push_str(&format!(

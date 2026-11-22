@@ -2212,6 +2212,7 @@ public class FCAEVpnService extends VpnService {
         putInt(e, i, "engineLog", 3);
         putInt(e, i, "coreLog", 0);
         putInt(e, i, "backend", 0);
+        e.putInt("coreTransportBase", NativeEngine.CORE_TRANSPORT_BASE);
         e.putString("chainTransports", NativeEngine.encodeChainTransports(NativeEngine.sessionChainTransports(i)));
         putStr(e, i, "coreConfigs");
         putStr(e, i, "coreConfigId");
@@ -2307,7 +2308,11 @@ public class FCAEVpnService extends VpnService {
         copyInt(p, i, "coreLog", 0);
         copyInt(p, i, "backend", 0);
         if (p.contains("chainTransports")) {
-            i.putExtra("chainTransports", NativeEngine.parseChainTransports(p.getString("chainTransports", "")));
+            int[] transports = NativeEngine.parseChainTransports(p.getString("chainTransports", ""));
+            int oldBase = p.getInt("coreTransportBase", 11);
+            for (int n = 0; n < transports.length; ++n)
+                if (transports[n] >= oldBase) transports[n] += NativeEngine.CORE_TRANSPORT_BASE - oldBase;
+            i.putExtra("chainTransports", transports);
         } else {
             copyInt(p, i, "chainCount", 0);
             copyInt(p, i, "chainExit0", 1);

@@ -280,8 +280,20 @@ const INVALID_DEVINFO: HDEVINFO = -1;
 /// reaches.
 fn adapter_present(adapter: &str) -> bool {
     let mut luid = NET_LUID_LH::default();
-    let by_guid = unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) == 0 };
-    by_guid || wintun_adapter_luid(adapter).is_ok()
+    if unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) == 0 } {return true;}
+    let mut table:*mut MIB_IF_TABLE2=std::ptr::null_mut();
+    // An enumeration failure is unknown state, not proof of an absent device.
+    if unsafe{GetIfTable2(&mut table)}!=0||table.is_null(){return true;}
+    let wanted:Vec<u16>=adapter.encode_utf16().collect();
+    let present=unsafe{
+        let rows=std::slice::from_raw_parts((*table).Table.as_ptr(),(*table).NumEntries as usize);
+        rows.iter().any(|row|{
+            let length=row.Alias.iter().position(|v|*v==0).unwrap_or(row.Alias.len());
+            let id=&row.InterfaceGuid;
+            row.Alias[..length]==wanted[..] || (id.data1==ADAPTER_GUID.data1 && id.data2==ADAPTER_GUID.data2 && id.data3==ADAPTER_GUID.data3 && id.data4==ADAPTER_GUID.data4)
+        })
+    };
+    unsafe{FreeMibTable(table.cast())};present
 }
 
 /// Wintun names every device instance after the requested creation GUID, and
@@ -289,7 +301,9 @@ fn adapter_present(adapter: &str) -> bool {
 /// the enumerator spellings Windows uses (`SWD\Wintun{…}` on Windows 10,
 /// `ROOT\WINTUN\{…}` on Windows 7).
 fn owns_instance(instance: &str) -> bool {
-    instance.to_ascii_uppercase().contains(crate::config::WINTUN_ADAPTER_GUID)
+    { let id=instance.to_ascii_uppercase();
+    (id.starts_with("SWD\\WINTUN") || id.starts_with("ROOT\\WINTUN"))
+        && id.contains(crate::config::WINTUN_ADAPTER_GUID) }
 }
 
 /// Uninstall the Wintun device instances of this GUID that exist without an
@@ -304,19 +318,17 @@ fn owns_instance(instance: &str) -> bool {
 /// a healthy adapter of a running session is never a candidate.
 fn remove_unusable_adapter(adapter: &str) -> bool {
     if adapter_present(adapter) { return false; }
-    let mut removed = 0;
-    for enumerator in ["SWD\\WINTUN", "ROOT\\WINTUN"] {
-        removed += remove_instances(enumerator);
-    }
+    let removed = remove_instances();
     if removed > 0 {
         log::info!("[tun] uninstalled {removed} Wintun device(s) for '{adapter}' that Windows could not bind");
     }
     removed > 0
 }
 
-fn remove_instances(enumerator: &str) -> usize {
-    let wide: Vec<u16> = enumerator.encode_utf16().chain(Some(0)).collect();
-    let devices = unsafe { SetupDiGetClassDevsW(&GUID_DEVCLASS_NET, wide.as_ptr(), std::ptr::null_mut(), 0) };
+fn remove_instances() -> usize {
+    // Enumerate the class, not a partial device-instance path masquerading as
+    // an enumerator. Ownership is checked on each complete instance ID below.
+    let devices = unsafe { SetupDiGetClassDevsW(&GUID_DEVCLASS_NET, std::ptr::null(), std::ptr::null_mut(), 0) };
     if devices == INVALID_DEVINFO { return 0; }
     let mut removed = 0;
     let mut index = 0;
@@ -363,83 +375,116 @@ fn uninstall(devices: HDEVINFO, data: &SP_DEVINFO_DATA) -> bool {
     removed
 }
 
-static DRIVER_RESET: OnceLock<std::result::Result<(), String>> = OnceLock::new();
-
-/// Drop the stored Wintun driver so the next create installs the copy embedded
-/// in this build.
-///
-/// Wintun replaces a stored driver only with a newer one, so a package that
-/// cannot install a device fails every adapter with problem 31 and survives
-/// every retry, reboot included. `WintunDeleteDriver` removes the adapters it
-/// left in a problem state and then uninstalls the package. Once per process.
-fn reset_driver() -> Result<()> {
-    DRIVER_RESET
-        .get_or_init(|| {
-            type DeleteDriver = unsafe extern "system" fn() -> i32;
-            let library = WINTUN
-                .get()
-                .and_then(|result| result.as_ref().ok())
-                .ok_or_else(|| "Wintun has not been loaded".to_string())?;
-            let delete: DeleteDriver = unsafe { library.symbol(c"WintunDeleteDriver") }.map_err(|e| e.to_string())?;
-            if unsafe { delete() } == 0 {
-                return Err(std::io::Error::last_os_error().to_string());
-            }
-            log::info!("[tun] Wintun driver removed; the next adapter installs the embedded copy");
-            Ok(())
+// No driver-package deletion: it is shared with other VPN applications.
+// A replacement is scoped to the exact FCAE GUID and requested alias and only
+// when Windows reports that it has no packet session attached.
+fn owned_disconnected_adapter(adapter: &str) -> bool {
+    use windows_sys::Win32::NetworkManagement::Ndis::MediaConnectStateDisconnected;
+    let mut owned = NET_LUID_LH::default();
+    if unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut owned) } != 0 {
+        return false;
+    }
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    if unsafe { GetIfTable2(&mut table) } != 0 || table.is_null() {
+        return false;
+    }
+    let wanted: Vec<u16> = adapter.encode_utf16().collect();
+    let disconnected = unsafe {
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        rows.iter().any(|row| {
+            let length = row
+                .Alias
+                .iter()
+                .position(|v| *v == 0)
+                .unwrap_or(row.Alias.len());
+            row.InterfaceLuid.Value == owned.Value
+                && row.Alias[..length] == wanted[..]
+                && row.MediaConnectState == MediaConnectStateDisconnected
         })
-        .clone()
-        .map_err(CoreError::Internal)
+    };
+    unsafe { FreeMibTable(table.cast()) };
+    disconnected
 }
-
-/// Run an adapter-creating start, clearing the Wintun state that keeps Windows
-/// from installing the adapter.
-///
-/// Every engine reports a failed device install as a bare start error, so the
-/// missing interface is the signal: when the GUID has an interface the failure
-/// was somewhere else and nothing is touched. The stages follow the failure
-/// modes — an unbindable device instance blocks the create, a stale driver
-/// package blocks the install that follows it. A start that is being cancelled
-/// is left alone: the session is going down and must not lose its driver to it.
-pub fn start_with_driver_repair<T>(
+fn adapter_start_error(error: &CoreError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    if [
+        "access denied",
+        "access is denied",
+        "permission",
+        "already running",
+        "in use",
+        "sharing violation",
+        "configuration",
+        "invalid config",
+    ]
+    .iter()
+    .any(|text| message.contains(text))
+    {
+        return false;
+    }
+    [
+        "wintun",
+        "adapter",
+        "create tun",
+        "creating tun",
+        "tun interface",
+        "device install",
+    ]
+    .iter()
+    .any(|text| message.contains(text))
+}
+/// One bounded, adapter-local recovery path shared by every Windows TUN
+/// engine. The failing start must first release its partial core/handles.
+pub fn start_with_adapter_repair<T>(
     adapter: &str,
     stopping: impl Fn() -> bool,
     start: impl Fn() -> Result<T>,
 ) -> Result<T> {
-    remove_unusable_adapter(adapter);
     let error = match start() {
         Ok(value) => return Ok(value),
         Err(error) => error,
     };
-    if adapter_present(adapter) || stopping() {
+    if stopping() {
         return Err(error);
     }
-    log::warn!("[tun] no Wintun interface for '{adapter}' after a failed start: {error}");
-    if remove_unusable_adapter(adapter) {
-        match start() {
-            Ok(value) => {
-                log::info!("[tun] '{adapter}' created after removing its unusable device");
-                return Ok(value);
-            }
-            Err(failed) if stopping() => return Err(failed),
-            Err(failed) => log::warn!("[tun] '{adapter}' still cannot be created: {failed}"),
-        }
-    }
-    log::warn!("[tun] reinstalling the Wintun driver");
-    match reset_driver() {
-        Ok(()) => {}
-        Err(reset) => {
-            log::error!("[tun] cannot reinstall the Wintun driver: {reset}");
+    let removed;
+    if adapter_present(adapter) {
+        if !adapter_start_error(&error) || !owned_disconnected_adapter(adapter) {
             return Err(error);
         }
+        log::warn!("[tun] replacing disconnected FCAE adapter '{adapter}' after adapter startup failure: {error}");
+        // Recheck after logging and immediately before uninstalling.
+        if stopping() || !owned_disconnected_adapter(adapter) {
+            return Err(error);
+        }
+        removed = remove_instances() > 0;
+        if !removed {
+            return Err(error);
+        }
+        for _ in 0..40 {
+            if stopping() {
+                return Err(error);
+            }
+            if !adapter_present(adapter) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if adapter_present(adapter) {
+            return Err(CoreError::StartFailed(format!("FCAE adapter removal is still pending; Windows may require a restart. Original failure: {error}")));
+        }
+    } else {
+        removed = remove_unusable_adapter(adapter);
     }
-    let retried = start();
-    if retried.is_err() {
-        log::error!(
-            "[tun] '{adapter}' still cannot be installed; Windows is refusing the Wintun driver \
-             (a device left in problem state may need removing by hand)"
-        );
+    if !removed && !adapter_start_error(&error) {
+        return Err(error);
     }
-    retried
+    if stopping() {
+        return Err(error);
+    }
+    log::info!("[tun] retrying '{adapter}' once (FCAE adapter only; shared driver unchanged)");
+    start().map_err(|retry|CoreError::StartFailed(format!("TUN startup failed after one adapter recovery attempt: {retry}; initial error: {error}")))
 }
 
 /// Resolve the LUID of the Wintun adapter the selected engine created, by its

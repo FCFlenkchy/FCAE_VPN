@@ -147,7 +147,7 @@ object NativeEngine {
         // Outbound proxy URL (http/socks5) or "" for direct.
         upstreamProxy: String,
         // Ordered additional exits as protocol-list positions. 0-10 are the
-        // built-in transports; 11 and up name a saved core config by position.
+        // built-in transports; 12 and up name a saved core config by position.
         chainTransports: IntArray,
         // Every saved Xray/sing-box config as one JSON array document
         // ({"name","backend","config"} objects), or "" when there are none.
@@ -198,7 +198,7 @@ object NativeEngine {
      * position in the saved list). Mirrors FCAE_CORE_TRANSPORT_BASE in fcae.h,
      * which the native side uses for the same mapping.
      */
-    const val CORE_TRANSPORT_BASE = 11
+    const val CORE_TRANSPORT_BASE = 12
 
     /**
      * Most saved configs a session may carry; mirrors the runtime's limit. It is

@@ -51,7 +51,7 @@ extern "C" {
  * transports. Shared by the desktop and Android UIs, so a saved config is
  * pickable everywhere a built-in transport is: as the main protocol and as a
  * chained exit. Below it, positions follow the built-in transport order. */
-#define FCAE_CORE_TRANSPORT_BASE 11
+#define FCAE_CORE_TRANSPORT_BASE 12
 
 /* fcae_core_listeners() bits: the listener types a saved core config can
  * serve. A share link serves both; a native config only serves the inbound
@@ -94,7 +94,8 @@ typedef enum {
     FCAE_BACKEND_FIREFOX = 2,
     FCAE_BACKEND_XRAY    = 3,  /* Xray-core, built in                   */
     FCAE_BACKEND_SINGBOX = 4,  /* sing-box, built in                    */
-    FCAE_BACKEND_MIHOMO  = 5   /* Mihomo, built in               */
+    FCAE_BACKEND_MIHOMO  = 5,  /* Mihomo, built in               */
+    FCAE_BACKEND_URNETWORK = 6
 } FcaeBackend;
 
 /* What a backend supports, so the UI can describe it rather than hardcoding
@@ -712,12 +713,15 @@ bool       fcae_firefox_captcha_answer(uint64_t id, const char *answer);
 bool       fcae_firefox_relay_set(const char *data_dir, const char *url);
 uint32_t   fcae_firefox_relay_get(const char *data_dir, char *out, uint32_t cap);
 uint64_t   fcae_firefox_account_submit(const char *request);
+uint64_t   fcae_urnetwork_account_submit(const char *request);
 /* Poll returns the required JSON byte count excluding NUL. Use a second call
  * with a buffer of required+1 bytes. Zero means the job no longer exists. */
 uint32_t   fcae_firefox_job_poll(uint64_t id, char *out, uint32_t cap);
+uint32_t   fcae_urnetwork_job_poll(uint64_t id, char *out, uint32_t cap);
 /* Release discards the snapshot. Read-only listing/location work may be
  * cancelled; account-changing and token operations may still finish. */
 void       fcae_firefox_job_release(uint64_t id);
+void       fcae_urnetwork_job_release(uint64_t id);
 /* Optional host CAPTCHA solver. Receives an image data URL and writes at most
  * 256 answer bytes plus NUL. Returns the answer length, or <=0 to decline. */
 FcaeStatus fcae_firefox_set_captcha_callback(
@@ -806,4 +810,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x297b4bbb5e5f1062 */
+/* fcae-abi-fingerprint: 0x50ba9856b8ba117d */

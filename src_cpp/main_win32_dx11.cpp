@@ -5,6 +5,7 @@
 #define UNICODE
 #endif
 #include <windows.h>
+#include "windows_privilege.h"
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <tchar.h>
@@ -444,11 +445,16 @@ struct ElevatedWindow {
     ~ElevatedWindow() { if (ready) CloseHandle(ready); }
 };
 
-static void read_elevated_window(ElevatedWindow& handoff) {
+static bool read_elevated_window(ElevatedWindow& handoff) {
     int count = 0;
     LPWSTR* args = CommandLineToArgvW(GetCommandLineW(), &count);
-    if (!args) return;
+    if (!args) return true;
     if (count >= 3 && std::wcscmp(args[1], L"--fcae-wait-parent") == 0) {
+        if (!fcae_windows_process_admin(GetCurrentProcess())) {
+            LocalFree(args);
+            MessageBoxW(nullptr,L"Windows launched the requested administrator instance without administrator rights. FCAE will keep the original window open instead of requesting elevation repeatedly. Check UAC and application compatibility settings (RunAsInvoker), or start FCAE as administrator.",L"FCAE: administrator access was not granted",MB_OK|MB_ICONERROR);
+            return false;
+        }
         wchar_t* end = nullptr;
         errno = 0;
         const unsigned long pid = std::wcstoul(args[2], &end, 10);
@@ -476,6 +482,7 @@ static void read_elevated_window(ElevatedWindow& handoff) {
         }
     }
     LocalFree(args);
+    return true;
 }
 
 // Must match IDI_ICON1 in icon.rc (resource id 101 is conventional for first ICON).
@@ -488,7 +495,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // or the window, so engine setup overlaps window and D3D creation
     // instead of serializing behind it.
     ElevatedWindow handoff;
-    read_elevated_window(handoff);
+    if (!read_elevated_window(handoff)) return ERROR_ELEVATION_REQUIRED;
     ui_init();
 
     HINSTANCE inst = hInst ? hInst : GetModuleHandleW(nullptr);
