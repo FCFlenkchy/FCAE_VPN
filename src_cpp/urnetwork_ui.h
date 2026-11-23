@@ -4,6 +4,9 @@
 static bool s_ur_open = false, s_ur_visible = false, s_ur_add = false, s_ur_code_prompt = false;
 static bool s_ur_add_close = false, s_ur_code_close = false, s_ur_signed_in = false, s_ur_verify = false;
 static bool s_ur_dirty = false, s_ur_save_failed = false;
+// Keep credentials only in the existing dialog buffers while a background read finishes.
+static bool s_ur_editing_account = false;
+static int s_ur_pending_signin = 0; // 1: password, 2: authorization code
 static uint64_t s_ur_job = 0;
 static std::string s_ur_op, s_ur_status, s_ur_region, s_ur_selected;
 struct UrUsage { std::string text, updated; bool refresh_failed = false; };
@@ -18,14 +21,15 @@ static void ur_set_status(const std::string& text) {
 // Reads/region refreshes do not lock the main Connect button. Account writes
 // and unsaved settings still serialize with session startup.
 static bool ur_account_busy() {
-    return s_ur_dirty || (s_ur_job && s_ur_op != "load" && s_ur_op != "regions" && s_ur_op != "usage");
+    return s_ur_pending_signin || s_ur_dirty || (s_ur_job && s_ur_op != "load" && s_ur_op != "regions" && s_ur_op != "usage");
 }
 static bool ur_requests_working() {
-    return s_ur_job || (s_ur_dirty && !s_ur_save_failed);
+    return s_ur_pending_signin || s_ur_job || (s_ur_dirty && !s_ur_save_failed);
 }
 static void ur_request_status() {
     const bool background = s_ur_op == "usage" || s_ur_op == "regions" || s_ur_op == "load";
-    if (ur_requests_working() && !background) ImGui::TextUnformatted("Working…");
+    if (s_ur_pending_signin) ImGui::TextUnformatted("Waiting for the current account request…");
+    else if (ur_requests_working() && !background) ImGui::TextUnformatted("Working…");
     else if (!s_ur_status.empty() && !background) ImGui::TextWrapped("%s", s_ur_status.c_str());
 }
 
@@ -132,14 +136,22 @@ static void render_urnetwork_settings() {
     ur_poll();
     if (s_ur_open) { ImGui::OpenPopup("URnetwork settings"); s_ur_open = false; s_ur_visible = true; }
     if (!s_ur_job) {
-        if (s_ur_dirty && !s_ur_save_failed) {
+        if (s_ur_pending_signin) {
+            const int pending = s_ur_pending_signin;
+            s_ur_pending_signin = 0;
+            if (pending == 1)
+                ur_submit("login", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\",\"password\":\"" + firefox_json_escape(s_ur_password) + "\"");
+            else
+                ur_submit("code-login", ",\"code\":\"" + firefox_json_escape(s_ur_code) + "\"");
+            ur_clear_secrets();
+        } else if (s_ur_dirty && !s_ur_save_failed) {
             ur_submit("save", ",\"region\":\"" + firefox_json_escape(s_ur_region.c_str())
                 + "\",\"transport\":\"" + s_ur_modes[s_ur_transport] + "\"");
             if (s_ur_job) s_ur_dirty = false;
-        } else if (s_ur_visible && s_ur_signed_in && !s_ur_verify && ui_now_seconds() >= s_ur_regions_after) {
+        } else if (s_ur_visible && !s_ur_editing_account && s_ur_signed_in && !s_ur_verify && ui_now_seconds() >= s_ur_regions_after) {
             s_ur_regions_after = ui_now_seconds() + 300;
             ur_submit("regions");
-        } else if (s_ur_visible && s_ui_window_visible.load() && s_ur_signed_in && !s_ur_verify && ui_now_seconds() >= s_ur_usage_after) {
+        } else if (s_ur_visible && !s_ur_editing_account && s_ui_window_visible.load() && s_ur_signed_in && !s_ur_verify && ui_now_seconds() >= s_ur_usage_after) {
             s_ur_usage_after = ui_now_seconds() + 60;
             ur_submit("usage", ",\"account_id\":\"" + firefox_json_escape(s_ur_selected.c_str()) + "\"");
         }
@@ -157,7 +169,6 @@ static void render_urnetwork_settings() {
     }
     ur_request_status();
     ImGui::BeginChild("##ur_scroll", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8));
-    ImGui::TextWrapped("Changes to account, region, transport and listeners apply on the next connection.");
     if (account_region_combo("urnetwork", s_ur_region, s_ur_regions)) { s_ur_dirty = true; s_ur_save_failed = false; }
     ImGui::TextUnformatted("Transport"); ImGui::SetNextItemWidth(-1);
     const char* labels[] = {"Auto", "HTTP/1.1 (H1)", "HTTP/3 (H3)", "DNS", "DNS pump"};
@@ -190,9 +201,11 @@ static void render_urnetwork_settings() {
         ImGui::Separator();
         ImGui::PopID();
     }
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(s_ur_job && s_ur_op != "usage" && s_ur_op != "regions" && s_ur_op != "load");
     if (ImGui::Button("Add new account")) {
         ur_clear_secrets(); s_ur_email[0] = 0;
-        s_ur_verify = false; s_ur_add_close = s_ur_code_close = false; s_ur_add = true;
+        s_ur_verify = false; s_ur_add_close = s_ur_code_close = false; s_ur_add = true; s_ur_editing_account = true;
         ur_set_status("");
     }
     if (s_ur_verify) { ImGui::SameLine(); if (ImGui::Button("Continue verification")) s_ur_code_prompt = true; }
@@ -204,29 +217,29 @@ static void render_urnetwork_settings() {
     if (s_ur_save_failed && ImGui::Button("Retry saving settings")) s_ur_save_failed = false;
     ImGui::EndChild();
     // Closing the dialog does not cancel requests or discard queued autosaves.
-    if (ImGui::Button("Close")) { ur_clear_secrets(); s_ur_visible = false; ImGui::CloseCurrentPopup(); }
+    if (ImGui::Button("Close")) { s_ur_pending_signin = 0; s_ur_editing_account = false; ur_clear_secrets(); s_ur_visible = false; ImGui::CloseCurrentPopup(); }
     if (s_ur_add) { ImGui::OpenPopup("Add URnetwork account"); s_ur_add = false; }
     if (begin_account_dialog("Add URnetwork account", 520)) {
-        if (s_ur_add_close) { s_ur_add_close = false; ImGui::CloseCurrentPopup(); }
+        if (s_ur_add_close) { s_ur_add_close = false; s_ur_editing_account = false; ImGui::CloseCurrentPopup(); }
         else {
+            ImGui::BeginDisabled(s_ur_pending_signin != 0);
             account_identity_fields(s_ur_email, sizeof(s_ur_email), s_ur_password, sizeof(s_ur_password));
-            ImGui::BeginDisabled(s_ur_job != 0 || !s_ur_email[0] || !s_ur_password[0]);
+            ImGui::BeginDisabled((s_ur_job && s_ur_op != "usage" && s_ur_op != "regions" && s_ur_op != "load") || !s_ur_email[0] || !s_ur_password[0]);
             if (ImGui::Button("Sign in")) {
-                ur_submit("login", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\",\"password\":\"" + firefox_json_escape(s_ur_password) + "\"");
-                std::fill(std::begin(s_ur_password), std::end(s_ur_password), '\0');
+                s_ur_pending_signin = 1; ui_request_redraw();
             }
             ImGui::EndDisabled();
             ImGui::Separator();
             ImGui::SetNextItemWidth(-1);
             UiText::InputTextWithHint("##auth_code", "Authorization code (optional alternative)", s_ur_code, sizeof(s_ur_code), ImGuiInputTextFlags_Password);
-            ImGui::BeginDisabled(s_ur_job != 0 || !s_ur_code[0]);
+            ImGui::BeginDisabled((s_ur_job && s_ur_op != "usage" && s_ur_op != "regions" && s_ur_op != "load") || !s_ur_code[0]);
             if (ImGui::Button("Sign in with authorization code")) {
-                ur_submit("code-login", ",\"code\":\"" + firefox_json_escape(s_ur_code) + "\"");
-                ur_clear_secrets();
+                s_ur_pending_signin = 2; ui_request_redraw();
             }
             ImGui::EndDisabled();
+            ImGui::EndDisabled();
             ur_request_status();
-            if (ImGui::Button("Later")) { ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
+            if (ImGui::Button("Later")) { s_ur_pending_signin = 0; s_ur_editing_account = false; ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
         }
         ImGui::EndPopup();
     }

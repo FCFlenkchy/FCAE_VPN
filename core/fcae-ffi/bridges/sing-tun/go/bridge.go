@@ -56,12 +56,15 @@ func (c *mtunCore) close() {
 	if c.handler != nil {
 		c.handler.close()
 	}
-	// Stop packet reads before dismantling the userspace stack.
-	if c.device != nil {
-		_ = c.device.Close()
-	}
+	// Detach the stack before releasing its device. The Unix gVisor endpoint
+	// stops and joins its FD readers on detach; closing the FD first can let
+	// those readers observe a reused descriptor. Wintun detach is nonblocking,
+	// and closing the device below wakes its outstanding read.
 	if c.stack != nil {
 		_ = c.stack.Close()
+	}
+	if c.device != nil {
+		_ = c.device.Close()
 	}
 	if c.routing != nil {
 		_ = c.routing.Close()
@@ -91,6 +94,9 @@ func mtunLogf(level int, format string, args ...any) {
 
 var mtunMu sync.Mutex
 var mtunNext uint64
+
+// Invalidate starts already in progress when stop-all is requested.
+var mtunGeneration uint64
 var mtunCores = make(map[uint64]*mtunCore)
 
 //export mtun_start
@@ -141,6 +147,9 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	if cfg.FD != nil && !mobile {
 		return C.CString("external sing-tun descriptors are mobile-only")
 	}
+	mtunMu.Lock()
+	generation := mtunGeneration
+	mtunMu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	core := &mtunCore{cancel: cancel}
 	owned := false
@@ -193,12 +202,16 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 		return C.CString("sing-tun stack start: " + err.Error())
 	}
 	mtunMu.Lock()
+	if generation != mtunGeneration {
+		mtunMu.Unlock()
+		return C.CString("sing-tun startup cancelled")
+	}
 	mtunNext++
 	id := mtunNext
 	mtunCores[id] = core
-	mtunMu.Unlock()
 	engineStarted(engineMetaTun)
 	owned = true
+	mtunMu.Unlock()
 	*handle = C.uint64_t(id)
 	mtunLogf(3, "packet engine started (handle %d)", id)
 	return nil
@@ -219,13 +232,14 @@ func mtun_stop(id C.uint64_t) {
 //export mtun_stop_all
 func mtun_stop_all() {
 	mtunMu.Lock()
+	mtunGeneration++
 	cores := mtunCores
 	mtunCores = make(map[uint64]*mtunCore)
 	mtunMu.Unlock()
 	for _, core := range cores {
 		core.close()
+		engineStopped(engineMetaTun)
 	}
-	engineReclaimed(engineMetaTun)
 }
 
 //export mtun_running

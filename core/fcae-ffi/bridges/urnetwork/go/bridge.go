@@ -63,8 +63,28 @@ func (b *urBalance) display() string {
 	if b == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s available · %s at start of day · %s in open transfers",
-		urFormatBytes(b.Available), urFormatBytes(b.Start), urFormatBytes(b.Pending))
+	// Match the SDK's used-balance definition. Pending transfers are reserved,
+	// not used; the independently sampled values can temporarily exceed start.
+	used := b.Start
+	if b.Available > 0 {
+		if b.Available >= used {
+			used = 0
+		} else {
+			used -= b.Available
+		}
+	}
+	if b.Pending > 0 {
+		if b.Pending >= used {
+			used = 0
+		} else {
+			used -= b.Pending
+		}
+	}
+	if used < 0 {
+		used = 0
+	}
+	return fmt.Sprintf("%s used / %s start-of-day · %s available",
+		urFormatBytes(used), urFormatBytes(b.Start), urFormatBytes(b.Available))
 }
 
 type urAccount struct {
