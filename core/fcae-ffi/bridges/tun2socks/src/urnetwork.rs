@@ -16,10 +16,15 @@ use zeroize::Zeroizing;
 
 unsafe extern "C" {
     fn ur_call(request: *const libc::c_char) -> *mut libc::c_char;
+    fn ur_set_log_callback(callback: Option<unsafe extern "C" fn(u32, *const libc::c_char)>);
     fn ur_set_log_level(level: u32);
     fn ur_free(value: *mut libc::c_char);
     fn ur_set_protect(callback: usize);
 }
+pub fn set_log_callback(callback: Option<unsafe extern "C" fn(u32, *const libc::c_char)>) {
+    unsafe { ur_set_log_callback(callback); }
+}
+
 pub fn set_log_level(level: u32) { unsafe { ur_set_log_level(level.min(4)); } }
 
 pub fn set_protect(cb: Option<unsafe extern "C" fn(libc::c_int) -> libc::c_int>) {

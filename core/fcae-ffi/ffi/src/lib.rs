@@ -719,6 +719,9 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         config::check_init_options(opts)?;
         let opts = &*opts;
 
+        #[cfg(feature = "urnetwork")]
+        fcae_bridge_tun2socks::urnetwork::set_log_callback(Some(fcae_ur_log));
+
         // Re-arm after a previous fcae_shutdown().
         //
         // RUNTIME is a process-wide OnceCell, so the Runtime itself (and the
@@ -1900,7 +1903,10 @@ pub extern "C" fn fcae_backend_set_log_level(backend: u32, level: u32) {
     if !matches!(backend, 2 | 6) || level > 4 { return; }
     logger::set_backend_level(backend, level as u8);
     #[cfg(feature = "urnetwork")]
-    if backend == 6 { fcae_bridge_tun2socks::urnetwork::set_log_level(level); }
+    if backend == 6 {
+        fcae_bridge_tun2socks::urnetwork::set_log_callback(Some(fcae_ur_log));
+        fcae_bridge_tun2socks::urnetwork::set_log_level(level);
+    }
 }
 
 // The Go adapter forwards only bounded, sanitized messages; never retain its pointer.

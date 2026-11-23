@@ -5,7 +5,10 @@ package main
 /*
 #include <stdlib.h>
 #include <stdint.h>
-extern void fcae_ur_log(uint32_t level, const char *message);
+typedef void (*ur_log_fn)(uint32_t level, const char *message);
+static void ur_emit_log(ur_log_fn sink, uint32_t level, const char *message) {
+    if (sink) sink(level, message);
+}
 typedef int (*ur_protect_fn)(int);
 static int ur_invoke_protect(uintptr_t fn, int fd) { return fn ? ((ur_protect_fn)fn)(fd) : -1; }
 */
@@ -194,10 +197,28 @@ func urResult(v any, e error) *C.char {
 //export ur_set_log_level
 func ur_set_log_level(level C.uint32_t) { urSetLogLevel(uint32(level)) }
 
+// Android loads this shared Go library before the native host. Never import a
+// host logging symbol: the host registers its process-lifetime callback later.
+var urLogSinkMu sync.RWMutex
+var urLogSink C.ur_log_fn
+
+//export ur_set_log_callback
+func ur_set_log_callback(sink C.ur_log_fn) {
+	urLogSinkMu.Lock()
+	urLogSink = sink
+	urLogSinkMu.Unlock()
+}
+
 func urWriteLog(level uint32, message string) {
+	urLogSinkMu.RLock()
+	sink := urLogSink
+	urLogSinkMu.RUnlock()
+	if sink == nil {
+		return
+	}
 	text := C.CString(message)
 	defer C.free(unsafe.Pointer(text))
-	C.fcae_ur_log(C.uint32_t(level), text)
+	C.ur_emit_log(sink, C.uint32_t(level), text)
 }
 
 //export ur_free
