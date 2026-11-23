@@ -6,6 +6,8 @@ static bool s_ur_add_close = false, s_ur_code_close = false, s_ur_signed_in = fa
 static bool s_ur_dirty = false, s_ur_save_failed = false;
 static uint64_t s_ur_job = 0;
 static std::string s_ur_op, s_ur_status, s_ur_region, s_ur_selected;
+struct UrUsage { std::string text, updated; bool refresh_failed = false; };
+static std::unordered_map<std::string, UrUsage> s_ur_usage;
 static uint64_t s_ur_status_revision = 0;
 static AccountRequestStatusTimer s_ur_status_timer;
 static void ur_set_status(const std::string& text) {
@@ -16,19 +18,20 @@ static void ur_set_status(const std::string& text) {
 // Reads/region refreshes do not lock the main Connect button. Account writes
 // and unsaved settings still serialize with session startup.
 static bool ur_account_busy() {
-    return s_ur_dirty || (s_ur_job && s_ur_op != "load" && s_ur_op != "regions");
+    return s_ur_dirty || (s_ur_job && s_ur_op != "load" && s_ur_op != "regions" && s_ur_op != "usage");
 }
 static bool ur_requests_working() {
     return s_ur_job || (s_ur_dirty && !s_ur_save_failed);
 }
 static void ur_request_status() {
-    if (ur_requests_working()) ImGui::TextUnformatted("Working…");
-    else if (!s_ur_status.empty()) ImGui::TextWrapped("%s", s_ur_status.c_str());
+    const bool background = s_ur_op == "usage" || s_ur_op == "regions" || s_ur_op == "load";
+    if (ur_requests_working() && !background) ImGui::TextUnformatted("Working…");
+    else if (!s_ur_status.empty() && !background) ImGui::TextWrapped("%s", s_ur_status.c_str());
 }
 
 static char s_ur_email[320] = {}, s_ur_password[1024] = {}, s_ur_code[512] = {};
 static int s_ur_transport = 0;
-static double s_ur_regions_after = 0, s_ur_poll_after = 0;
+static double s_ur_regions_after = 0, s_ur_usage_after = 0, s_ur_poll_after = 0;
 static const char* const s_ur_modes[] = {"auto", "h1", "h3", "dns", "dnspump"};
 static std::vector<std::pair<std::string, std::string>> s_ur_regions, s_ur_accounts;
 
@@ -49,10 +52,19 @@ static void ur_submit(const char* op, const std::string& fields = {}) {
 }
 static void ur_snapshot(const std::string& json) {
     s_ur_signed_in = firefox_json_bool(json, "signed_in");
-    s_ur_selected = firefox_json_string(json, "selected");
+    const std::string selected = firefox_json_string(json, "selected");
+    if (selected != s_ur_selected) {
+        s_ur_usage_after = 0;
+    }
+    s_ur_selected = selected;
     s_ur_accounts.clear();
-    for (const auto& object : firefox_json_objects(json, "accounts"))
-        s_ur_accounts.emplace_back(firefox_json_string(object, "id"), firefox_json_string(object, "email"));
+    for (const auto& object : firefox_json_objects(json, "accounts")) {
+        const std::string id = firefox_json_string(object, "id");
+        s_ur_accounts.emplace_back(id, firefox_json_string(object, "email"));
+        const std::string usage = firefox_json_string(object, "usage");
+        if (!id.empty() && !usage.empty() && s_ur_usage.find(id) == s_ur_usage.end())
+            s_ur_usage[id] = {usage, firefox_json_string(object, "usage_updated"), false};
+    }
     s_ur_regions.clear();
     for (const auto& object : firefox_json_objects(json, "locations"))
         s_ur_regions.emplace_back(firefox_json_string(object, "id"), firefox_json_string(object, "name"));
@@ -83,10 +95,24 @@ static void ur_poll() {
         ur_set_status(firefox_json_string(json, "error"));
         if (s_ur_op == "save") { s_ur_dirty = true; s_ur_save_failed = true; }
         if (s_ur_op == "regions") s_ur_regions_after = ui_now_seconds() + 300;
+        if (s_ur_op == "usage") {
+            s_ur_usage[s_ur_selected].refresh_failed = true;
+            s_ur_usage_after = ui_now_seconds() + 60;
+        }
         return;
     }
-    if (s_ur_op == "save") { ur_set_status("Saved."); return; }
+    if (s_ur_op == "save") { ur_set_status("Saved for the next connection."); return; }
+    if (s_ur_op == "usage") {
+        const std::string account = firefox_json_string(json, "usage_account");
+        const std::string usage = firefox_json_string(json, "usage");
+        if (!account.empty() && !usage.empty()) s_ur_usage[account] = {usage, firefox_json_string(json, "usage_updated"), false};
+        s_ur_usage_after = ui_now_seconds() + 60;
+        ur_set_status("");
+        return;
+    }
+    if (s_ur_op == "remove" || s_ur_op == "logout") s_ur_usage.clear();
     if (s_ur_op == "login" || s_ur_op == "verify" || s_ur_op == "code-login") {
+        s_ur_usage.clear(); s_ur_usage_after = 0;
         s_ur_verify = firefox_json_bool(json, "verification_required");
         if (s_ur_verify) {
             s_ur_add_close = true; s_ur_code_close = false; s_ur_code_prompt = true;
@@ -101,13 +127,11 @@ static void ur_poll() {
     ur_snapshot(json);
     ur_set_status("Done.");
 }
-static void open_urnetwork_settings() { s_ur_open = true; if (!s_ur_dirty) ur_submit("load"); }
+static void open_urnetwork_settings() { s_ur_open = true; s_ur_usage_after = 0; if (!s_ur_dirty) ur_submit("load"); }
 static void render_urnetwork_settings() {
     ur_poll();
     if (s_ur_open) { ImGui::OpenPopup("URnetwork settings"); s_ur_open = false; s_ur_visible = true; }
-    const bool disconnected = g_app.ffi_state.load() == FCAE_STATE_DISCONNECTED || g_app.ffi_state.load() == FCAE_STATE_ERROR;
-    const bool editable = disconnected && !g_app.start_busy.load();
-    if (!s_ur_job && editable) {
+    if (!s_ur_job) {
         if (s_ur_dirty && !s_ur_save_failed) {
             ur_submit("save", ",\"region\":\"" + firefox_json_escape(s_ur_region.c_str())
                 + "\",\"transport\":\"" + s_ur_modes[s_ur_transport] + "\"");
@@ -115,6 +139,9 @@ static void render_urnetwork_settings() {
         } else if (s_ur_visible && s_ur_signed_in && !s_ur_verify && ui_now_seconds() >= s_ur_regions_after) {
             s_ur_regions_after = ui_now_seconds() + 300;
             ur_submit("regions");
+        } else if (s_ur_visible && s_ui_window_visible.load() && s_ur_signed_in && !s_ur_verify && ui_now_seconds() >= s_ur_usage_after) {
+            s_ur_usage_after = ui_now_seconds() + 60;
+            ur_submit("usage", ",\"account_id\":\"" + firefox_json_escape(s_ur_selected.c_str()) + "\"");
         }
     }
     if (s_ur_status_timer.expired(ur_requests_working(), s_ur_status_revision,
@@ -124,10 +151,13 @@ static void render_urnetwork_settings() {
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(.5f, .5f));
     ImGui::SetNextWindowSize(modal_size(640, 560), ImGuiCond_Always);
-    if (!ImGui::BeginPopupModal("URnetwork settings", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) return;
+    if (!ImGui::BeginPopupModal("URnetwork settings", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        s_ur_visible = false;
+        return;
+    }
     ur_request_status();
     ImGui::BeginChild("##ur_scroll", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8));
-    ImGui::BeginDisabled(!editable);
+    ImGui::TextWrapped("Changes to account, region, transport and listeners apply on the next connection.");
     if (account_region_combo("urnetwork", s_ur_region, s_ur_regions)) { s_ur_dirty = true; s_ur_save_failed = false; }
     ImGui::TextUnformatted("Transport"); ImGui::SetNextItemWidth(-1);
     const char* labels[] = {"Auto", "HTTP/1.1 (H1)", "HTTP/3 (H3)", "DNS", "DNS pump"};
@@ -138,6 +168,13 @@ static void render_urnetwork_settings() {
         ImGui::PushID(account.first.c_str());
         const bool selected = account.first == s_ur_selected;
         ImGui::TextWrapped("%s", account.second.empty() ? "URnetwork account" : account.second.c_str());
+        const auto usage = s_ur_usage.find(account.first);
+        if (usage != s_ur_usage.end() && !usage->second.text.empty()) {
+            ImGui::TextWrapped("%s", usage->second.text.c_str());
+        } else if (selected) {
+            ImGui::TextUnformatted(usage != s_ur_usage.end() && usage->second.refresh_failed
+                ? "Data balance unavailable" : "Loading data balance…");
+        }
         ImGui::BeginDisabled(selected);
         if (ImGui::SmallButton(selected ? "Selected" : "Use"))
             ur_submit("select", ",\"account_id\":\"" + firefox_json_escape(account.first.c_str()) + "\"");
@@ -158,7 +195,6 @@ static void render_urnetwork_settings() {
     ImGui::SeparatorText("Local listeners");
     listener_row("URnetwork SOCKS5", &g_app.ur_socks_enabled, &g_app.ur_socks_port, 1, 65535);
     listener_row("URnetwork HTTP", &g_app.ur_http_enabled, &g_app.ur_http_port, 1, 65535);
-    ImGui::EndDisabled();
     backend_log_combo("URnetwork log level", 6, g_app.urnetwork_log);
     if (s_ur_save_failed && ImGui::Button("Retry saving settings")) s_ur_save_failed = false;
     ImGui::EndChild();
@@ -169,7 +205,7 @@ static void render_urnetwork_settings() {
         if (s_ur_add_close) { s_ur_add_close = false; ImGui::CloseCurrentPopup(); }
         else {
             account_identity_fields(s_ur_email, sizeof(s_ur_email), s_ur_password, sizeof(s_ur_password));
-            ImGui::BeginDisabled(s_ur_job != 0 || !editable || !s_ur_email[0] || !s_ur_password[0]);
+            ImGui::BeginDisabled(s_ur_job != 0 || !s_ur_email[0] || !s_ur_password[0]);
             if (ImGui::Button("Sign in")) {
                 ur_submit("login", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\",\"password\":\"" + firefox_json_escape(s_ur_password) + "\"");
                 std::fill(std::begin(s_ur_password), std::end(s_ur_password), '\0');
@@ -178,7 +214,7 @@ static void render_urnetwork_settings() {
             ImGui::Separator();
             ImGui::SetNextItemWidth(-1);
             UiText::InputTextWithHint("##auth_code", "Authorization code (optional alternative)", s_ur_code, sizeof(s_ur_code), ImGuiInputTextFlags_Password);
-            ImGui::BeginDisabled(s_ur_job != 0 || !editable || !s_ur_code[0]);
+            ImGui::BeginDisabled(s_ur_job != 0 || !s_ur_code[0]);
             if (ImGui::Button("Sign in with authorization code")) {
                 ur_submit("code-login", ",\"code\":\"" + firefox_json_escape(s_ur_code) + "\"");
                 ur_clear_secrets();
@@ -196,7 +232,7 @@ static void render_urnetwork_settings() {
             ImGui::TextWrapped("Enter the email verification code for %s.", s_ur_email);
             ImGui::SetNextItemWidth(-1);
             UiText::InputTextWithHint("##verification", "Verification code", s_ur_code, sizeof(s_ur_code));
-            ImGui::BeginDisabled(s_ur_job != 0 || !editable || !s_ur_code[0]);
+            ImGui::BeginDisabled(s_ur_job != 0 || !s_ur_code[0]);
             if (ImGui::Button("Verify")) {
                 ur_submit("verify", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\",\"code\":\"" + firefox_json_escape(s_ur_code) + "\"");
                 ur_clear_secrets();

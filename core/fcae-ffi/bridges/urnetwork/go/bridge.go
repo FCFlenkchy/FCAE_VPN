@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -51,6 +52,21 @@ type urRequest struct {
 	Tun       bool   `json:"tun"`
 	ID        uint64 `json:"id"`
 }
+type urBalance struct {
+	Available int64 `json:"available"`
+	Start     int64 `json:"start"`
+	Pending   int64 `json:"pending"`
+	UpdatedAt int64 `json:"updated_at"`
+}
+
+func (b *urBalance) display() string {
+	if b == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s available · %s at start of day · %s in open transfers",
+		urFormatBytes(b.Available), urFormatBytes(b.Start), urFormatBytes(b.Pending))
+}
+
 type urAccount struct {
 	ID           string                        `json:"id"`
 	Email        string                        `json:"email"`
@@ -58,6 +74,7 @@ type urAccount struct {
 	Client       string                        `json:"client,omitempty"`
 	Instance     string                        `json:"instance,omitempty"`
 	Registration *ur.RegisterNetworkClientArgs `json:"registration,omitempty"`
+	Usage        *urBalance                    `json:"usage,omitempty"`
 }
 type urStore struct {
 	Selected     string                        `json:"selected,omitempty"`
@@ -124,9 +141,10 @@ func (s *urStore) remember() {
 	if s.Network == "" || s.Selected == "" {
 		return
 	}
-	a := urAccount{s.Selected, s.Email, s.Network, s.Client, s.Instance, s.Registration}
+	a := urAccount{ID: s.Selected, Email: s.Email, Network: s.Network, Client: s.Client, Instance: s.Instance, Registration: s.Registration}
 	for i := range s.Accounts {
 		if s.Accounts[i].ID == a.ID {
+			a.Usage = s.Accounts[i].Usage
 			s.Accounts[i] = a
 			return
 		}
@@ -145,7 +163,12 @@ func (s *urStore) activate(id string) bool {
 func urSnapshot(s *urStore) map[string]any {
 	rows := []map[string]string{}
 	for _, a := range s.Accounts {
-		rows = append(rows, map[string]string{"id": a.ID, "email": a.Email})
+		row := map[string]string{"id": a.ID, "email": a.Email}
+		if a.Usage != nil {
+			row["usage"] = a.Usage.display()
+			row["usage_updated"] = time.Unix(a.Usage.UpdatedAt, 0).UTC().Format(time.RFC3339)
+		}
+		rows = append(rows, row)
 	}
 	return map[string]any{"email": s.Email, "signed_in": s.Network != "", "selected": s.Selected, "accounts": rows, "region": s.Region, "transport": s.Transport, "locations": s.Locations, "locations_stale": time.Now().Unix()-s.LocationsAt >= 900}
 }
@@ -297,12 +320,6 @@ func ur_call(raw *C.char) (out *C.char) {
 		return urResult(urSnapshot(&s), nil)
 	}
 	if r.Op == "save" {
-		urMu.Lock()
-		busy := len(urSessions) > 0
-		urMu.Unlock()
-		if busy {
-			return urResult(nil, errors.New("disconnect URnetwork before changing settings"))
-		}
 		if !urTransportValid(r.Transport) {
 			return urResult(nil, errors.New("unsupported URnetwork transport"))
 		}
@@ -315,13 +332,8 @@ func ur_call(raw *C.char) (out *C.char) {
 		s.Transport = r.Transport
 		return urResult(map[string]bool{"ok": true}, urSave(dir, &s))
 	}
-	// The directory lock serializes account changes with start/credential refresh.
-	urMu.Lock()
-	busy := len(urSessions) > 0
-	urMu.Unlock()
-	if busy {
-		return urResult(nil, errors.New("disconnect URnetwork before changing accounts or locations"))
-	}
+	// Account and preference changes affect future sessions. Existing devices keep
+	// their own credentials, location and transport until they are stopped.
 	if r.Op == "select" {
 		if !s.activate(r.AccountID) {
 			return urResult(nil, errors.New("URnetwork account not found"))
@@ -357,9 +369,18 @@ func ur_call(raw *C.char) (out *C.char) {
 	if r.Op == "regions" && s.LocationsAt > 0 && time.Now().Unix()-s.LocationsAt < 900 {
 		return urResult(urSnapshot(&s), nil)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	timeout := 60 * time.Second
+	if r.Op == "usage" {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	space, e := urSpace(ctx, r.Proxy, r.Tun)
+	// The egress controls are process-global. Never replace an active device's
+	// routing/protection while servicing account requests.
+	urMu.Lock()
+	active := len(urSessions) > 0
+	urMu.Unlock()
+	space, e := urSpace(ctx, r.Proxy, r.Tun, !active || r.Op == "start")
 	if e != nil {
 		return urResult(nil, e)
 	}
@@ -372,12 +393,6 @@ func ur_call(raw *C.char) (out *C.char) {
 	api := space.GetApi()
 	switch r.Op {
 	case "login", "verify", "code-login":
-		urMu.Lock()
-		busy := len(urSessions) > 0
-		urMu.Unlock()
-		if busy {
-			return urResult(nil, errors.New("disconnect URnetwork before signing in"))
-		}
 		token := ""
 		if r.Op == "login" {
 			v, err := api.AuthLoginWithPasswordSyncWithContext(ctx, &ur.AuthLoginWithPasswordArgs{UserAuth: r.Email, Password: r.Password, VerifyOtpNumeric: true})
@@ -440,6 +455,41 @@ func ur_call(raw *C.char) (out *C.char) {
 		s.Email = r.Email
 		err := urSave(dir, &s)
 		return urResult(urSnapshot(&s), err)
+	case "usage":
+		id := r.AccountID
+		if id == "" {
+			id = s.Selected
+		}
+		index := -1
+		for i := range s.Accounts {
+			if s.Accounts[i].ID == id {
+				index = i
+				break
+			}
+		}
+		if index < 0 || s.Accounts[index].Network == "" {
+			return urResult(nil, errors.New("URnetwork account not found"))
+		}
+		api.SetByJwt(s.Accounts[index].Network)
+		cb, ch := uc.NewBlockingApiCallback[*ur.SubscriptionBalanceResult](ctx)
+		api.SubscriptionBalance(cb)
+		select {
+		case v := <-ch:
+			if v.Error != nil || v.Result == nil {
+				return urResult(nil, errors.New("cannot load URnetwork data balance"))
+			}
+			b := v.Result
+			balance := &urBalance{Available: b.BalanceByteCount, Start: b.StartBalanceByteCount,
+				Pending: b.OpenTransferByteCount, UpdatedAt: time.Now().Unix()}
+			s.Accounts[index].Usage = balance
+			if err := urSave(dir, &s); err != nil {
+				return urResult(nil, err)
+			}
+			return urResult(map[string]any{"usage_account": id, "usage": balance.display(),
+				"usage_updated": time.Unix(balance.UpdatedAt, 0).UTC().Format(time.RFC3339)}, nil)
+		case <-ctx.Done():
+			return urResult(nil, errors.New("URnetwork data balance request timed out"))
+		}
 	case "regions":
 		if s.Network == "" {
 			return urResult(nil, errors.New("sign in to URnetwork first"))
@@ -578,40 +628,56 @@ func urTransportValid(s string) bool {
 	}
 	return false
 }
-func urSpace(_ context.Context, upstream string, tun bool) (*ur.NetworkSpace, error) {
+func urFormatBytes(n int64) string {
+	if n < 0 {
+		n = 0
+	}
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	v := float64(n)
+	i := 0
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
+	}
+	return fmt.Sprintf("%.2f %s", v, units[i])
+}
+
+func urSpace(_ context.Context, upstream string, tun, configureEgress bool) (*ur.NetworkSpace, error) {
 	settings := uc.DefaultClientStrategySettings()
 	settings.Log = urHostLogger{}
 	settings.ConnectSettings.Log = urHostLogger{}
 	// Connect's central egress seam also covers QUIC, DNS and WebRTC sockets.
-	uc.SetEgressInterfaceIndex(0, 0)
 	var iface *net.Interface
-	if tun && upstream == "" && runtime.GOOS != "android" && runtime.GOOS != "ios" {
-		router, e := netroute.New()
-		if e != nil {
-			return nil, errors.New("cannot discover physical URnetwork egress")
+	if configureEgress {
+		uc.SetEgressInterfaceIndex(0, 0)
+		if tun && upstream == "" && runtime.GOOS != "android" && runtime.GOOS != "ios" {
+			router, e := netroute.New()
+			if e != nil {
+				return nil, errors.New("cannot discover physical URnetwork egress")
+			}
+			iface, _, _, e = router.Route(net.IPv4(1, 1, 1, 1))
+			if e != nil || iface == nil {
+				return nil, errors.New("no physical URnetwork egress route")
+			}
+			uc.SetEgressInterfaceIndex(uint32(iface.Index), uint32(iface.Index))
 		}
-		iface, _, _, e = router.Route(net.IPv4(1, 1, 1, 1))
-		if e != nil || iface == nil {
-			return nil, errors.New("no physical URnetwork egress route")
-		}
-		uc.SetEgressInterfaceIndex(uint32(iface.Index), uint32(iface.Index))
-	}
-	uc.SetFCAEEgressControl(func(fd uintptr) error {
-		v := int(C.ur_invoke_protect(C.uintptr_t(urProtect.Load()), C.int(fd)))
-		if v == 0 {
-			return errors.New("URnetwork socket protection refused")
-		}
-		if v == 1 {
+		uc.SetFCAEEgressControl(func(fd uintptr) error {
+			v := int(C.ur_invoke_protect(C.uintptr_t(urProtect.Load()), C.int(fd)))
+			if v == 0 {
+				return errors.New("URnetwork socket protection refused")
+			}
+			if v == 1 {
+				return nil
+			}
+			if runtime.GOOS == "android" {
+				return errors.New("URnetwork requires VpnService socket protection")
+			}
+			if tun && iface != nil {
+				return urBind(fd, iface.Name)
+			}
 			return nil
-		}
-		if runtime.GOOS == "android" {
-			return errors.New("URnetwork requires VpnService socket protection")
-		}
-		if tun && iface != nil {
-			return urBind(fd, iface.Name)
-		}
-		return nil
-	})
+		})
+	}
 	if upstream != "" {
 		p, e := urUpstream(upstream)
 		if e != nil {

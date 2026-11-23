@@ -241,7 +241,7 @@ pub fn submit(request: &str) -> u64 {
     };
     if !matches!(
         v.get("op").and_then(Value::as_str),
-        Some("load" | "save" | "login" | "verify" | "code-login" | "regions" | "logout" | "select" | "remove")
+        Some("load" | "save" | "login" | "verify" | "code-login" | "regions" | "usage" | "logout" | "select" | "remove")
     ) {
         return 0;
     }

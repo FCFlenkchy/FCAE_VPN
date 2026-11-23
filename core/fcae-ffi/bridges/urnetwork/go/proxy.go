@@ -463,10 +463,26 @@ func (l *urCredentialListener) JwtRefreshed(_ string) {
 			return
 		}
 		s, e := urLoad(l.dir)
-		if e != nil || s.Instance != l.instance {
+		if e != nil {
 			return
 		}
-		s.Client = l.session.device.GetClientJwt()
+		// A different account may have been selected while this session was
+		// running. Refresh only the matching device, never the new selection.
+		client := l.session.device.GetClientJwt()
+		found := false
+		for i := range s.Accounts {
+			if s.Accounts[i].Instance == l.instance {
+				s.Accounts[i].Client = client
+				found = true
+				break
+			}
+		}
+		if !found {
+			return // The account was removed or reauthenticated.
+		}
+		if s.Instance == l.instance {
+			s.Client = client
+		}
 		if urSave(l.dir, &s) != nil {
 			l.session.cancel()
 			l.session.device.Close()
