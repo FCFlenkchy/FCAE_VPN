@@ -33,12 +33,21 @@ type urSession struct {
 	conns               map[io.Closer]struct{}
 	socksAddr, httpAddr string
 	rx, tx              atomic.Uint64
+	rtt                 atomic.Uint32
+	probeDone           chan struct{}
+	sampleMu            sync.Mutex
+	sampleAt            time.Time
+	sampleRx, sampleTx  uint64
+	rxRate, txRate      uint64
 	once                sync.Once
 }
 
 func newURSession(d *ur.DeviceLocal, s *ur.NetworkSpace, dir string) *urSession {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &urSession{device: d, space: s, ctx: ctx, cancel: cancel, conns: map[io.Closer]struct{}{}}
+	session := &urSession{device: d, space: s, ctx: ctx, cancel: cancel, conns: map[io.Closer]struct{}{}, sampleAt: time.Now(), probeDone: make(chan struct{})}
+	engineStarted(engineURnetwork)
+	go session.measureRTT()
+	return session
 }
 func (s *urSession) track(c io.Closer) bool {
 	s.mu.Lock()
@@ -67,6 +76,13 @@ func (s *urSession) close() {
 		defer cancel()
 		_ = s.device.CloseAndWait(ctx)
 		s.space.Close()
+		<-s.probeDone
+		// Drop retained maps and engine roots before scheduling collection.
+		s.mu.Lock()
+		s.conns = nil
+		s.listeners = nil
+		s.mu.Unlock()
+		engineStopped(engineURnetwork)
 	})
 }
 func (s *urSession) up() bool {
@@ -408,15 +424,16 @@ func (s *urSession) udp(control net.Conn) {
 				defer close(done)
 				defer c.Close()
 				defer s.udpFlows.Add(-1)
-				b := make([]byte, 65535)
+				offset := 3 + len(header)
+				b := make([]byte, offset+65535)
+				copy(b[3:offset], header)
 				for {
 					c.SetReadDeadline(time.Now().Add(2 * time.Minute))
-					n, e := c.Read(b)
+					n, e := c.Read(b[offset:])
 					if e != nil {
 						return
 					}
-					packet := append(append([]byte{0, 0, 0}, header...), b[:n]...)
-					if _, e = u.WriteToUDP(packet, &dest); e != nil {
+					if _, e = u.WriteToUDP(b[:offset+n], &dest); e != nil {
 						return
 					}
 					s.rx.Add(uint64(n))
@@ -462,3 +479,59 @@ func (l *urCredentialListener) JwtRefreshed(_ string) {
 type urAuthListener struct{ session *urSession }
 
 func (l *urAuthListener) AuthLogout() { l.session.cancel() }
+
+// status samples monotonic payload totals once per window. Multiple readers
+// (health, startup and telemetry) must not consume each other's rate samples.
+func (s *urSession) status() map[string]any {
+	s.sampleMu.Lock()
+	defer s.sampleMu.Unlock()
+	rx, tx := s.rx.Load(), s.tx.Load()
+	now := time.Now()
+	if elapsed := now.Sub(s.sampleAt); elapsed >= 100*time.Millisecond {
+		s.rxRate = uint64(float64(rx-s.sampleRx) / elapsed.Seconds())
+		s.txRate = uint64(float64(tx-s.sampleTx) / elapsed.Seconds())
+		s.sampleRx, s.sampleTx, s.sampleAt = rx, tx, now
+	}
+	return map[string]any{"up": s.up(), "alive": s.ctx.Err() == nil, "rx": rx, "tx": tx,
+		"rx_rate": s.rxRate, "tx_rate": s.txRate, "rtt_ms": s.rtt.Load()}
+}
+
+// Time a real response over the device, including every configured carrier.
+// Never time the loopback listener or fall back to the host's network.
+func (s *urSession) measureRTT() {
+	defer close(s.probeDone)
+	transport := &http.Transport{DialContext: s.device.DialContext, DisableKeepAlives: true,
+		ResponseHeaderTimeout: 5 * time.Second, MaxResponseHeaderBytes: 16 << 10}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 8 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if s.up() {
+			for _, target := range []string{"http://www.gstatic.com/generate_204", "http://www.msftconnecttest.com/connecttest.txt"} {
+				req, err := http.NewRequestWithContext(s.ctx, http.MethodHead, target, nil)
+				if err != nil {
+					continue
+				}
+				started := time.Now()
+				response, err := client.Do(req)
+				if err != nil {
+					continue
+				}
+				elapsed := time.Since(started)
+				response.Body.Close()
+				if response.StatusCode >= 200 && response.StatusCode < 400 {
+					s.rtt.Store(uint32((elapsed + time.Millisecond - 1) / time.Millisecond))
+					return
+				}
+			}
+		}
+		timer.Reset(10 * time.Second)
+	}
+}

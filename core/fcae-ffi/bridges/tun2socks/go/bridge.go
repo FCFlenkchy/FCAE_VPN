@@ -1156,13 +1156,7 @@ func startFD(k *engine.Key) error {
 // no packet can enter or leave any more, and what remains is reclamation.
 const stackStopGrace = 2 * time.Second
 
-// heapOnce keeps the heap policy out of repeated work.
-//
-// The values are the mobile ones -- collect at 1.5x the live heap and keep the
-// process under a soft limit -- but both setter calls have a side effect when
-// they are re-applied: a soft limit below the current heap starts a collection
-// immediately. Once is enough: the runtime keeps both settings until they are
-// changed.
+// Apply the shared runtime policy once, not on each engine start.
 var heapOnce sync.Once
 
 // heapGCPercent makes the runtime collect at 1.5x the live heap: the engines'
@@ -1171,14 +1165,9 @@ var heapOnce sync.Once
 // until a stop has to reclaim it.
 const heapGCPercent = 50
 
-// heapSoftLimit is the runtime's soft memory limit. It has to sit above what a
-// live data plane costs -- gVisor's buffer pools, the reassembly queues and the
-// channel endpoints run to tens of MiB on a busy tunnel -- because a limit below
-// the live heap turns every allocation into a trigger for a full collection,
-// which is paid on the goroutine that is moving packets. 192 MiB still keeps a
-// phone process well inside what a 2 GiB device will tolerate before the OS
-// reclaims it, and the limit is a ceiling on *garbage*, not a cap on the
-// tunnel's throughput.
+// heapSoftLimit is a shared Go runtime budget, not a process RSS ceiling.
+// It excludes native heaps and mappings and may be exceeded to avoid GC thrash.
+// Keep the existing budget until device measurements justify changing it.
 const heapSoftLimit = 192 << 20
 
 // The heap policy belongs to the shared runtime, not to one engine.
@@ -1202,8 +1191,18 @@ func applyHeapPolicy() {
 			debug.SetGCPercent(20)
 			debug.SetMemoryLimit(32 << 20)
 		} else {
-			debug.SetGCPercent(heapGCPercent)
-			debug.SetMemoryLimit(heapSoftLimit)
+			// Android trades some GC CPU for less heap slack; desktops keep
+			// Go's normal growth ratio. Neither limit covers Rust/native RAM.
+			percent := 100
+			if runtime.GOOS == "android" {
+				percent = heapGCPercent
+			}
+			if os.Getenv("GOGC") == "" {
+				debug.SetGCPercent(percent)
+			}
+			if os.Getenv("GOMEMLIMIT") == "" {
+				debug.SetMemoryLimit(heapSoftLimit)
+			}
 		}
 	})
 }
@@ -1216,6 +1215,8 @@ const (
 	engineSingBox
 	enginePsiphon
 	engineMetaTun
+	engineURnetwork
+	engineMihomo
 	engineKindCount
 )
 
@@ -1256,7 +1257,7 @@ func engineStopped(engine int) {
 	released := settleIdleLocked()
 	engines.mu.Unlock()
 	if released {
-		scrubHeap()
+		scrubHeap(true)
 	}
 }
 
@@ -1277,7 +1278,7 @@ func engineReclaimed(engine int) {
 	released := settleIdleLocked()
 	engines.mu.Unlock()
 	if released {
-		scrubHeap()
+		scrubHeap(true)
 	}
 }
 
@@ -1318,7 +1319,9 @@ const (
 func runIdleGuard(stop <-chan struct{}) {
 	ticker := time.NewTicker(idleScrubTick)
 	defer ticker.Stop()
-	var lastTotal uint64
+	var initial runtime.MemStats
+	runtime.ReadMemStats(&initial)
+	lastTotal := initial.TotalAlloc
 	quiet := 0
 	for {
 		select {
@@ -1340,7 +1343,7 @@ func runIdleGuard(stop <-chan struct{}) {
 		quiet = 0
 		// The threshold check and the once-only guard live in scrubHeap, so a
 		// stop and an idle tick cannot stack two collections on one heap.
-		scrubHeap()
+		scrubHeap(false)
 	}
 }
 
@@ -1469,15 +1472,15 @@ var retiring <-chan struct{}
 var freeingMemory atomic.Bool
 var scrubAgain atomic.Bool
 
-// scrubHeap hands back what a teardown just freed.
-//
-// A forced GC plus scavenge is synchronous work that has nothing to do with the
-// engine being down, so it never runs on the thread the disconnect is waiting
-// on; a reconnect loop must not pile one collection up per attempt, which is
-// what the flag is for; and a runtime already holding nothing worth returning
-// -- a session that failed before any engine started -- skips it entirely
-// instead of paying a full collection on every retry.
-func scrubHeap() {
+// Coalesce teardown collections and quiet-heap scavenges off the caller thread.
+var scrubCollect atomic.Bool
+
+func scrubHeap(collect bool) {
+	// Teardown makes objects unreachable, not idle. Remember a forced
+	// collection even when a quiet-heap scrub already owns the worker.
+	if collect {
+		scrubCollect.Store(true)
+	}
 	if !freeingMemory.CompareAndSwap(false, true) {
 		// A collection is already running. It was started for an earlier stop
 		// -- possibly while a session still had an engine up -- so it may hand
@@ -1490,9 +1493,10 @@ func scrubHeap() {
 	go func() {
 		for {
 			scrubAgain.Store(false)
+			collect := scrubCollect.Swap(false)
 			var stats runtime.MemStats
 			runtime.ReadMemStats(&stats)
-			if stats.HeapIdle-stats.HeapReleased >= scrubMinReclaimable {
+			if collect || stats.HeapIdle-stats.HeapReleased >= scrubMinReclaimable {
 				debug.FreeOSMemory()
 			}
 			freeingMemory.Store(false)
@@ -1505,9 +1509,8 @@ func scrubHeap() {
 	}()
 }
 
-// scrubMinReclaimable is how much idle-but-unreturned heap makes the post-stop
-// scrub worth its stop-the-world pause. FreeOSMemory returns exactly this, so a
-// runtime below it has nothing to hand back.
+// Quiet-heap scrubs need enough already-idle pages to justify a collection.
+// Post-teardown scrubs bypass this gate: garbage may still be in HeapAlloc.
 const scrubMinReclaimable = 16 << 20
 
 // startTeardown runs teardown on its own goroutine so the caller can stop

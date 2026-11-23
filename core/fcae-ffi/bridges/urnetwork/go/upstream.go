@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -30,8 +31,12 @@ func urUpstream(raw string) (*uc.ProxySettings, error) {
 
 type urPacketProxy struct {
 	net.PacketConn
-	control net.Conn
-	relay   net.Addr
+	control  net.Conn
+	relay    net.Addr
+	readMu   sync.Mutex
+	readBuf  []byte
+	writeMu  sync.Mutex
+	writeBuf []byte
 }
 
 func (p *urPacketProxy) Close() error { p.control.Close(); return p.PacketConn.Close() }
@@ -40,14 +45,24 @@ func (p *urPacketProxy) WriteTo(b []byte, a net.Addr) (int, error) {
 	if e != nil {
 		return 0, e
 	}
-	_, e = p.PacketConn.WriteTo(append(append([]byte{0, 0, 0}, h...), b...), p.relay)
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	p.writeBuf = append(p.writeBuf[:0], 0, 0, 0)
+	p.writeBuf = append(p.writeBuf, h...)
+	p.writeBuf = append(p.writeBuf, b...)
+	_, e = p.PacketConn.WriteTo(p.writeBuf, p.relay)
 	if e != nil {
 		return 0, e
 	}
 	return len(b), nil
 }
 func (p *urPacketProxy) ReadFrom(b []byte) (int, net.Addr, error) {
-	raw := make([]byte, 65535)
+	p.readMu.Lock()
+	defer p.readMu.Unlock()
+	if p.readBuf == nil {
+		p.readBuf = make([]byte, 65535)
+	}
+	raw := p.readBuf
 	for {
 		n, from, e := p.PacketConn.ReadFrom(raw)
 		if e != nil {
@@ -81,7 +96,13 @@ func urProxyPacket(ctx context.Context, p *uc.ProxySettings) (net.PacketConn, er
 			c.Close()
 		}
 	}()
-	c.SetDeadline(time.Now().Add(20 * time.Second))
+	stopCancel := context.AfterFunc(ctx, func() { c.Close() })
+	defer stopCancel()
+	deadline := time.Now().Add(20 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	c.SetDeadline(deadline)
 	methods := []byte{5, 1, 0}
 	if p.Auth != nil {
 		methods = []byte{5, 2, 0, 2}

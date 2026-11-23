@@ -219,7 +219,9 @@ impl BackendHandle for UrHandle {
         Counters {
             total_rx: v.get("rx").and_then(Value::as_u64).unwrap_or(0),
             total_tx: v.get("tx").and_then(Value::as_u64).unwrap_or(0),
-            ..Counters::default()
+            rx_bytes_sec: v.get("rx_rate").and_then(Value::as_u64).unwrap_or(0),
+            tx_bytes_sec: v.get("tx_rate").and_then(Value::as_u64).unwrap_or(0),
+            rtt_ms: v.get("rtt_ms").and_then(Value::as_u64).unwrap_or(0) as u32,
         }
     }
 }

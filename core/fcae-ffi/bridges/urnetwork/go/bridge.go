@@ -73,6 +73,9 @@ type urStore struct {
 	Registration *ur.RegisterNetworkClientArgs `json:"registration,omitempty"`
 }
 
+// NetworkSpace changes a process-global egress seam. Serialize control
+// operations across data directories, not just within one account store.
+var urControlMu sync.Mutex
 var urMu sync.Mutex
 var urProtect atomic.Uintptr
 var urNext uint64
@@ -271,8 +274,10 @@ func ur_call(raw *C.char) (out *C.char) {
 			urMu.Unlock()
 			return urResult(map[string]bool{"ok": true}, nil)
 		}
-		return urResult(map[string]any{"up": s.up(), "alive": s.ctx.Err() == nil, "rx": s.rx.Load(), "tx": s.tx.Load()}, nil)
+		return urResult(s.status(), nil)
 	}
+	urControlMu.Lock()
+	defer urControlMu.Unlock()
 	if r.Dir == "" {
 		return urResult(nil, errors.New("URnetwork needs an application data directory"))
 	}

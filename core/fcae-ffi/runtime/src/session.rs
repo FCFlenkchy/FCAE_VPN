@@ -1432,7 +1432,7 @@ fn rtt_handle(
 fn exit_measures_rtt(exit: FcaeBackend) -> bool {
     matches!(
         exit,
-        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox | FcaeBackend::Mihomo
+        FcaeBackend::Firefox | FcaeBackend::Xray | FcaeBackend::SingBox | FcaeBackend::Mihomo | FcaeBackend::URnetwork
     )
 }
 

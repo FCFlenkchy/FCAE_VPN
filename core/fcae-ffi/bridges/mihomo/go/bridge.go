@@ -293,6 +293,7 @@ func mihomoStart(text *C.char, handle *C.uint64_t, allowTun bool) (result *C.cha
 	statistic.DefaultManager.ResetStatistic()
 	mihomoNext++
 	mihomoID = mihomoNext
+	engineStarted(engineMihomo)
 	mihomoTun = allowTun
 	mihomoBase = parsed
 	*handle = C.uint64_t(mihomoID)
@@ -300,6 +301,12 @@ func mihomoStart(text *C.char, handle *C.uint64_t, allowTun bool) (result *C.cha
 }
 
 func mihomoCleanup() {
+	wasRunning := mihomoID != 0
+	defer func() {
+		if wasRunning {
+			engineStopped(engineMihomo)
+		}
+	}()
 	mihomoDetachTun()
 	mihomoBase = nil
 	mihomoTun = false
