@@ -153,7 +153,8 @@ class MainActivity : AppCompatActivity() {
             }
             "url" -> try {
                 val uri = Uri.parse(payload)
-                require(uri.scheme == "https" && (uri.host in setOf("github.com", "t.me") || payload == "https://accounts.firefox.com/signup"))
+                require(uri.scheme == "https" && (uri.host in setOf("github.com", "t.me") ||
+                    payload == "https://accounts.firefox.com/signup" || payload == "https://ur.io/c?bonus=HZ0G13"))
                 startActivity(Intent(Intent.ACTION_VIEW, uri))
             } catch (_: Exception) { showError("Could not open the link.") }
             "clipboardRead" -> {

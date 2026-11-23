@@ -163,6 +163,11 @@ static void render_urnetwork_settings() {
     const char* labels[] = {"Auto", "HTTP/1.1 (H1)", "HTTP/3 (H3)", "DNS", "DNS pump"};
     if (ImGui::Combo("##ur_transport", &s_ur_transport, labels, 5)) { s_ur_dirty = true; s_ur_save_failed = false; }
     ImGui::SeparatorText("Accounts");
+    if (s_ur_accounts.empty()) {
+        ImGui::TextUnformatted("Don't have an account?");
+        ImGui::SameLine();
+        if (ImGui::TextLink("Create one")) open_link(kLinkUrSignup);
+    }
     ImGui::BeginDisabled(s_ur_job != 0);
     for (const auto& account : s_ur_accounts) {
         ImGui::PushID(account.first.c_str());
