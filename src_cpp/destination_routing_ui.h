@@ -33,9 +33,6 @@ inline void destination_routing_ui() {
         else error[0]=0;
         mode=g_app.destination_mode;
     }
-    ImGui::TextWrapped("%s", mode==1 ? "Matches: tunnel. Other traffic: DIRECT. DNS: tunnel." :
-        mode==2 ? "Matches: DIRECT. Other traffic: tunnel. DNS: tunnel." :
-        "Destination rules are saved but inactive. DNS: tunnel.");
     ImGui::Separator();
     ImGui::BeginDisabled(!available);
     ImGui::Combo("Rule type",&kind,kinds,3);

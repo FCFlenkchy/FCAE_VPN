@@ -136,13 +136,16 @@ static void render_urnetwork_settings() {
     ImGui::BeginDisabled(s_ur_job != 0);
     for (const auto& account : s_ur_accounts) {
         ImGui::PushID(account.first.c_str());
-        if (ImGui::RadioButton("##selected", account.first == s_ur_selected))
+        const bool selected = account.first == s_ur_selected;
+        ImGui::TextWrapped("%s", account.second.empty() ? "URnetwork account" : account.second.c_str());
+        ImGui::BeginDisabled(selected);
+        if (ImGui::SmallButton(selected ? "Selected" : "Use"))
             ur_submit("select", ",\"account_id\":\"" + firefox_json_escape(account.first.c_str()) + "\"");
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::SmallButton("Remove"))
             ur_submit("remove", ",\"account_id\":\"" + firefox_json_escape(account.first.c_str()) + "\"");
-        ImGui::SameLine();
-        ImGui::TextWrapped("%s", account.second.empty() ? "URnetwork account" : account.second.c_str());
+        ImGui::Separator();
         ImGui::PopID();
     }
     if (ImGui::Button("Add new account")) {
