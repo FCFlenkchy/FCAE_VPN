@@ -446,6 +446,11 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeSuspend(JNIEnv*, jclass) {
     wake_ready.store(false, std::memory_order_release);
     input->reset();
     release_view_gpu();
+    // These package icons are regenerated asynchronously on demand. The view
+    // generation has already been invalidated by pauseRendering(), so an old
+    // request cannot populate the next view's cache after this release.
+    decltype(app_icons){}.swap(app_icons);
+    if (settings) settings->discard_inventory();
     interaction_until = last_frame = 0.0;
 }
 

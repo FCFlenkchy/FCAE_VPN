@@ -244,7 +244,99 @@ static void place_window(int& x, int& y, int& width, int& height) {
 
 static void CleanupDeviceD3D();
 
+static constexpr UINT kTrayMessage = WM_APP + 41;
+static constexpr UINT kTrayIconId = 1;
+static UINT g_taskbar_created = 0;
+static bool g_tray_installed = false;
+
+static bool install_tray(HWND window) {
+    NOTIFYICONDATAW data = {};
+    data.cbSize = sizeof(data);
+    data.hWnd = window;
+    data.uID = kTrayIconId;
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    data.uCallbackMessage = kTrayMessage;
+    data.hIcon = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
+    if (!data.hIcon) data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wcscpy_s(data.szTip, L"FCAE VPN");
+    g_tray_installed = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+    return g_tray_installed;
+}
+
+static void remove_tray(HWND window) {
+    if (!g_tray_installed) return;
+    NOTIFYICONDATAW data = {};
+    data.cbSize = sizeof(data);
+    data.hWnd = window;
+    data.uID = kTrayIconId;
+    Shell_NotifyIconW(NIM_DELETE, &data);
+    g_tray_installed = false;
+}
+
+static void show_main_window(HWND window) {
+    ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(window);
+    ui_request_redraw();
+}
+
+static void show_tray_menu(HWND window) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    constexpr UINT open_id = 1, toggle_id = 2, exit_id = 3, tun_id = 4;
+    AppendMenuW(menu, MF_STRING, open_id, L"Open FCAE VPN");
+    FcaeTelemetry telemetry = {};
+    telemetry.struct_size = sizeof(telemetry);
+    telemetry.abi_version = FCAE_ABI_VERSION;
+    const bool ready = ui_runtime_ready();
+    const bool have_state = ready && fcae_get_telemetry(&telemetry) == FCAE_OK;
+    const bool error = have_state && telemetry.state == FCAE_STATE_ERROR;
+    const bool active = g_app.start_busy.load() || (have_state &&
+        telemetry.state != FCAE_STATE_DISCONNECTED && !error) || (ready && fcae_tun_paused());
+    const wchar_t* action = error ? L"Clear error" : active ? L"Disconnect" : L"Connect";
+    AppendMenuW(menu, MF_STRING | (ready && have_state ? MF_ENABLED : MF_GRAYED), toggle_id, action);
+    const bool tun_paused = ready && fcae_tun_paused();
+    if (g_app.mode == 1) {
+        const bool tun_control_ready = have_state &&
+            (telemetry.state == FCAE_STATE_CONNECTED || tun_paused);
+        AppendMenuW(menu, MF_STRING | (tun_control_ready ? MF_ENABLED : MF_GRAYED),
+                    tun_id, tun_paused ? L"Start" : L"Stop");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, exit_id, L"Exit FCAE VPN");
+    POINT point = {};
+    GetCursorPos(&point);
+    SetForegroundWindow(window);
+    const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                      point.x, point.y, 0, window, nullptr);
+    DestroyMenu(menu);
+    // Required by the shell menu convention so it dismisses correctly.
+    PostMessageW(window, WM_NULL, 0, 0);
+    if (choice == open_id) show_main_window(window);
+    else if (choice == toggle_id) {
+        // The existing UI action owns validation, UAC handoff and cancellation.
+        // Showing it also makes any validation error or consent prompt visible.
+        show_main_window(window);
+        ui_request_tray_toggle(error ? 3 : active ? 2 : 1);
+    } else if (choice == tun_id) {
+        // Reuse the UI control and re-check the displayed state in its next frame.
+        show_main_window(window);
+        ui_request_tray_tun_control(tun_paused);
+    } else if (choice == exit_id) {
+        DestroyWindow(window); // WM_DESTROY exits the loop and runs ui_shutdown.
+    }
+}
+
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (g_taskbar_created && msg == g_taskbar_created) {
+        g_tray_installed = false;
+        if (!install_tray(hWnd) && !IsWindowVisible(hWnd)) show_main_window(hWnd);
+        return 0;
+    }
+    if (msg == kTrayMessage && wParam == kTrayIconId) {
+        if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) show_main_window(hWnd);
+        else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) show_tray_menu(hWnd);
+        return 0;
+    }
     if (g_imgui_win32_ready && ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
         return 1;
 
@@ -335,17 +427,17 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
             break;
         case WM_CLOSE:
-            // User clicked X button — set running=false so the message
-            // loop exits, then ui_shutdown() will call fcae_shutdown() which
-            // does synchronous DNS restore and cleanup.
-            g_app.running.store(false);
-            DestroyWindow(hWnd);
+            // Keep the session alive, even when disconnected. Never hide the
+            // only window if the notification icon could not be installed.
+            if (g_tray_installed || install_tray(hWnd)) {
+                ShowWindow(hWnd, SW_HIDE);
+            } else {
+                MessageBoxW(hWnd, L"The notification-area icon could not be created. FCAE will remain open.",
+                            L"FCAE VPN", MB_OK | MB_ICONWARNING);
+            }
             return 0;
         case WM_DESTROY:
-            // Trigger full cleanup before the window closes.
-            // This ensures tun2socks is killed and TUN adapters are removed
-            // even if the user closes the window with X button instead of
-            // clicking DISCONNECT first.
+            remove_tray(hWnd);
             g_app.running.store(false);
             PostQuitMessage(0);
             return 0;
@@ -565,6 +657,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return 1;
     }
+
+    g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+    install_tray(hWnd);
 
     // A worker thread's redraw request must be able to wake this window's
     // message loop, so the window is registered before the loop can park.
@@ -786,6 +881,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             ui_autosave_tick();
             if (sponsor_window_visible) {
                 ui_set_window_visible(false);
+                release_sponsor_textures();
                 sponsor_window_visible = false;
             }
             continue;

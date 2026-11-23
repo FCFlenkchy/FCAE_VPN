@@ -416,6 +416,7 @@ static id g_eventMonitor = nil;
                 ui_autosave_tick();
                 if (self.sponsorWindowVisible) {
                     ui_set_window_visible(false);
+                    release_sponsor_textures();
                     self.sponsorWindowVisible = NO;
                 }
                 // A closed window ends the app even though it is still "hidden".

@@ -68,13 +68,24 @@ ImTextureID app_routing_icon(const std::string& executable) {
     app_icon_textures.emplace(executable,texture);return (ImTextureID)(intptr_t)texture;
 }
 
+static GLuint sponsor_textures[3] = {};
+static uint64_t sponsor_loaded[3] = {};
+static int sponsor_width[3] = {};
+static int sponsor_height[3] = {};
+
+static void release_cached_visuals() {
+    release_app_icons();
+    for (int i = 0; i < 3; ++i) {
+        if (sponsor_textures[i]) glDeleteTextures(1, &sponsor_textures[i]);
+        sponsor_textures[i] = 0;
+        sponsor_loaded[i] = 0;
+        sponsor_width[i] = sponsor_height[i] = 0;
+    }
+}
+
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
-    static GLuint textures[3] = {};
-    static uint64_t loaded[3] = {};
-    static int texture_width[3] = {};
-    static int texture_height[3] = {};
     const int index = slot >= 0 && slot < 3 ? slot : 0;
-    GLuint& texture = textures[index];
+    GLuint& texture = sponsor_textures[index];
     if (!rgba || width <= 0 || height <= 0) return (ImTextureID)0;
     if (!texture) {
         glGenTextures(1, &texture);
@@ -86,19 +97,19 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
     } else {
         glBindTexture(GL_TEXTURE_2D, texture);
     }
-    if (loaded[index] != generation) {
+    if (sponsor_loaded[index] != generation) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        if (texture_width[index] != width || texture_height[index] != height) {
+        if (sponsor_width[index] != width || sponsor_height[index] != height) {
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
                          GL_UNSIGNED_BYTE, rgba);
-            texture_width[index] = width;
-            texture_height[index] = height;
+            sponsor_width[index] = width;
+            sponsor_height[index] = height;
         } else {
             // Keep the GPU allocation and upload only the changed frame.
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA,
                             GL_UNSIGNED_BYTE, rgba);
         }
-        loaded[index] = generation;
+        sponsor_loaded[index] = generation;
     }
     return (ImTextureID)(intptr_t)texture;
 }
@@ -277,6 +288,7 @@ int main(int argc, char** argv) {
             ui_autosave_tick();
             if (sponsor_window_visible) {
                 ui_set_window_visible(false);
+                release_cached_visuals();
                 sponsor_window_visible = false;
             }
             continue;
@@ -315,7 +327,7 @@ int main(int argc, char** argv) {
 
     ui_set_window_handle(nullptr);
     ui_shutdown();
-    release_app_icons();
+    release_cached_visuals();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

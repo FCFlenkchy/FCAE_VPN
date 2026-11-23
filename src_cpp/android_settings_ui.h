@@ -32,6 +32,7 @@ public:
         if (routing_.state(revision, mode, std::move(selected))) { tile_ = tile; widgets_ = widgets; }
     }
     void apps(std::vector<App> values) { routing_.apps(std::move(values)); }
+    void discard_inventory() { routing_.discard_inventory(); }
     void routing() { routing_.routing(); }
     void picker() { routing_.picker(); }
     void controls() {

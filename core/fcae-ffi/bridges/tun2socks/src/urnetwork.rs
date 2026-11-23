@@ -21,19 +21,57 @@ unsafe extern "C" {
     fn ur_free(value: *mut libc::c_char);
     fn ur_set_protect(callback: usize);
 }
-pub fn set_log_callback(callback: Option<unsafe extern "C" fn(u32, *const libc::c_char)>) {
-    unsafe { ur_set_log_callback(callback); }
+// Record host configuration without calling into Go during UI startup. The
+// library may still be mapped (and Go itself may already have initialized):
+// this only defers URnetwork bridge calls, not library loading or reclamation.
+type LogCallback = Option<unsafe extern "C" fn(u32, *const libc::c_char)>;
+type ProtectCallback = Option<unsafe extern "C" fn(libc::c_int) -> libc::c_int>;
+struct BridgeConfig {
+    active: bool,
+    log_callback: LogCallback,
+    log_level: u32,
+    protect: ProtectCallback,
+}
+static BRIDGE_CONFIG: parking_lot::Mutex<BridgeConfig> = parking_lot::Mutex::new(BridgeConfig {
+    active: false, log_callback: None, log_level: 3, protect: None,
+});
+
+pub fn set_log_callback(callback: LogCallback) {
+    let mut config = BRIDGE_CONFIG.lock();
+    config.log_callback = callback;
+    if config.active { unsafe { ur_set_log_callback(callback); } }
 }
 
-pub fn set_log_level(level: u32) { unsafe { ur_set_log_level(level.min(4)); } }
+pub fn set_log_level(level: u32) {
+    let mut config = BRIDGE_CONFIG.lock();
+    config.log_level = level.min(4);
+    if config.active { unsafe { ur_set_log_level(config.log_level); } }
+}
 
-pub fn set_protect(cb: Option<unsafe extern "C" fn(libc::c_int) -> libc::c_int>) {
-    unsafe {
-        ur_set_protect(cb.map(|f| f as usize).unwrap_or(0));
+pub fn set_protect(callback: ProtectCallback) {
+    let mut config = BRIDGE_CONFIG.lock();
+    config.protect = callback;
+    if config.active {
+        unsafe { ur_set_protect(callback.map(|f| f as usize).unwrap_or(0)); }
+    }
+}
+
+fn activate_bridge() {
+    let mut config = BRIDGE_CONFIG.lock();
+    if !config.active {
+        // Serialize activation with callback updates so a concurrently
+        // detached VpnService can never leave an old protect callback installed.
+        unsafe {
+            ur_set_log_callback(config.log_callback);
+            ur_set_log_level(config.log_level);
+            ur_set_protect(config.protect.map(|f| f as usize).unwrap_or(0));
+        }
+        config.active = true;
     }
 }
 fn call(request: &str) -> std::result::Result<Value, String> {
     let request = CString::new(request).map_err(|_| "invalid URnetwork request".to_owned())?;
+    activate_bridge();
     let raw = unsafe { ur_call(request.as_ptr()) };
     if raw.is_null() {
         return Err("URnetwork returned no reply".into());
@@ -51,6 +89,12 @@ fn call(request: &str) -> std::result::Result<Value, String> {
 pub fn register() {
     fcae_runtime::registry::register(FcaeBackend::URnetwork, || Arc::new(UrBackend));
 }
+// The supervisor reclaims every registered backend on every disconnect. An
+// unused URnetwork backend has no sessions to stop, so do not cross into Go
+// merely to ask it to stop an empty session map. Never reset this bit: after
+// the first attempted start, later reclaims must continue to catch cancelled
+// or late starts even when an earlier cleanup appeared to finish.
+static SESSION_START_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 struct UrBackend;
 #[async_trait]
 impl Backend for UrBackend {
@@ -58,7 +102,9 @@ impl Backend for UrBackend {
         BackendId::URnetwork
     }
     fn reclaim_blocking(&self) {
-        let _ = call(r#"{"op":"stop-all"}"#);
+        if SESSION_START_ATTEMPTED.load(Ordering::Acquire) {
+            let _ = call(r#"{"op":"stop-all"}"#);
+        }
     }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -106,6 +152,7 @@ impl Backend for UrBackend {
         let request = json!({"op":"start", "data_dir":cfg.data_dir.as_deref().unwrap_or("fcae-data"), "socks":socks,"http":http,"proxy":cfg.upstream_proxy.as_ref().map(|p|p.url()).unwrap_or_default(),"tun":true}).to_string();
         // The blocking result owns cleanup even if startup's async future is
         // cancelled before the native request returns.
+        SESSION_START_ATTEMPTED.store(true, Ordering::Release);
         let handle = tokio::task::spawn_blocking(move || {
             let v = call(&request).map_err(CoreError::StartFailed)?;
             let id = v.get("id").and_then(Value::as_u64).ok_or_else(|| {

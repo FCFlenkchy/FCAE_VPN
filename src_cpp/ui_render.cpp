@@ -256,6 +256,12 @@ static void poll_sponsor() {
     }
     s_sponsor = info;
     s_sponsor.available = card_available;
+    // Do not immediately repopulate frames if a hidden platform happens to
+    // poll the UI. The service retains the current still for later restoration.
+    if (!ui_active) {
+        if (card_changed) ui_request_redraw();
+        return;
+    }
     bool media_copied = false;
     if (!card_available) {
         s_sponsor_rgba.clear();
@@ -711,12 +717,21 @@ void ui_set_window_handle(void* window) {
     s_ui_window.store(reinterpret_cast<uintptr_t>(window));
 }
 
-// A hidden window keeps the one still per plane it is showing; the engine
-// releases every other frame and pauses rotation until the window returns.
+// Visibility transitions are delivered on the UI/render thread. The sponsor
+// service owns its media independently; these vectors are only UI copies.
 void ui_set_window_visible(bool visible) {
     s_ui_window_visible.store(visible);
     fcae_sponsor_set_ui_active(visible);
     s_sponsor_ui_active_sent = visible ? 1 : 0;
+    if (!visible) {
+        // Release regenerable CPU-side frames without stopping a live session
+        // or discarding editor/account state. poll_sponsor copies the current
+        // frames again when the UI becomes visible.
+        std::vector<uint8_t>{}.swap(s_sponsor_rgba);
+        std::vector<uint8_t>{}.swap(s_sponsor_background_rgba);
+        s_sponsor_loaded_foreground_generation = 0;
+        s_sponsor_loaded_background_generation = 0;
+    }
 }
 
 void ui_set_window_focused(bool focused) {
@@ -4182,6 +4197,24 @@ static void render_firefox_code_prompt() {
     ImGui::EndPopup();
 }
 
+#ifdef _WIN32
+static std::atomic<int> s_tray_toggle_requested{0};
+// 0: none, 1: stop, 2: start. Preserve the action the menu displayed.
+static std::atomic<int> s_tray_tun_requested{0};
+void ui_request_tray_toggle(int action) {
+    // Both the request and the next frame execute on the window thread.
+    // Refresh telemetry first so a hidden window does not act on stale state.
+    g_app.last_telem_t = 0;
+    s_tray_toggle_requested.store(action, std::memory_order_release);
+    ui_request_redraw();
+}
+void ui_request_tray_tun_control(bool resume) {
+    g_app.last_telem_t = 0;
+    s_tray_tun_requested.store(resume ? 2 : 1, std::memory_order_release);
+    ui_request_redraw();
+}
+#endif
+
 void render_ui() {
     const ImGuiIO& io = ImGui::GetIO();
     const bool narrow = io.DisplaySize.x < 720.0f * ImGui::GetFontSize() / 22.0f;
@@ -4405,7 +4438,20 @@ void render_ui() {
         connect_disabled |= s_elevation_pending.load(std::memory_order_acquire);
 #endif
         if (connect_disabled) ImGui::BeginDisabled();
-        if (ImGui::Button(show_disconnect ? "DISCONNECT" : "CONNECT", ImVec2(btn_w, kActionRowHeight))) {
+        const bool clicked_connect = ImGui::Button(show_disconnect ? "DISCONNECT" : "CONNECT", ImVec2(btn_w, kActionRowHeight));
+#ifdef _WIN32
+        const int tray_action = s_tray_toggle_requested.exchange(0, std::memory_order_acq_rel);
+        // The state may change while the shell menu is open. Never turn an
+        // advertised Disconnect into a Connect (or vice versa) on the next frame.
+        const bool tray_state_matches = tray_action == 1 ? !show_disconnect && !errored
+            : tray_action == 2 ? show_disconnect && !errored
+            : tray_action == 3 ? errored : false;
+        const bool tray_toggle = tray_state_matches && !connect_disabled
+            && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+#else
+        const bool tray_toggle = false;
+#endif
+        if (clicked_connect || tray_toggle) {
 #if defined(ANDROID)
             if (connected || busy || errored || tun_paused) {
                 android_ui_command("disconnect");
@@ -4789,6 +4835,15 @@ void render_ui() {
         if (startup) UiText::ItemTooltip("Finishing initialization...");
         ImGui::PopStyleColor(3);
 
+#ifdef _WIN32
+        const int tray_tun_request = s_tray_tun_requested.exchange(0, std::memory_order_acq_rel);
+        const bool tray_tun_allowed = show_tun_control && !startup
+            && !s_elevation_pending.load(std::memory_order_acquire)
+            && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+#else
+        const int tray_tun_request = 0;
+        const bool tray_tun_allowed = false;
+#endif
         if (show_tun_control) {
             ImGui::SameLine(0, 6);
             ImGui::SetCursorPosY(row_start_y);
@@ -4798,7 +4853,8 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, start_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
-                if (ImGui::Button("START", ImVec2(stop_btn_w, kActionRowHeight))) {
+                if (ImGui::Button("START", ImVec2(stop_btn_w, kActionRowHeight))
+                    || (tray_tun_allowed && tray_tun_request == 2)) {
 #if defined(ANDROID)
                     android_ui_command("resume");
 #else
@@ -4817,7 +4873,8 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, stop_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
-                if (ImGui::Button("STOP", ImVec2(stop_btn_w, kActionRowHeight))) {
+                if (ImGui::Button("STOP", ImVec2(stop_btn_w, kActionRowHeight))
+                    || (tray_tun_allowed && tray_tun_request == 1)) {
 #if defined(ANDROID)
                     android_ui_command("pause");
 #else
@@ -6180,6 +6237,10 @@ void render_ui() {
 #if defined(ANDROID)
 void ui_release_view() {
     fcae_sponsor_set_ui_active(false);
+    // The view is gone (rather than merely hidden), so its retained sponsor
+    // still is disposable too. Encoded disk cache and active sessions survive;
+    // the sponsor service hydrates the media again when a view returns.
+    fcae_sponsor_release_media();
     std::vector<uint8_t>{}.swap(s_sponsor_rgba);
     std::vector<uint8_t>{}.swap(s_sponsor_background_rgba);
     s_sponsor_loaded_foreground_generation = 0;

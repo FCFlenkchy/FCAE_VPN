@@ -939,6 +939,12 @@ struct AppState {
 extern AppState g_app;
 
 void ui_init();
+#ifdef _WIN32
+// Run the regular UI connection action on the next painted frame.
+// action: 1 connect, 2 disconnect, 3 clear error.
+void ui_request_tray_toggle(int action);
+void ui_request_tray_tun_control(bool resume);
+#endif
 void ui_frame();
 void ui_shutdown();
 #if defined(ANDROID)

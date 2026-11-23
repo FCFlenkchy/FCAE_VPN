@@ -44,6 +44,16 @@ public:
         filter_dirty_ = true;
     }
 
+    // Inventory is re-discoverable; keep the selected policy and unsaved draft.
+    // If the picker was open when the view hid, refresh it on its next frame.
+    void discard_inventory() {
+        std::vector<App>{}.swap(apps_);
+        std::vector<size_t>{}.swap(filtered_);
+        loading_apps_ = false;
+        inventory_stale_ = true;
+        filter_dirty_ = true;
+    }
+
     // A visible picker is not proof of an installed enforcement mechanism.
     void capabilities(bool editable, bool inventory, const char* reason) {
         if (editable_ != editable) filter_dirty_ = true;
@@ -109,6 +119,7 @@ public:
             folded_query_.clear();
             filter_dirty_ = true;
             loading_apps_ = true;
+            inventory_stale_ = false;
             command_("appsLoad", "");
             ImGui::OpenPopup(title);
         }
@@ -119,6 +130,12 @@ public:
         ImGui::SetNextWindowSizeConstraints(ImVec2(1, 1), room);
         bool opened = true;
         if (!ImGui::BeginPopupModal(title, &opened, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) return;
+        if (inventory_stale_) {
+            inventory_stale_ = false;
+            loading_apps_ = true;
+            retain_selected_rows();
+            command_("appsLoad", "");
+        }
         ImGui::SetNextItemWidth(-FLT_MIN);
         if (UiText::InputTextWithHint("##app_search", "Search by application name or identifier", query_, sizeof(query_))) {
             folded_query_ = fold_(query_);
@@ -225,6 +242,7 @@ private:
     std::string capability_reason_, inventory_status_;
     bool loaded_ = false, requested_ = false, loading_apps_ = false;
     bool open_picker_ = false, filter_dirty_ = false, reset_scroll_ = false;
+    bool inventory_stale_ = false;
 
     void retain_selected_rows() {
         for (const auto& id : selected_) {
