@@ -35,17 +35,15 @@ type urSession struct {
 	rx, tx              atomic.Uint64
 	rtt                 atomic.Uint32
 	probeDone           chan struct{}
-	sampleMu            sync.Mutex
-	sampleAt            time.Time
-	sampleRx, sampleTx  uint64
-	rxRate, txRate      uint64
+	rates               urRates
 	once                sync.Once
 }
 
 func newURSession(d *ur.DeviceLocal, s *ur.NetworkSpace, dir string) *urSession {
 	ctx, cancel := context.WithCancel(context.Background())
-	session := &urSession{device: d, space: s, ctx: ctx, cancel: cancel, conns: map[io.Closer]struct{}{}, sampleAt: time.Now(), probeDone: make(chan struct{})}
+	session := &urSession{device: d, space: s, ctx: ctx, cancel: cancel, conns: map[io.Closer]struct{}{}, probeDone: make(chan struct{})}
 	engineStarted(engineURnetwork)
+	go session.sampleTraffic()
 	go session.measureRTT()
 	return session
 }
@@ -480,20 +478,27 @@ type urAuthListener struct{ session *urSession }
 
 func (l *urAuthListener) AuthLogout() { l.session.cancel() }
 
-// status samples monotonic payload totals once per window. Multiple readers
-// (health, startup and telemetry) must not consume each other's rate samples.
-func (s *urSession) status() map[string]any {
-	s.sampleMu.Lock()
-	defer s.sampleMu.Unlock()
-	rx, tx := s.rx.Load(), s.tx.Load()
-	now := time.Now()
-	if elapsed := now.Sub(s.sampleAt); elapsed >= 100*time.Millisecond {
-		s.rxRate = uint64(float64(rx-s.sampleRx) / elapsed.Seconds())
-		s.txRate = uint64(float64(tx-s.sampleTx) / elapsed.Seconds())
-		s.sampleRx, s.sampleTx, s.sampleAt = rx, tx, now
+// sampleTraffic owns the rate window. Status/health readers only observe it;
+// they cannot reset its baseline between telemetry polls.
+func (s *urSession) sampleTraffic() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	s.rates.sample(s.rx.Load(), s.tx.Load(), time.Now())
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.rates.sample(s.rx.Load(), s.tx.Load(), now)
+		}
 	}
+}
+
+func (s *urSession) status() map[string]any {
+	rx, tx := s.rx.Load(), s.tx.Load()
+	rxRate, txRate := s.rates.get()
 	return map[string]any{"up": s.up(), "alive": s.ctx.Err() == nil, "rx": rx, "tx": tx,
-		"rx_rate": s.rxRate, "tx_rate": s.txRate, "rtt_ms": s.rtt.Load()}
+		"rx_rate": rxRate, "tx_rate": txRate, "rtt_ms": s.rtt.Load()}
 }
 
 // Time a real response over the device, including every configured carrier.
