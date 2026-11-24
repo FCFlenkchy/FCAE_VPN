@@ -209,6 +209,20 @@ fn main() {
             .push("-X runtime.godebugDefault=multipathtcp=0,tlssha1=1".into());
     }
 
+    if archive.target.is_windows() && (mihomo || cfg!(feature = "sing-tun")) {
+        // The pinned SagerNet/sing selected by sing-box already carries the
+        // upstream dual-stack fix. MetaCubeX's fork (used by Mihomo and
+        // sing-tun) still has the older family selection, so overlay the same
+        // socket-family logic without editing its module cache or submodule.
+        let replacement = manifest.join("overlays/metacubex_bind_windows.go");
+        fcae_build::rerun_if_changed(&replacement);
+        archive.source_overlays.push(fcae_build::go::GoSourceOverlay {
+            module: "github.com/metacubex/sing",
+            target: "common/control/bind_windows.go",
+            replacement,
+        });
+    }
+
     match archive.build() {
         Ok(built) => {
             // Android builds a c-shared .so (Go rejects c-archive there), so

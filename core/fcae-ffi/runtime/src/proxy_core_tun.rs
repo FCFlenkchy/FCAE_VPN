@@ -408,7 +408,6 @@ fn configuration(
                     process_rules.push(process(path, "fcae-tun-direct"));
                 }
             }
-            let bypass_selected = policy.is_some_and(|policy| policy.mode == 2);
             if let Some(policy) = policy {
                 for path in &policy.paths {
                     process_rules.push(process(
@@ -421,13 +420,11 @@ fn configuration(
                     ));
                 }
             }
-            if bypass_selected {
-                rules.extend(process_rules);
-                rules.push("DST-PORT,53,fcae-tun-exit".to_owned());
-            } else {
-                rules.push("DST-PORT,53,fcae-tun-exit".to_owned());
-                rules.extend(process_rules);
-            }
+            // Preserve the DNS firewall's tunnel-only contract for DNS and
+            // encrypted-DNS ports. Attribution may be lost at a shared resolver.
+            rules.push("DST-PORT,53,fcae-tun-exit".to_owned());
+            rules.push("DST-PORT,853,fcae-tun-exit".to_owned());
+            rules.extend(process_rules);
             if policy.is_some_and(|policy| policy.mode == 1) {
                 rules.push("PROCESS-PATH-REGEX,.+,fcae-tun-direct".into());
             }
@@ -503,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn mihomo_bypass_process_rule_precedes_dns_exit() {
+    fn mihomo_dns_exit_precedes_bypass_process_rule() {
         let mut cfg = SessionConfig::default();
         cfg.tun.engine = crate::config::TunEngine::Mihomo;
         let policy = bypass_policy();
@@ -528,8 +525,13 @@ mod tests {
             .iter()
             .position(|rule| rule.as_str().is_some_and(|rule| rule.starts_with("DST-PORT,53,")))
             .unwrap();
+        let encrypted_dns_rule = rules
+            .iter()
+            .position(|rule| rule.as_str().is_some_and(|rule| rule.starts_with("DST-PORT,853,")))
+            .unwrap();
 
-        assert!(app_rule < dns_rule);
+        assert!(dns_rule < app_rule);
+        assert!(encrypted_dns_rule < app_rule);
     }
 
     #[test]
@@ -584,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn sing_tun_bypass_process_rule_precedes_dns_exit() {
+    fn sing_tun_dns_exit_precedes_bypass_process_rule() {
         let mut cfg = SessionConfig::default();
         cfg.tun.engine = crate::config::TunEngine::MetaSingTun;
         let policy = bypass_policy();
@@ -614,7 +616,12 @@ mod tests {
             .iter()
             .position(|rule| rule["port"].as_u64() == Some(53))
             .unwrap();
+        let encrypted_dns_rule = rules
+            .iter()
+            .position(|rule| rule["port"].as_u64() == Some(853))
+            .unwrap();
 
-        assert!(app_rule < dns_rule);
+        assert!(dns_rule < app_rule);
+        assert!(encrypted_dns_rule < app_rule);
     }
 }

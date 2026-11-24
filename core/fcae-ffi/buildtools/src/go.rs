@@ -33,6 +33,15 @@ use std::process::Command;
 
 use crate::target::{Arch, Os, Target};
 
+/// Replace a source file from a selected Go module while compiling the archive.
+/// The replacement is supplied with `go build -overlay`; module-cache sources
+/// remain untouched.
+pub struct GoSourceOverlay {
+    pub module: &'static str,
+    pub target: &'static str,
+    pub replacement: PathBuf,
+}
+
 /// A Go c-archive build request.
 pub struct CArchive<'a> {
     /// Directory containing the `go.mod` to build from.
@@ -48,6 +57,8 @@ pub struct CArchive<'a> {
     pub ldflags: Vec<String>,
     /// Go build tags.
     pub tags: Vec<String>,
+    /// Target-specific source overlays for the pinned dependency graph.
+    pub source_overlays: Vec<GoSourceOverlay>,
 }
 
 /// Where the built library and its generated header ended up.
@@ -118,6 +129,7 @@ impl<'a> CArchive<'a> {
             android_api: 29,
             ldflags: vec!["-s".into(), "-w".into()],
             tags: Vec::new(),
+            source_overlays: Vec::new(),
         }
     }
 
@@ -218,6 +230,101 @@ impl<'a> CArchive<'a> {
         Ok(())
     }
 
+    fn source_overlay_file(&self, go: &str, out_dir: &Path) -> Result<Option<PathBuf>, GoError> {
+        if self.source_overlays.is_empty() {
+            return Ok(None);
+        }
+        let mut replacements = Vec::with_capacity(self.source_overlays.len());
+        for overlay in &self.source_overlays {
+            let downloaded = Command::new(go)
+                .current_dir(self.module_dir)
+                .args(["mod", "download", overlay.module])
+                .env_remove("GOFLAGS")
+                .env("CGO_ENABLED", "0")
+                .env("GOTOOLCHAIN", "auto")
+                .output()
+                .map_err(|error| {
+                    GoError::Build(format!(
+                        "could not download Go overlay module {}: {error}",
+                        overlay.module
+                    ))
+                })?;
+            if !downloaded.status.success() {
+                return Err(GoError::Build(format!(
+                    "could not download Go overlay module {}: {}\n{}",
+                    overlay.module,
+                    downloaded.status,
+                    String::from_utf8_lossy(&downloaded.stderr)
+                )));
+            }
+            let output = Command::new(go)
+                .current_dir(self.module_dir)
+                .args(["list", "-m", "-f", "{{.Dir}}", overlay.module])
+                .env("GOFLAGS", "-mod=readonly")
+                .env("CGO_ENABLED", "0")
+                .env("GOTOOLCHAIN", "auto")
+                .output()
+                .map_err(|error| {
+                    GoError::Build(format!(
+                        "could not resolve Go overlay module {}: {error}",
+                        overlay.module
+                    ))
+                })?;
+            if !output.status.success() {
+                return Err(GoError::Build(format!(
+                    "could not resolve Go overlay module {}: {}\n{}",
+                    overlay.module,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+            let module_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            if !module_dir.is_absolute() {
+                return Err(GoError::Build(format!(
+                    "Go overlay module {} has no local source directory",
+                    overlay.module
+                )));
+            }
+            let target = module_dir.join(overlay.target);
+            if !target.is_file() {
+                return Err(GoError::Build(format!(
+                    "Go overlay target does not exist: {}",
+                    target.display()
+                )));
+            }
+            let replacement = if overlay.replacement.is_absolute() {
+                overlay.replacement.clone()
+            } else {
+                overlay.replacement.canonicalize().map_err(|error| {
+                    GoError::Build(format!(
+                        "could not resolve Go overlay replacement {}: {error}",
+                        overlay.replacement.display()
+                    ))
+                })?
+            };
+            if !replacement.is_file() {
+                return Err(GoError::Build(format!(
+                    "Go overlay replacement does not exist: {}",
+                    replacement.display()
+                )));
+            }
+            replacements.push(format!(
+                "{}:{}",
+                json_quote(&target.to_string_lossy()),
+                json_quote(&replacement.to_string_lossy())
+            ));
+        }
+        let path = out_dir.join("go-source-overlay.json");
+        std::fs::write(
+            &path,
+            format!("{{\"Replace\":{{{}}}}}", replacements.join(",")),
+        )
+        .map_err(|error| {
+            GoError::Build(format!("could not write {}: {error}", path.display()))
+        })?;
+        Ok(Some(path))
+    }
+
     pub fn build(&self) -> Result<Built, GoError> {
         let go = Self::go_bin()?;
         let cc = Self::cc_for(self.target, self.android_api)?;
@@ -287,6 +394,7 @@ impl<'a> CArchive<'a> {
         if self.target.os == Os::Windows {
             stage_windows_adapter_guids(&go, self.module_dir)?;
         }
+        let source_overlay = self.source_overlay_file(&go, &out_dir)?;
         let mut ldflags = self.ldflags.clone();
         if shared && self.target.is_android() {
             // Android 15 ships 16 KB memory pages. A shared object linked with
@@ -314,6 +422,9 @@ impl<'a> CArchive<'a> {
 
         if !ldflags.is_empty() {
             cmd.arg("-ldflags").arg(ldflags.join(" "));
+        }
+        if let Some(source_overlay) = source_overlay {
+            cmd.arg("-overlay").arg(source_overlay);
         }
         cmd.arg("-o").arg(&archive).arg(self.package);
 
@@ -388,6 +499,28 @@ impl<'a> CArchive<'a> {
             shared,
         })
     }
+}
+
+fn json_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\u{8}' => quoted.push_str("\\b"),
+            '\u{9}' => quoted.push_str("\\t"),
+            '\u{a}' => quoted.push_str("\\n"),
+            '\u{c}' => quoted.push_str("\\f"),
+            '\u{d}' => quoted.push_str("\\r"),
+            character if (character as u32) < 0x20 => {
+                quoted.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 impl Built {

@@ -265,16 +265,17 @@ impl FlowPolicy {
         };
         let bypass_selected = self.mode == 2;
         let mut rules = vec![json!({"ip_cidr":addresses,"action":"reject"})];
+        // Keep captured DNS sockets on the VPN exit, regardless of app policy.
+        // Shared OS resolvers obscure the requesting app, and the DNS firewall
+        // only permits DNS ports through this tunnel.
+        rules.push(json!({"port":53,"action":"route","outbound":"fcae-exit"}));
+        rules.push(json!({"port":853,"action":"route","outbound":"fcae-exit"}));
+        rules.push(own_rule);
         if bypass_selected {
-            rules.push(own_rule.clone());
             rules.push(process_rule(
                 self.paths.iter().map(String::as_str),
                 "fcae-direct",
             ));
-        }
-        rules.push(json!({"port":53,"action":"route","outbound":"fcae-exit"}));
-        if !bypass_selected {
-            rules.push(own_rule);
         }
         if self.mode == 1 {
             rules.push(process_rule(
@@ -392,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn bypassed_app_route_precedes_forced_dns_exit() {
+    fn forced_dns_exit_precedes_bypassed_app_route() {
         let cfg = SessionConfig::default();
         let policy = bypass_policy();
         let config = policy
@@ -421,8 +422,14 @@ mod tests {
             .iter()
             .position(|rule| rule["port"].as_u64() == Some(53))
             .unwrap();
+        let encrypted_dns_rule = rules
+            .iter()
+            .position(|rule| rule["port"].as_u64() == Some(853))
+            .unwrap();
 
-        assert!(app_rule < dns_rule);
+        assert!(dns_rule < app_rule);
+        assert!(encrypted_dns_rule < app_rule);
         assert_eq!(rules[dns_rule]["outbound"], "fcae-exit");
+        assert_eq!(rules[encrypted_dns_rule]["outbound"], "fcae-exit");
     }
 }
