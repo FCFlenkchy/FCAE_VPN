@@ -186,10 +186,11 @@ static void render_urnetwork_settings() {
         ImGui::TextWrapped("%s", account.second.empty() ? "URnetwork account" : account.second.c_str());
         const auto usage = s_ur_usage.find(account.first);
         if (usage != s_ur_usage.end() && !usage->second.text.empty()) {
-            ImGui::TextWrapped("%s", usage->second.text.c_str());
+            ImGui::TextDisabled("Usage: %s", usage->second.text.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Total is the start-of-day balance; available data excludes open transfers.");
         } else if (selected) {
-            ImGui::TextUnformatted(usage != s_ur_usage.end() && usage->second.refresh_failed
-                ? "Data balance unavailable" : "Loading data balance…");
+            ImGui::TextDisabled("%s", usage != s_ur_usage.end() && usage->second.refresh_failed
+                ? "Usage: Unavailable" : "Usage: Loading…");
         }
         ImGui::BeginDisabled(selected);
         if (ImGui::SmallButton(selected ? "Selected" : "Use"))

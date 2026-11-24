@@ -408,11 +408,38 @@ fn usage_display(usage: Option<&fcae_firefox::types::Usage>) -> (String, bool) {
     (format!("{used} B / {limit} B"), exhausted)
 }
 
+
+// Keep both sides in GiB without rounding away a small remaining balance.
+fn usage_gib_display(usage: Option<&fcae_firefox::types::Usage>) -> String {
+    let Some(usage) = usage else { return "Not reported".into() };
+    if usage.unlimited { return "Unlimited".into(); }
+    let limit = usage.limit.max(0);
+    let used = limit.saturating_sub(usage.remaining.max(0)).clamp(0, limit);
+    let format_gib = |bytes: i64, precision: u32| {
+        let bytes = bytes as u128;
+        let gib = 1u128 << 30;
+        let scale = 10u128.pow(precision);
+        let whole = bytes / gib;
+        let fraction = (bytes % gib) * scale / gib;
+        format!("{whole}.{fraction:0width$} GiB", width = precision as usize)
+    };
+    for precision in 1..=10 {
+        let used_text = format_gib(used, precision);
+        let limit_text = format_gib(limit, precision);
+        if used == limit || used_text != limit_text {
+            return format!("{used_text} / {limit_text}");
+        }
+    }
+    format!("{used} B / {limit} B")
+}
+
 fn account_json(account: Account) -> Result<Value> {
     let (monthly_usage, exhausted) = usage_display(account.usage.as_ref());
+    let usage_gib = usage_gib_display(account.usage.as_ref());
     let mut value = serde_json::to_value(account)?;
     if let Some(object) = value.as_object_mut() {
         object.insert("monthly_usage".into(), json!(monthly_usage));
+        object.insert("usage_gib".into(), json!(usage_gib));
         object.insert("monthly_usage_exhausted".into(), json!(exhausted));
     }
     Ok(value)

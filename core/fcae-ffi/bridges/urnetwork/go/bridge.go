@@ -65,7 +65,11 @@ func (b *urBalance) display() string {
 	}
 	// Match the SDK's used-balance definition. Pending transfers are reserved,
 	// not used; the independently sampled values can temporarily exceed start.
-	used := b.Start
+	total := b.Start
+	if total < 0 {
+		total = 0
+	}
+	used := total
 	if b.Available > 0 {
 		if b.Available >= used {
 			used = 0
@@ -83,8 +87,15 @@ func (b *urBalance) display() string {
 	if used < 0 {
 		used = 0
 	}
-	return fmt.Sprintf("%s used / %s start-of-day · %s available",
-		urFormatBytes(used), urFormatBytes(b.Start), urFormatBytes(b.Available))
+	// Start is the server's start-of-day balance, not a fixed quota.
+	// Increase precision only when a rounded display would hide remaining data.
+	for precision := 1; precision <= 10; precision++ {
+		usedText, totalText := urFormatGiB(used, precision), urFormatGiB(total, precision)
+		if used == total || usedText != totalText {
+			return usedText + " / " + totalText
+		}
+	}
+	return fmt.Sprintf("%d B / %d B", used, total)
 }
 
 type urAccount struct {
@@ -648,18 +659,19 @@ func urTransportValid(s string) bool {
 	}
 	return false
 }
-func urFormatBytes(n int64) string {
+
+// Use integer arithmetic so a small remaining balance is not rounded away.
+func urFormatGiB(n int64, precision int) string {
 	if n < 0 {
 		n = 0
 	}
-	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
-	v := float64(n)
-	i := 0
-	for v >= 1024 && i < len(units)-1 {
-		v /= 1024
-		i++
+	const gib uint64 = 1 << 30
+	scale := uint64(1)
+	for i := 0; i < precision; i++ {
+		scale *= 10
 	}
-	return fmt.Sprintf("%.2f %s", v, units[i])
+	value := uint64(n)
+	return fmt.Sprintf("%d.%0*d GiB", value/gib, precision, (value%gib)*scale/gib)
 }
 
 func urSpace(_ context.Context, upstream string, tun, configureEgress bool) (*ur.NetworkSpace, error) {

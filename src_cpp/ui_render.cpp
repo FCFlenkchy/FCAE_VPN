@@ -2798,7 +2798,7 @@ static std::vector<FirefoxAccountOption> firefox_parse_accounts(const std::strin
         FirefoxAccountOption account{
             firefox_json_string(object, "id"),
             firefox_json_string(object, "email"),
-            firefox_json_string(object, "monthly_usage"),
+            firefox_json_string(object, "usage_gib"),
             firefox_json_bool(object, "monthly_usage_exhausted"),
         };
         if (!account.id.empty()) accounts.push_back(std::move(account));
@@ -2834,10 +2834,7 @@ static void firefox_account_rows(const std::string& root) {
         const std::string email = account.email.empty() ? account.id : account.email;
         const bool selected = g_app.firefox_account_id == account.id;
         ImGui::TextUnformatted(email.c_str());
-        if (account.usage_exhausted)
-            UiText::TextColoredWrapped(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Monthly usage: %s", account.monthly_usage.c_str());
-        else
-            ImGui::TextDisabled("Monthly usage: %s", account.monthly_usage.empty() ? "Unavailable" : account.monthly_usage.c_str());
+        ImGui::TextDisabled("Usage: %s", account.monthly_usage.empty() ? "Unavailable" : account.monthly_usage.c_str());
         ImGui::BeginDisabled(selected);
         if (ImGui::SmallButton(selected ? "Selected" : "Use")) firefox_select_account(account);
         ImGui::EndDisabled();
@@ -3055,7 +3052,7 @@ static void firefox_poll_job() {
         const size_t account = json.find("\"account\"");
         const std::string id = account == std::string::npos ? std::string() : firefox_json_string(json, "id", account);
         const std::string email = account == std::string::npos ? std::string() : firefox_json_string(json, "email", account);
-        const std::string monthly_usage = account == std::string::npos ? std::string() : firefox_json_string(json, "monthly_usage", account);
+        const std::string monthly_usage = account == std::string::npos ? std::string() : firefox_json_string(json, "usage_gib", account);
         const bool usage_exhausted = account != std::string::npos && firefox_json_bool(json, "monthly_usage_exhausted", account);
         if (!id.empty()) {
             snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", id.c_str());
@@ -3223,14 +3220,14 @@ static void firefox_poll_background() {
             s_firefox_usage_job = 0;
             const size_t account_pos = json.find("\"account\"");
             const std::string usage = status == "complete" && account_pos != std::string::npos
-                ? firefox_json_string(json, "monthly_usage", account_pos) : std::string();
+                ? firefox_json_string(json, "usage_gib", account_pos) : std::string();
             for (auto& account : s_firefox_account_options) {
                 if (account.id == s_firefox_usage_account) {
                     if (!usage.empty()) {
                         account.monthly_usage = usage;
                         account.usage_exhausted = firefox_json_bool(json, "monthly_usage_exhausted", account_pos);
                     } else {
-                        account.monthly_usage = "Usage unavailable";
+                        account.monthly_usage = "Unavailable";
                         account.usage_exhausted = false;
                     }
                     break;
