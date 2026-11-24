@@ -16,6 +16,7 @@ settings:
     IPHONEOS_DEPLOYMENT_TARGET: '16.0'
     HEADER_SEARCH_PATHS:
       - $(SRCROOT)
+      - $(DERIVED_FILE_DIR)
       - $(SRCROOT)/../src_cpp
       - $(SRCROOT)/../src_cpp/imgui
       - $(SRCROOT)/../src_cpp/imgui/backends
@@ -48,6 +49,27 @@ targets:
       - ../src_cpp/imgui/imgui_tables.cpp
       - ../src_cpp/imgui/imgui_widgets.cpp
       - ../src_cpp/imgui/backends/imgui_impl_metal.mm
+    preBuildScripts:
+      - name: Generate mountain background header
+        inputFiles:
+          - $(SRCROOT)/../mountain.png
+        outputFiles:
+          - $(DERIVED_FILE_DIR)/mountain_png.h
+        script: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          source = Path(os.environ["SRCROOT"]).parent / "mountain.png"
+          output = Path(os.environ["DERIVED_FILE_DIR"]) / "mountain_png.h"
+          data = ",".join(f"0x{byte:02x}" for byte in source.read_bytes())
+          output.parent.mkdir(parents=True, exist_ok=True)
+          output.write_text(
+              "#pragma once\n"
+              "static const unsigned char kMountainPng[] = {" + data + "};\n"
+              "static const unsigned int kMountainPngSize = sizeof(kMountainPng);\n"
+          )
+          PY
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(FCAE_BUNDLE_ID)

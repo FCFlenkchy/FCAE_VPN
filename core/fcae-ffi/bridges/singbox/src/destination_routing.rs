@@ -82,7 +82,7 @@ impl DestinationRouter {
         drop(reserved);
         let mut handle = 0;
         unsafe {
-            let error = super::sb_start(text.as_ptr(), &mut handle);
+            let error = super::sb_destination_start(text.as_ptr(), &mut handle);
             if !error.is_null() {
                 let text = CStr::from_ptr(error).to_string_lossy().into_owned();
                 super::sb_string_free(error);

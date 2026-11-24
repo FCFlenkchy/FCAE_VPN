@@ -502,7 +502,7 @@ impl Tun2SocksBridge {
         // FCAE_TUN2SOCKS_LOG=debug|info|warn|error remains as an out-of-band
         // debugging override on top of the default only; an explicit UI pick
         // always wins.
-        let level = cfg.tun.t2s_log_str();
+        let level = cfg.tun.tun2socks_log_str();
         let c_level = CString::new(level.clone()).expect("level has no NUL");
         log::info!("[tun2socks] TCP sndbuf={} bytes, rcvbuf={} bytes, auto-tuning={}, t2s log={}",
             cfg.tun.tcp_sndbuf, cfg.tun.tcp_rcvbuf, cfg.tun.tcp_auto_tuning, level);

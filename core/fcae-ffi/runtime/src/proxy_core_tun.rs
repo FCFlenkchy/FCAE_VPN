@@ -359,7 +359,7 @@ fn configuration(
     }
     match cfg.tun.engine {
         TunEngine::MetaSingTun => {
-            let mut value = json!({"name":device,"mtu":cfg.tun.mtu,"addresses":addresses,"socks":socks.to_string(),"udp":udp});
+            let mut value = json!({"name":device,"mtu":cfg.tun.mtu,"addresses":addresses,"socks":socks.to_string(),"udp":udp,"fcae-tun-log-level":cfg.tun.tun_log_level});
             if let Some(policy) = policy {
                 let mut routing = policy.config(cfg, socks, device, udp)?;
                 routing["inbounds"] = json!([]);
@@ -378,13 +378,11 @@ fn configuration(
                 ));
             }
             Ok(
-                json!({"log":{"loglevel":"warning"},"inbounds":[{"tag":"fcae-native-tun","protocol":"tun","settings":{"name":device,"mtu":cfg.tun.mtu,"gateway":addresses,"dns":[],"autoSystemRoutingTable":[],"autoOutboundsInterface":""}}],"routing":{"rules":[{"type":"field","inboundTag":["fcae-native-tun"],"outboundTag":"fcae-native-exit"}]},"outbounds":[{"tag":"fcae-native-exit","protocol":"socks","settings":{"servers":[{"address":socks.ip().to_string(),"port":socks.port()}]}}]}),
+                json!({"log":{"loglevel":cfg.tun.xray_tun_log_level()},"inbounds":[{"tag":"fcae-native-tun","protocol":"tun","settings":{"name":device,"mtu":cfg.tun.mtu,"gateway":addresses,"dns":[],"autoSystemRoutingTable":[],"autoOutboundsInterface":""}}],"routing":{"rules":[{"type":"field","inboundTag":["fcae-native-tun"],"outboundTag":"fcae-native-exit"}]},"outbounds":[{"tag":"fcae-native-exit","protocol":"socks","settings":{"servers":[{"address":socks.ip().to_string(),"port":socks.port()}]}}]}),
             )
         }
         TunEngine::Mihomo => {
-            let mut rules = vec![
-                "DST-PORT,53,fcae-tun-exit".to_owned(),
-            ];
+            let mut rules = Vec::new();
             let process = |path: &str, out: &str| {
                 let mut regex = if cfg!(windows) {
                     "(?i)^".to_owned()
@@ -404,14 +402,16 @@ fn configuration(
                 regex.push('$');
                 format!("PROCESS-PATH-REGEX,{regex},{out}")
             };
+            let mut process_rules = Vec::new();
             if let Ok(own) = std::env::current_exe() {
                 if let Some(path) = own.to_str() {
-                    rules.push(process(path, "fcae-tun-direct"));
+                    process_rules.push(process(path, "fcae-tun-direct"));
                 }
             }
+            let bypass_selected = policy.is_some_and(|policy| policy.mode == 2);
             if let Some(policy) = policy {
                 for path in &policy.paths {
-                    rules.push(process(
+                    process_rules.push(process(
                         path,
                         if policy.mode == 1 {
                             "fcae-tun-exit"
@@ -420,9 +420,16 @@ fn configuration(
                         },
                     ));
                 }
-                if policy.mode == 1 {
-                    rules.push("PROCESS-PATH-REGEX,.+,fcae-tun-direct".into());
-                }
+            }
+            if bypass_selected {
+                rules.extend(process_rules);
+                rules.push("DST-PORT,53,fcae-tun-exit".to_owned());
+            } else {
+                rules.push("DST-PORT,53,fcae-tun-exit".to_owned());
+                rules.extend(process_rules);
+            }
+            if policy.is_some_and(|policy| policy.mode == 1) {
+                rules.push("PROCESS-PATH-REGEX,.+,fcae-tun-direct".into());
             }
             rules.push("MATCH,fcae-tun-exit".into());
             // Mihomo skips rules whose outbound cannot carry UDP. Reject
@@ -442,7 +449,7 @@ fn configuration(
                 rules = guarded;
             }
 
-            let mut value = json!({"mode":"rule","log-level":"warning","ipv6":cfg.tun.ipv6.is_some(),"find-process-mode":"always","profile":{"store-selected":false,"store-fake-ip":false},"dns":{"enable":false},"tun":{"enable":true,"device":device,"stack":"gvisor","dns-mode":"disabled","mtu":cfg.tun.mtu,"auto-route":false,"auto-redirect":false,"auto-detect-interface":false},"fcae-tun-addresses":addresses,"proxies":[{"name":"fcae-tun-direct","type":"direct"},{"name":"fcae-tun-exit","type":"socks5","server":socks.ip().to_string(),"port":socks.port(),"udp":udp}],"rules":rules});
+            let mut value = json!({"mode":"rule","log-level":cfg.tun.mihomo_tun_log_level(),"ipv6":cfg.tun.ipv6.is_some(),"find-process-mode":"always","profile":{"store-selected":false,"store-fake-ip":false},"dns":{"enable":false},"tun":{"enable":true,"device":device,"stack":"gvisor","dns-mode":"disabled","mtu":cfg.tun.mtu,"auto-route":false,"auto-redirect":false,"auto-detect-interface":false},"fcae-tun-addresses":addresses,"proxies":[{"name":"fcae-tun-direct","type":"direct"},{"name":"fcae-tun-exit","type":"socks5","server":socks.ip().to_string(),"port":socks.port(),"udp":udp}],"rules":rules});
             #[cfg(target_os = "macos")]
             {
                 let output = crate::tun_dns::run("route", &["-n", "get", "default"])?;
@@ -475,5 +482,139 @@ fn configuration(
         _ => Err(CoreError::InvalidConfig(
             "not a native core TUN engine".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desktop_flow_routing::FlowPolicy;
+    use std::collections::BTreeSet;
+
+    const SELECTED_PATH: &str = "/opt/apps/browser";
+
+    fn bypass_policy() -> FlowPolicy {
+        FlowPolicy {
+            revision: 1,
+            provider: "captured_flow".into(),
+            mode: 2,
+            paths: BTreeSet::from([SELECTED_PATH.into()]),
+        }
+    }
+
+    #[test]
+    fn mihomo_bypass_process_rule_precedes_dns_exit() {
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = crate::config::TunEngine::Mihomo;
+        let policy = bypass_policy();
+        let value = configuration(
+            &cfg,
+            "127.0.0.1:1080".parse().unwrap(),
+            "fcae0",
+            true,
+            Some(&policy),
+        )
+        .unwrap();
+        let rules = value["rules"].as_array().unwrap();
+        let app_rule = rules
+            .iter()
+            .position(|rule| {
+                rule.as_str().is_some_and(|rule| {
+                    rule.contains(SELECTED_PATH) && rule.ends_with(",fcae-tun-direct")
+                })
+            })
+            .unwrap();
+        let dns_rule = rules
+            .iter()
+            .position(|rule| rule.as_str().is_some_and(|rule| rule.starts_with("DST-PORT,53,")))
+            .unwrap();
+
+        assert!(app_rule < dns_rule);
+    }
+
+    #[test]
+    fn xray_and_mihomo_tun_configs_use_independent_tun_log_levels() {
+        use crate::config::{TUN_LOG_DEBUG, TUN_LOG_SILENT};
+        use fcae_abi::FcaeEngineLog;
+
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = crate::config::TunEngine::Xray;
+        cfg.tun.tun_log_level = TUN_LOG_DEBUG;
+        let xray = configuration(
+            &cfg,
+            "127.0.0.1:1080".parse().unwrap(),
+            "fcae0",
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(xray["log"]["loglevel"], "debug");
+        assert_eq!(cfg.core.log_level, FcaeEngineLog::Off);
+
+        cfg.tun.engine = crate::config::TunEngine::Mihomo;
+        cfg.tun.tun_log_level = TUN_LOG_SILENT;
+        let mihomo = configuration(
+            &cfg,
+            "127.0.0.1:1080".parse().unwrap(),
+            "fcae0",
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(mihomo["log-level"], "silent");
+        assert_eq!(cfg.core.log_level, FcaeEngineLog::Off);
+    }
+
+    #[test]
+    fn sing_tun_config_carries_its_own_log_level() {
+        use crate::config::TUN_LOG_DEBUG;
+
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = crate::config::TunEngine::MetaSingTun;
+        cfg.tun.tun_log_level = TUN_LOG_DEBUG;
+        let value = configuration(
+            &cfg,
+            "127.0.0.1:1080".parse().unwrap(),
+            "fcae0",
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(value["fcae-tun-log-level"], TUN_LOG_DEBUG);
+    }
+
+    #[test]
+    fn sing_tun_bypass_process_rule_precedes_dns_exit() {
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = crate::config::TunEngine::MetaSingTun;
+        let policy = bypass_policy();
+        let value = configuration(
+            &cfg,
+            "127.0.0.1:1080".parse().unwrap(),
+            "fcae0",
+            true,
+            Some(&policy),
+        )
+        .unwrap();
+        let rules = value["routing"]["route"]["rules"].as_array().unwrap();
+        let app_rule = rules
+            .iter()
+            .position(|rule| {
+                rule["outbound"] == "fcae-direct"
+                    && ["process_path", "process_path_regex"].iter().any(|key| {
+                        rule[*key].as_array().is_some_and(|paths| {
+                            paths.iter().any(|path| {
+                                path.as_str().is_some_and(|path| path.contains(SELECTED_PATH))
+                            })
+                        })
+                    })
+            })
+            .unwrap();
+        let dns_rule = rules
+            .iter()
+            .position(|rule| rule["port"].as_u64() == Some(53))
+            .unwrap();
+
+        assert!(app_rule < dns_rule);
     }
 }

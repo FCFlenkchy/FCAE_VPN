@@ -174,18 +174,24 @@ typedef enum {
     FCAE_ENGINE_LOG_TRACE = 5
 } FcaeEngineLog;
 
-/* Verbosity of the tun2socks data plane (bridge + gVisor netstack), separate
- * from the engine log. Default is SILENT: the data plane is not something
- * users act on, and it can otherwise log a line per connection. Silent still
- * passes rare error-level bridge lines to the host logger. */
+/* Independent verbosity for the selected TUN data plane. This is separate
+ * from proxy-core/protocol logging. Historical T2S names are retained for ABI
+ * and source compatibility; the FCAE_TUN_LOG_* aliases name the shared scale. */
 typedef enum {
-    FCAE_T2S_LOG_DEFAULT = 0,  /* follow the app default (silent)         */
+    FCAE_T2S_LOG_DEFAULT = 0,  /* default (silent)                         */
     FCAE_T2S_LOG_SILENT  = 1,
     FCAE_T2S_LOG_ERROR   = 2,
     FCAE_T2S_LOG_WARN    = 3,
     FCAE_T2S_LOG_INFO    = 4,
     FCAE_T2S_LOG_DEBUG   = 5
 } FcaeT2sLog;
+typedef FcaeT2sLog FcaeTunLog;
+#define FCAE_TUN_LOG_DEFAULT FCAE_T2S_LOG_DEFAULT
+#define FCAE_TUN_LOG_SILENT  FCAE_T2S_LOG_SILENT
+#define FCAE_TUN_LOG_ERROR   FCAE_T2S_LOG_ERROR
+#define FCAE_TUN_LOG_WARN    FCAE_T2S_LOG_WARN
+#define FCAE_TUN_LOG_INFO    FCAE_T2S_LOG_INFO
+#define FCAE_TUN_LOG_DEBUG   FCAE_T2S_LOG_DEBUG
 
 /* Tor egress, mirroring the engine's own AETHER_TOR modes. Tor lives INSIDE
  * the Aether engine -- it is not a separate backend. */
@@ -437,7 +443,7 @@ typedef struct {
     uint32_t        tun_tcp_rcvbuf; /* bytes; 0 = 256000; 4096..4194304 bytes */
     uint64_t        tun_tcp_auto_tuning; /* 0=default(off), 1=on, 2=off */
     uint64_t        tor_http_port; /* 0 disables; 1..65535; formerly reserved[3] */
-    uint64_t        tun2socks_log_level; /* FcaeT2sLog; 0 = default (silent) */
+    uint64_t        tun2socks_log_level; /* Legacy name; FcaeTunLog scale, independent of core logs */
     uint64_t        tun_engine;      /* FCAE_TUN_ENGINE_*; TUN mode only; ABI v8 */
     FcaeAether      aether;          /* ABI v21 */
     const char     *upstream_proxy;  /* http|socks5|socks5h://[user:pass@]host:port[@user:pass]; NULL = direct; ABI v20 */

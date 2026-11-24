@@ -582,9 +582,10 @@ pub struct FcaeConfig {
     /// Independent Tor HTTP listener: 0 disables, otherwise 1..=65535.
     /// Former reserved[3]; preserves size and existing Psiphon reserved[0].
     pub tor_http_port: u64,
-    /// tun2socks data-plane log verbosity (`FcaeT2sLog`): 0 = default
-    /// (silent), 1 = silent,  2 = error, 3 = warn, 4 = info, 5 = debug.
-    /// ABI v7: appended after `tor_http_port` so all earlier offsets hold.
+    /// Independent TUN data-plane log verbosity: 0 = default (silent),
+    /// 1 = silent, 2 = error, 3 = warn, 4 = info, 5 = debug. The historical
+    /// `tun2socks_log_level` field name is retained for ABI/source compatibility;
+    /// this never changes proxy-core/protocol logging. ABI v7 offset is stable.
     pub tun2socks_log_level: u64,
     /// TUN data-plane engine: one of `FCAE_TUN_ENGINE_*`. Only consumed in
     /// TUN mode. ABI v8: appended after `tun2socks_log_level` so all earlier

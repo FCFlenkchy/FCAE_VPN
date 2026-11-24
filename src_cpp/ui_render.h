@@ -942,10 +942,11 @@ extern AppState g_app;
 
 void ui_init();
 #ifdef _WIN32
-// Run the regular UI connection action on the next painted frame.
+// Queue actions for the UI/window thread; they are handled while hidden too.
 // action: 1 connect, 2 disconnect, 3 clear error.
 void ui_request_tray_toggle(int action);
 void ui_request_tray_tun_control(bool resume);
+bool ui_tray_action_pending();
 #endif
 void ui_frame();
 void ui_shutdown();

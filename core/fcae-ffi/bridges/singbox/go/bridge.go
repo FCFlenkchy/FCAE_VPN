@@ -43,6 +43,7 @@ import (
 	"fmt"
 	"net/netip"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -86,6 +87,9 @@ type sbCore struct {
 	ctx    context.Context
 	box    *box.Box
 	cancel context.CancelFunc
+	// The synthetic DNS-routing stage has a valid box/service context, but it
+	// is not the configured session core. A desktop TUN must not attach to it.
+	tunAttachable bool
 	// Nil only if the tracker could not be attached; the core then reports no
 	// traffic totals.
 	traffic *trafficcontrol.Manager
@@ -182,9 +186,11 @@ var (
 	// sbLogMu guards the host sink and its level gate, and is DELIBERATELY
 	// separate from sbMu: sing-box logs while sbMu is held, and Go's
 	// sync.Mutex is not reentrant.
-	sbLogMu   sync.Mutex
-	sbLogFn   C.sb_log_fn
-	sbLogGate int
+	sbLogMu      sync.Mutex
+	sbLogFn      C.sb_log_fn
+	sbLogGate    int
+	sbTunLogFn   C.sb_log_fn
+	sbTunLogGate int
 )
 
 //export sb_check
@@ -211,6 +217,26 @@ func sb_check(text *C.char) (result *C.char) {
 //
 //export sb_start
 func sb_start(config *C.char, handle *C.uint64_t) *C.char {
+	return sbStartRole(config, handle, true, false)
+}
+
+// The DNS-only destination router is a helper service, not a session core that
+// a TUN should borrow as its parent context.
+//export sb_destination_start
+func sb_destination_start(config *C.char, handle *C.uint64_t) *C.char {
+	return sbStartRole(config, handle, false, false)
+}
+
+func sbStartRole(config *C.char, handle *C.uint64_t, tunAttachable, tunLogger bool) (result *C.char) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = C.CString(fmt.Sprintf("sing-box start panic: %v\n%s", failure, debug.Stack()))
+		}
+	}()
+	if config == nil || handle == nil {
+		return C.CString("missing sing-box arguments")
+	}
+	*handle = 0
 	text := C.GoString(config)
 	// include.Context registers every protocol, transport and service this
 	// build carries; box.New refuses to run without those registries and fails
@@ -244,7 +270,7 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 	// that option also makes box.New open its bbolt cache file (`cache.db`) in
 	// the process working directory, and a sandboxed app has a read-only one --
 	// the failed open aborts the whole start.
-	created.LogFactory().AttachPlatformWriter(sbPlatformWriter{})
+	created.LogFactory().AttachPlatformWriter(sbPlatformWriter{tun: tunLogger})
 	// Byte totals: the router wraps every connection it dials with the trackers
 	// appended here. Same reason as above -- box.New creates a traffic manager
 	// of its own only for the clash/API/platform-writer cases.
@@ -255,7 +281,7 @@ func sb_start(config *C.char, handle *C.uint64_t) *C.char {
 		_ = created.Close()
 		return C.CString("sing-box: " + err.Error())
 	}
-	core := &sbCore{ctx: ctx, box: created, cancel: cancel, traffic: traffic, listeners: sbInbounds(text), label: sbFlavor(text)}
+	core := &sbCore{ctx: ctx, box: created, cancel: cancel, tunAttachable: tunAttachable, traffic: traffic, listeners: sbInbounds(text), label: sbFlavor(text)}
 	sbMu.Lock()
 	sbNextID++
 	id := sbNextID
@@ -378,17 +404,28 @@ func sb_set_log(fn C.sb_log_fn, gate C.int) {
 	sbLogMu.Unlock()
 }
 
+//export sb_set_tun_log
+func sb_set_tun_log(fn C.sb_log_fn, gate C.int) {
+	sbLogMu.Lock()
+	sbTunLogFn, sbTunLogGate = fn, int(gate)
+	sbLogMu.Unlock()
+}
+
 //export sb_string_free
 func sb_string_free(value *C.char) {
 	C.free(unsafe.Pointer(value))
 }
 
-// sbPlatformWriter forwards sing-box's log lines to the host sink, including
-// the ones the console writer filters out by level.
-type sbPlatformWriter struct{}
+// sbPlatformWriter forwards one box's logs to either the regular core sink or
+// the independent TUN sink. The role is fixed when that box is created.
+type sbPlatformWriter struct{ tun bool }
 
-func (sbPlatformWriter) WriteMessage(level sblog.Level, message string) {
-	sbEmit(sbLevel(level), message)
+func (writer sbPlatformWriter) WriteMessage(level sblog.Level, message string) {
+	if writer.tun {
+		sbTunEmit(sbLevel(level), message)
+	} else {
+		sbEmit(sbLevel(level), message)
+	}
 }
 
 func sbLevel(level sblog.Level) int {
@@ -418,6 +455,18 @@ func sbEmit(level int, text string) {
 	C.sb_invoke_log(fn, C.int(level), msg)
 }
 
+func sbTunEmit(level int, text string) {
+	sbLogMu.Lock()
+	fn, gate := sbTunLogFn, sbTunLogGate
+	sbLogMu.Unlock()
+	if fn == nil || level > gate {
+		return
+	}
+	msg := C.CString(strings.TrimRight(text, "\n"))
+	defer C.free(unsafe.Pointer(msg))
+	C.sb_invoke_log(fn, C.int(level), msg)
+}
+
 // Attached TUN components use the existing box's service context and logging,
 // but a private routing/outbound namespace. No proxy-listener rules are changed.
 type sbTunAttachment struct {
@@ -438,24 +487,41 @@ func sbCloseTunLocked(parent uint64) {
 
 //export sb_tun_start
 func sb_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
+	var scope *adapter.Scope
+	owned := false
+	locked := false
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = C.CString(fmt.Sprintf("sing-box TUN panic: %v\n%s", failure, debug.Stack()))
+		}
+		if locked {
+			sbMu.Unlock()
+		}
+		if !owned && scope != nil {
+			_ = scope.Close()
+		}
+	}()
 	if text == nil || handle == nil {
 		return C.CString("missing sing-box TUN arguments")
 	}
 	*handle = 0
 	sbMu.Lock()
-	// Deterministic selection also works when this core is an intermediate
+	locked = true
+	// Attach only to a regular session core. The synthetic DNS-only
+	// destination-router box has services but no session proxy topology.
+	// Deterministic selection also works when a session core is an intermediate
 	// chain hop: the private TUN exit still targets the final session SOCKS.
 	var parent uint64
-	for id := range sbCores {
-		if parent == 0 || id < parent {
+	for id, core := range sbCores {
+		if core.tunAttachable && (parent == 0 || id < parent) {
 			parent = id
 		}
 	}
 	if parent == 0 {
+		locked = false
 		sbMu.Unlock()
-		return sb_start(text, handle)
+		return sbStartRole(text, handle, false, true)
 	}
-	defer sbMu.Unlock()
 	base := sbCores[parent]
 	ctx := service.ExtendContext(base.ctx)
 	ctx, clean, err := sbMobileContext(ctx, C.GoString(text))
@@ -470,16 +536,7 @@ func sb_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 		return C.CString("invalid sing-box TUN attachment")
 	}
 	logger := base.box.LogFactory().NewLogger("fcae-tun")
-	scope := adapter.NewScope(ctx, logger)
-	owned := false
-	defer func() {
-		if failure := recover(); failure != nil {
-			result = C.CString(fmt.Sprintf("sing-box TUN panic: %v", failure))
-		}
-		if !owned {
-			_ = scope.Close()
-		}
-	}()
+	scope = adapter.NewScope(ctx, logger)
 	ctx = scope.Context()
 	endpoint := sbendpoint.NewManager(service.FromContext[adapter.EndpointRegistry](ctx))
 	inbound := sbinbound.NewManager(service.FromContext[adapter.InboundRegistry](ctx), endpoint)

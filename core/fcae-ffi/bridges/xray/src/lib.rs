@@ -30,6 +30,7 @@ extern "C" {
     fn xray_string_free(value: *mut c_char);
     fn xray_stats(handle: u64, uplink: *mut i64, downlink: *mut i64) -> c_int;
     fn xray_set_log(sink: LogSink, gate: c_int);
+    fn xray_set_tun_log(sink: LogSink, gate: c_int);
     fn xray_listeners(buf: *mut c_char, capacity: c_int) -> c_int;
 }
 
@@ -39,6 +40,19 @@ type LogSink = Option<unsafe extern "C" fn(c_int, *const c_char)>;
 /// Receives the core's log lines and hands them to the app console.
 unsafe extern "C" fn log_sink(level: c_int, message: *const c_char) {
     fcae_runtime::proxy_cores::forward_log("xray", level, message);
+}
+
+unsafe extern "C" fn tun_log_sink(level: c_int, message: *const c_char) {
+    fcae_runtime::proxy_cores::forward_log("xray-tun", level, message);
+}
+
+fn tun_log_gate(level: u8) -> c_int {
+    match level {
+        3 => 2,
+        4 => 3,
+        5 => 4,
+        _ => 1,
+    }
 }
 
 pub struct XrayDialect;
@@ -159,4 +173,12 @@ pub fn register() {
     fcae_runtime::registry::register(FcaeBackend::Xray, || Arc::new(XrayBackend));
 }
 
-pub fn tun_ffi()->CoreFfi {CoreFfi{start:xray_tun_start,stop:xray_tun_stop,running:xray_tun_running,..XrayDialect::FFI}}
+pub fn tun_ffi(tun_log_level: u8) -> CoreFfi {
+    unsafe { xray_set_tun_log(Some(tun_log_sink), tun_log_gate(tun_log_level)); }
+    CoreFfi {
+        start: xray_tun_start,
+        stop: xray_tun_stop,
+        running: xray_tun_running,
+        ..XrayDialect::FFI
+    }
+}

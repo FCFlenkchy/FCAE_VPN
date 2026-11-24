@@ -11,9 +11,9 @@ void ios_vpn_poll();
 static id<MTLDevice> metal;
 static AndroidImGuiInput* text_input = nullptr;
 struct Texture { id<MTLTexture> image; uint64_t generation=0; int width=0,height=0; };
-static Texture textures[3];
+static Texture textures[4];
 ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint64_t generation,int slot) {
-    if (!rgba || width<=0 || height<=0 || slot<0 || slot>=3) return 0;
+    if (!rgba || width<=0 || height<=0 || slot<0 || slot>=4) return 0;
     auto& texture=textures[slot];
     if (!texture.image || width!=texture.width || height!=texture.height) {
         auto* descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];

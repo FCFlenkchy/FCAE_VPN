@@ -77,9 +77,9 @@ static constexpr double kHiddenWakeSeconds = 1.0;
 //
 // ui_render.cpp only ever sees an opaque ImTextureID. The Metal renderer
 // resolves that ID to a texture with `(__bridge id<MTLTexture>)(void*)tex_id`,
-// so the ID is the MTLTexture pointer itself. Three slots, exactly as the
-// OpenGL and D3D11 hosts had: sponsor foreground, sponsor background, Firefox
-// CAPTCHA. Called from the UI thread only.
+// so the ID is the MTLTexture pointer itself. Four slots, exactly as the
+// OpenGL and D3D11 hosts use: sponsor foreground, sponsor background, Firefox
+// CAPTCHA and the mountain background. Called from the UI thread only.
 // ---------------------------------------------------------------------------
 
 struct MetalTextureSlot {
@@ -119,7 +119,7 @@ ImTextureID app_routing_icon(const std::string& executable){
 }
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
-    const int index = (slot >= 0 && slot < 3) ? slot : 0;
+    const int index = (slot >= 0 && slot < 4) ? slot : 0;
     MetalTextureSlot& entry = g_slots[index];
     if (!rgba || width <= 0 || height <= 0 || g_device == nil) return (ImTextureID)0;
     if (entry.texture != nil && entry.loaded == generation) {
@@ -154,7 +154,7 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
 
 static void release_sponsor_textures(void) {
     release_app_icons();
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         [g_slots[i].texture release];
         g_slots[i].texture = nil;
         g_slots[i].loaded = 0;

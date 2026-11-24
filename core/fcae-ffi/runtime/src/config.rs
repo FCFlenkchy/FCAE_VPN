@@ -216,28 +216,36 @@ pub const DEFAULT_TCP_BUFFER: u32 = 256000;
 pub const MIN_TCP_BUFFER: u32 = 4 * 1024;
 pub const MAX_TCP_BUFFER: u32 = 4 * 1024 * 1024;
 
-/// Verbosity of the tun2socks data plane (bridge + gVisor netstack logs).
-/// Values mirror the `FcaeT2sLog` ABI enum: 0 = unset (treated as silent),
-/// then silent/error/warn/info/debug. Silent still lets through rare error-level
-/// bridge lines but suppresses the per-flow and per-query chatter.
-pub const T2S_LOG_DEFAULT: u8 = 0;
-pub const T2S_LOG_SILENT: u8 = 1;
-pub const T2S_LOG_ERROR: u8 = 2;
-pub const T2S_LOG_WARN: u8 = 3;
-pub const T2S_LOG_INFO: u8 = 4;
-pub const T2S_LOG_DEBUG: u8 = 5;
+/// Verbosity of the selected TUN data plane, not the proxy/protocol core.
+/// Values mirror the historical `FcaeT2sLog` ABI slot: 0 = default (silent),
+/// then silent/error/warn/info/debug. The old field name is retained in the C
+/// ABI for layout/source compatibility; the setting now applies to every TUN
+/// engine that exposes an independent logger.
+pub const TUN_LOG_DEFAULT: u8 = 0;
+pub const TUN_LOG_SILENT: u8 = 1;
+pub const TUN_LOG_ERROR: u8 = 2;
+pub const TUN_LOG_WARN: u8 = 3;
+pub const TUN_LOG_INFO: u8 = 4;
+pub const TUN_LOG_DEBUG: u8 = 5;
+
+// Historical Rust constant aliases retained for downstream source compatibility.
+pub const T2S_LOG_DEFAULT: u8 = TUN_LOG_DEFAULT;
+pub const T2S_LOG_SILENT: u8 = TUN_LOG_SILENT;
+pub const T2S_LOG_ERROR: u8 = TUN_LOG_ERROR;
+pub const T2S_LOG_WARN: u8 = TUN_LOG_WARN;
+pub const T2S_LOG_INFO: u8 = TUN_LOG_INFO;
+pub const T2S_LOG_DEBUG: u8 = TUN_LOG_DEBUG;
 
 impl TunConfig {
-    /// The tun2socks log-level string for `t2s_start`. `0` (the default)
-    /// resolves to silent; the `FCAE_TUN2SOCKS_LOG` env var remains as an
-    /// out-of-band debugging override on top of the default only.
-    pub fn t2s_log_str(&self) -> String {
-        match self.t2s_log_level {
-            T2S_LOG_SILENT => "silent".to_string(),
-            T2S_LOG_ERROR => "error".to_string(),
-            T2S_LOG_WARN => "warn".to_string(),
-            T2S_LOG_INFO => "info".to_string(),
-            T2S_LOG_DEBUG => "debug".to_string(),
+    /// tun2socks-specific spelling used by `t2s_start`. The legacy
+    /// `FCAE_TUN2SOCKS_LOG` override still applies only to this engine.
+    pub fn tun2socks_log_str(&self) -> String {
+        match self.tun_log_level {
+            TUN_LOG_SILENT => "silent".to_string(),
+            TUN_LOG_ERROR => "error".to_string(),
+            TUN_LOG_WARN => "warn".to_string(),
+            TUN_LOG_INFO => "info".to_string(),
+            TUN_LOG_DEBUG => "debug".to_string(),
             _ => {
                 if let Ok(v) = std::env::var("FCAE_TUN2SOCKS_LOG") {
                     let v = v.trim().to_ascii_lowercase();
@@ -247,6 +255,55 @@ impl TunConfig {
                 }
                 "silent".to_string()
             }
+        }
+    }
+
+    /// Xray's native `log.loglevel` value for a TUN-only config.
+    pub fn xray_tun_log_level(&self) -> &'static str {
+        match self.tun_log_level {
+            TUN_LOG_ERROR => "error",
+            TUN_LOG_WARN => "warning",
+            TUN_LOG_INFO => "info",
+            TUN_LOG_DEBUG => "debug",
+            _ => "none",
+        }
+    }
+
+    /// Mihomo's native `log-level` value for a TUN-only config.
+    pub fn mihomo_tun_log_level(&self) -> &'static str {
+        match self.tun_log_level {
+            TUN_LOG_ERROR => "error",
+            TUN_LOG_WARN => "warning",
+            TUN_LOG_INFO => "info",
+            TUN_LOG_DEBUG => "debug",
+            _ => "silent",
+        }
+    }
+
+    /// sing-box's log options for a TUN-only config. `disabled` is separate
+    /// from the core's saved `core.log_level` and avoids relying on its default.
+    pub fn singbox_tun_log_disabled(&self) -> bool {
+        matches!(self.tun_log_level, TUN_LOG_DEFAULT | TUN_LOG_SILENT)
+    }
+
+    pub fn singbox_tun_log_level(&self) -> &'static str {
+        match self.tun_log_level {
+            TUN_LOG_ERROR => "error",
+            TUN_LOG_WARN => "warn",
+            TUN_LOG_INFO => "info",
+            TUN_LOG_DEBUG => "debug",
+            _ => "warn",
+        }
+    }
+
+    /// Host callback gate for engines using the common 1=error..4=debug scale.
+    /// Silent/default still allows errors, matching Zeptun and HEV behaviour.
+    pub fn tun_log_gate(&self) -> i32 {
+        match self.tun_log_level {
+            TUN_LOG_WARN => 2,
+            TUN_LOG_INFO => 3,
+            TUN_LOG_DEBUG => 4,
+            _ => 1,
         }
     }
 }
@@ -298,9 +355,9 @@ pub struct TunConfig {
     pub tcp_sndbuf: u32,
     pub tcp_rcvbuf: u32,
     pub tcp_auto_tuning: bool,
-    /// tun2socks log verbosity: one of the T2S_LOG_* values (0 = default/silent).
-    /// The zeptun engine maps the same knob onto its own log tiers.
-    pub t2s_log_level: u8,
+    /// Independent TUN data-plane log verbosity (legacy ABI slot; 0 = default/silent).
+    /// This never changes the proxy-core/protocol log level.
+    pub tun_log_level: u8,
     pub name: String,
     pub mtu: u32,
     pub ipv4: String,
@@ -325,7 +382,7 @@ impl Default for TunConfig {
             // default on every platform and opt-in from both UIs.
             tcp_auto_tuning: false,
             engine: TunEngine::Tun2socks,
-            t2s_log_level: T2S_LOG_DEFAULT,
+            tun_log_level: TUN_LOG_DEFAULT,
             name: "FCAE_VPN".into(),
             exclude_private: true,
             mtu: 1500,
@@ -1535,11 +1592,11 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         // Private ranges stay off the device unless the host asks for them:
         // the bit is "route them in", so an absent bit is the default.
         exclude_private: raw._reserved[0] & FCAE_CONFIG_TUN_ROUTE_PRIVATE == 0,
-        t2s_log_level: match raw.tun2socks_log_level {
+        tun_log_level: match raw.tun2socks_log_level {
             v @ 0..=5 => v as u8,
             _ => {
                 return Err(CoreError::InvalidConfig(
-                    "tun2socks_log_level must be 0..=5 (0=default/silent, 5=debug)".into(),
+                    "TUN engine log level must be 0..=5 (0=default/silent, 5=debug)".into(),
                 ))
             }
         },
@@ -2192,6 +2249,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tun_log_levels_map_to_native_engine_schemas_without_reusing_core_log_level() {
+        let mut tun = TunConfig::default();
+        assert_eq!(tun.xray_tun_log_level(), "none");
+        assert_eq!(tun.mihomo_tun_log_level(), "silent");
+        assert!(tun.singbox_tun_log_disabled());
+        assert_eq!(tun.tun_log_gate(), 1);
+
+        tun.tun_log_level = TUN_LOG_ERROR;
+        assert_eq!(tun.xray_tun_log_level(), "error");
+        assert_eq!(tun.mihomo_tun_log_level(), "error");
+        assert_eq!(tun.singbox_tun_log_level(), "error");
+        assert!(!tun.singbox_tun_log_disabled());
+        assert_eq!(tun.tun_log_gate(), 1);
+
+        tun.tun_log_level = TUN_LOG_WARN;
+        assert_eq!(tun.xray_tun_log_level(), "warning");
+        assert_eq!(tun.mihomo_tun_log_level(), "warning");
+        assert_eq!(tun.singbox_tun_log_level(), "warn");
+        assert_eq!(tun.tun_log_gate(), 2);
+
+        tun.tun_log_level = TUN_LOG_INFO;
+        assert_eq!(tun.xray_tun_log_level(), "info");
+        assert_eq!(tun.mihomo_tun_log_level(), "info");
+        assert_eq!(tun.singbox_tun_log_level(), "info");
+        assert_eq!(tun.tun_log_gate(), 3);
+
+        tun.tun_log_level = TUN_LOG_DEBUG;
+        assert_eq!(tun.xray_tun_log_level(), "debug");
+        assert_eq!(tun.mihomo_tun_log_level(), "debug");
+        assert_eq!(tun.singbox_tun_log_level(), "debug");
+        assert_eq!(tun.tun_log_gate(), 4);
+    }
+
+    #[test]
     fn wintun_guid_text_and_windows_identity_match() {
         let digits = WINTUN_ADAPTER_GUID.replace('-', "");
         assert_eq!(u128::from_str_radix(&digits, 16).unwrap(), WINTUN_ADAPTER_GUID_U128);
@@ -2403,7 +2494,7 @@ mod tests {
         assert_eq!(cfg.tun.tcp_rcvbuf, 256000);
         // 0 = default: auto-tuning is now OFF unless explicitly enabled.
         assert!(!cfg.tun.tcp_auto_tuning);
-        assert_eq!(cfg.tun.t2s_log_level, T2S_LOG_DEFAULT);
+        assert_eq!(cfg.tun.tun_log_level, TUN_LOG_DEFAULT);
         raw.tun_tcp_sndbuf = 256 * 1024;
         raw.tun_tcp_rcvbuf = 512 * 1024;
         raw.tun_tcp_auto_tuning = 2;
@@ -2416,8 +2507,8 @@ mod tests {
         raw.tun_tcp_auto_tuning = 3;
         assert!(unsafe { parse(&raw) }.is_err());
         raw.tun_tcp_auto_tuning = 0;
-        raw.tun2socks_log_level = T2S_LOG_DEBUG as u64;
-        assert_eq!(unsafe { parse(&raw) }.unwrap().tun.t2s_log_level, T2S_LOG_DEBUG);
+        raw.tun2socks_log_level = TUN_LOG_DEBUG as u64;
+        assert_eq!(unsafe { parse(&raw) }.unwrap().tun.tun_log_level, TUN_LOG_DEBUG);
         raw.tun2socks_log_level = 6;
         assert!(unsafe { parse(&raw) }.is_err());
         raw.tun2socks_log_level = 0;

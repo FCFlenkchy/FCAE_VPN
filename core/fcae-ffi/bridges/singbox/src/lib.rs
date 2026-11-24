@@ -27,12 +27,14 @@ extern "C" {
     fn sb_tun_stop(handle:u64);
     fn sb_tun_running(handle:u64)->c_int;
     fn sb_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
+    fn sb_destination_start(config: *const c_char, handle: *mut u64) -> *mut c_char;
     fn sb_stop(handle: u64);
     fn sb_stop_all();
     fn sb_running(handle: u64) -> c_int;
     fn sb_string_free(value: *mut c_char);
     fn sb_stats(handle: u64, uplink: *mut i64, downlink: *mut i64) -> c_int;
     fn sb_set_log(sink: LogSink, gate: c_int);
+    fn sb_set_tun_log(sink: LogSink, gate: c_int);
     fn sb_listeners(buf: *mut c_char, capacity: c_int) -> c_int;
 }
 
@@ -42,6 +44,23 @@ type LogSink = Option<unsafe extern "C" fn(c_int, *const c_char)>;
 /// Receives the core's log lines and hands them to the app console.
 unsafe extern "C" fn log_sink(level: c_int, message: *const c_char) {
     fcae_runtime::proxy_cores::forward_log("sing-box", level, message);
+}
+
+unsafe extern "C" fn tun_log_sink(level: c_int, message: *const c_char) {
+    fcae_runtime::proxy_cores::forward_log("sing-box-tun", level, message);
+}
+
+fn tun_log_gate(level: u8) -> c_int {
+    match level {
+        3 => 2,
+        4 => 3,
+        5 => 4,
+        _ => 1,
+    }
+}
+
+pub fn set_tun_log(tun_log_level: u8) {
+    unsafe { sb_set_tun_log(Some(tun_log_sink), tun_log_gate(tun_log_level)); }
 }
 
 pub struct SingBoxDialect;
@@ -155,4 +174,12 @@ pub fn register() {
     fcae_runtime::registry::register(FcaeBackend::SingBox, || Arc::new(SingBoxBackend));
 }
 
-pub fn tun_ffi()->CoreFfi {CoreFfi{start:sb_tun_start,stop:sb_tun_stop,running:sb_tun_running,..SingBoxDialect::FFI}}
+pub fn tun_ffi(tun_log_level: u8) -> CoreFfi {
+    set_tun_log(tun_log_level);
+    CoreFfi {
+        start: sb_tun_start,
+        stop: sb_tun_stop,
+        running: sb_tun_running,
+        ..SingBoxDialect::FFI
+    }
+}

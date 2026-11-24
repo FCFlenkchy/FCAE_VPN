@@ -183,17 +183,17 @@ fn configuration(
     }
     Ok(match cfg.tun.engine {
         TunEngine::MetaSingTun => {
-            json!({"fd":fd,"name":"fcae-mobile","mtu":cfg.tun.mtu,"addresses":addresses,"socks":socks.to_string(),"udp":udp})
+            json!({"fd":fd,"name":"fcae-mobile","mtu":cfg.tun.mtu,"addresses":addresses,"socks":socks.to_string(),"udp":udp,"fcae-tun-log-level":cfg.tun.tun_log_level})
         }
         TunEngine::SingBox => {
             let mut outbound = json!({"tag":"fcae-mobile-exit","type":"socks","server":socks.ip().to_string(),"server_port":socks.port(),"version":"5"});
             if !udp {
                 outbound["network"] = json!("tcp");
             }
-            json!({"fcae-mobile-fd":fd,"log":{"level":"warn"},"inbounds":[{"type":"tun","tag":"fcae-mobile-tun","interface_name":"fcae-mobile","mtu":cfg.tun.mtu,"address":addresses,"auto_route":false,"auto_redirect":false,"stack":"gvisor","dns_mode":"disabled"}],"outbounds":[outbound],"route":{"final":"fcae-mobile-exit","auto_detect_interface":false,"find_process":false}})
+            json!({"fcae-mobile-fd":fd,"log":{"disabled":cfg.tun.singbox_tun_log_disabled(),"level":cfg.tun.singbox_tun_log_level()},"inbounds":[{"type":"tun","tag":"fcae-mobile-tun","interface_name":"fcae-mobile","mtu":cfg.tun.mtu,"address":addresses,"auto_route":false,"auto_redirect":false,"stack":"gvisor","dns_mode":"disabled"}],"outbounds":[outbound],"route":{"final":"fcae-mobile-exit","auto_detect_interface":false,"find_process":false}})
         }
         TunEngine::Xray => {
-            json!({"fcae-mobile-fd":fd,"log":{"loglevel":"warning"},"inbounds":[{"tag":"fcae-native-tun","protocol":"tun","settings":{"name":"fcae-mobile","mtu":cfg.tun.mtu,"gateway":addresses,"autoOutboundsInterface":"","autoSystemRoutingTable":[],"autoSystemDnsToGateway":false}}],"outbounds":[{"tag":"fcae-native-exit","protocol":"socks","settings":{"servers":[{"address":socks.ip().to_string(),"port":socks.port()}]}}],"routing":{"rules":[{"type":"field","inboundTag":["fcae-native-tun"],"outboundTag":"fcae-native-exit"}]}})
+            json!({"fcae-mobile-fd":fd,"log":{"loglevel":cfg.tun.xray_tun_log_level()},"inbounds":[{"tag":"fcae-native-tun","protocol":"tun","settings":{"name":"fcae-mobile","mtu":cfg.tun.mtu,"gateway":addresses,"autoOutboundsInterface":"","autoSystemRoutingTable":[],"autoSystemDnsToGateway":false}}],"outbounds":[{"tag":"fcae-native-exit","protocol":"socks","settings":{"servers":[{"address":socks.ip().to_string(),"port":socks.port()}]}}],"routing":{"rules":[{"type":"field","inboundTag":["fcae-native-tun"],"outboundTag":"fcae-native-exit"}]}})
         }
         TunEngine::Mihomo => {
             let mut rules = Vec::new();
@@ -201,7 +201,7 @@ fn configuration(
                 rules.push("NETWORK,udp,REJECT");
             }
             rules.push("MATCH,fcae-tun-exit");
-            json!({"fcae-mobile-fd":fd,"fcae-tun-addresses":addresses,"mode":"rule","log-level":"warning","ipv6":cfg.tun.ipv6.is_some(),"find-process-mode":"off","profile":{"store-selected":false,"store-fake-ip":false},"dns":{"enable":false},"tun":{"enable":true,"device":"fcae-mobile","stack":"gvisor","dns-mode":"disabled","mtu":cfg.tun.mtu,"auto-route":false,"auto-redirect":false,"auto-detect-interface":false,"file-descriptor":fd,"recvmsgx":false,"sendmsgx":false},"proxies":[{"name":"fcae-tun-direct","type":"direct"},{"name":"fcae-tun-exit","type":"socks5","server":socks.ip().to_string(),"port":socks.port(),"udp":udp}],"rules":rules})
+            json!({"fcae-mobile-fd":fd,"fcae-tun-addresses":addresses,"mode":"rule","log-level":cfg.tun.mihomo_tun_log_level(),"ipv6":cfg.tun.ipv6.is_some(),"find-process-mode":"off","profile":{"store-selected":false,"store-fake-ip":false},"dns":{"enable":false},"tun":{"enable":true,"device":"fcae-mobile","stack":"gvisor","dns-mode":"disabled","mtu":cfg.tun.mtu,"auto-route":false,"auto-redirect":false,"auto-detect-interface":false,"file-descriptor":fd,"recvmsgx":false,"sendmsgx":false},"proxies":[{"name":"fcae-tun-direct","type":"direct"},{"name":"fcae-tun-exit","type":"socks5","server":socks.ip().to_string(),"port":socks.port(),"udp":udp}],"rules":rules})
         }
         _ => {
             return Err(CoreError::InvalidConfig(

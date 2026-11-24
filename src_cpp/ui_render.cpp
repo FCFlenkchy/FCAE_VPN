@@ -2148,13 +2148,10 @@ void ui_init() {
     });
 }
 
-#if __has_include("mountain_png.h")
 #include "mountain_png.h"
-#endif
 
 static bool draw_mountain_background(const ImGuiIO& io) {
     if (strcmp(g_app.background_mode, "mountain") != 0) return false;
-#if __has_include("mountain_png.h")
     static std::vector<uint8_t> s_mountain_rgba;
     static int s_mountain_w = 0;
     static int s_mountain_h = 0;
@@ -2194,7 +2191,6 @@ static bool draw_mountain_background(const ImGuiIO& io) {
             return true;
         }
     }
-#endif
     return false;
 }
 
@@ -2207,7 +2203,6 @@ static void render_startup_shell(bool failed) {
     ImGui::Begin("##FCAE", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-    if (has_bg) ImGui::PopStyleColor();
     if (has_bg) ImGui::PopStyleColor();
     ImGui::Text("FCAE VPN");
     ImGui::SameLine();
@@ -2224,6 +2219,7 @@ static void render_startup_shell(bool failed) {
 }
 
 void ui_frame() {
+    const ImGuiIO& io = ImGui::GetIO();
     // An elevation hand-off is armed on a worker and has to be finished on this
     // thread. This is the only place that keeps running: the old single call
     // site was inside the CONNECT click handler, one instant after arming the
@@ -2270,7 +2266,13 @@ void ui_frame() {
     // The real UI from the first frame; engine-dependent actions gate
     // themselves on Ready inside render_ui() instead of blocking everything
     // behind the INITIALIZING shell.
+    const bool has_background = draw_mountain_background(io);
+    if (has_background) {
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.12f, 0.52f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.14f, 0.70f));
+    }
     render_ui();
+    if (has_background) ImGui::PopStyleColor(2);
 
     // The connect/scan spinner keeps requesting frames while it moves; every
     // other repaint is gated on content changes in ui_should_render().
@@ -4263,8 +4265,8 @@ static std::atomic<int> s_tray_toggle_requested{0};
 // 0: none, 1: stop, 2: start. Preserve the action the menu displayed.
 static std::atomic<int> s_tray_tun_requested{0};
 void ui_request_tray_toggle(int action) {
-    // Both the request and the next frame execute on the window thread.
-    // Refresh telemetry first so a hidden window does not act on stale state.
+    // The window thread consumes this even while the main window is hidden.
+    // Refresh telemetry first so the action is checked against current state.
     g_app.last_telem_t = 0;
     s_tray_toggle_requested.store(action, std::memory_order_release);
     ui_request_redraw();
@@ -4273,6 +4275,10 @@ void ui_request_tray_tun_control(bool resume) {
     g_app.last_telem_t = 0;
     s_tray_tun_requested.store(resume ? 2 : 1, std::memory_order_release);
     ui_request_redraw();
+}
+bool ui_tray_action_pending() {
+    return s_tray_toggle_requested.load(std::memory_order_acquire) != 0
+        || s_tray_tun_requested.load(std::memory_order_acquire) != 0;
 }
 #endif
 
@@ -4507,8 +4513,9 @@ void render_ui() {
         const bool tray_state_matches = tray_action == 1 ? !show_disconnect && !errored
             : tray_action == 2 ? show_disconnect && !errored
             : tray_action == 3 ? errored : false;
-        const bool tray_toggle = tray_state_matches && !connect_disabled
-            && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+        // An OS tray-menu selection is an explicit command, independent of any
+        // modal that happened to be open in the hidden main window.
+        const bool tray_toggle = tray_state_matches && !connect_disabled;
 #else
         const bool tray_toggle = false;
 #endif
@@ -4899,8 +4906,7 @@ void render_ui() {
 #ifdef _WIN32
         const int tray_tun_request = s_tray_tun_requested.exchange(0, std::memory_order_acq_rel);
         const bool tray_tun_allowed = show_tun_control && !startup
-            && !s_elevation_pending.load(std::memory_order_acquire)
-            && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+            && !s_elevation_pending.load(std::memory_order_acquire);
 #else
         const int tray_tun_request = 0;
         const bool tray_tun_allowed = false;
@@ -5823,6 +5829,8 @@ void render_ui() {
                 if (t2s_pos > 4) t2s_pos = 4;
                 if (ImGui::Combo("TUN engine log", &t2s_pos, t2s_logs, 5))
                     g_app.t2s_log = t2s_pos + 1;
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+                    ImGui::SetTooltip("Independent of proxy-core logging. A native TUN engine that attaches to the same already-running core may still share that core's logger.");
 
                 ImGui::Spacing();
                 ImGui::Text("TUN DNS (comma-separated IP addresses)");

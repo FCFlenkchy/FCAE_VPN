@@ -75,7 +75,7 @@ static int sponsor_height[4] = {};
 
 static void release_cached_visuals() {
     release_app_icons();
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         if (sponsor_textures[i]) glDeleteTextures(1, &sponsor_textures[i]);
         sponsor_textures[i] = 0;
         sponsor_loaded[i] = 0;
@@ -84,7 +84,7 @@ static void release_cached_visuals() {
 }
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
-    const int index = slot >= 0 && slot < 3 ? slot : 0;
+    const int index = slot >= 0 && slot < 4 ? slot : 0;
     GLuint& texture = sponsor_textures[index];
     if (!rgba || width <= 0 || height <= 0) return (ImTextureID)0;
     if (!texture) {

@@ -47,7 +47,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use fcae_runtime::backend::CancelToken;
-use fcae_runtime::config::{SessionConfig, T2S_LOG_DEBUG, T2S_LOG_ERROR, T2S_LOG_INFO, T2S_LOG_WARN, T2S_LOG_SILENT};
+use fcae_runtime::config::{SessionConfig, TUN_LOG_DEBUG, TUN_LOG_ERROR, TUN_LOG_INFO, TUN_LOG_WARN, TUN_LOG_SILENT};
 use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::session::TunBridge;
 use parking_lot::Mutex;
@@ -267,14 +267,14 @@ fn zeptun_err(context: &str, code: c_int) -> CoreError {
     CoreError::Internal(format!("[zeptun] {context} failed ({code}): {msg}"))
 }
 
-fn zeptun_log_level(t2s_level: u8) -> u32 {
-    match t2s_level {
+fn zeptun_log_level(tun_level: u8) -> u32 {
+    match tun_level {
         // zeptun's quietest tier is ERROR: it has no OFF, since ERROR covers
         // only hard failures — the same contract tun2socks' "silent" keeps.
-        T2S_LOG_SILENT | T2S_LOG_ERROR => ZEPTUN_LOG_ERROR,
-        T2S_LOG_WARN => ZEPTUN_LOG_WARN,
-        T2S_LOG_INFO => ZEPTUN_LOG_INFO,
-        T2S_LOG_DEBUG => ZEPTUN_LOG_DEBUG,
+        TUN_LOG_SILENT | TUN_LOG_ERROR => ZEPTUN_LOG_ERROR,
+        TUN_LOG_WARN => ZEPTUN_LOG_WARN,
+        TUN_LOG_INFO => ZEPTUN_LOG_INFO,
+        TUN_LOG_DEBUG => ZEPTUN_LOG_DEBUG,
         _ => ZEPTUN_LOG_ERROR,
     }
 }
@@ -543,7 +543,7 @@ impl ZeptunBridge {
         set_c_str(&mut config.socks5_server, &socks.to_string())?;
         config.socks5_udp = u8::from(endpoints.udp || psiphon_adapter.is_some());
         config.socks5_pipeline = ZEPTUN_SOCKS5_PIPELINE_AUTO;
-        config.log_level = zeptun_log_level(cfg.tun.t2s_log_level);
+        config.log_level = zeptun_log_level(cfg.tun.tun_log_level);
         WORKER_FAILED.store(false, Ordering::SeqCst);
         self.install_log_hook(config.log_level)?;
 

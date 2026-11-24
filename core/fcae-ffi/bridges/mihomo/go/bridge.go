@@ -65,14 +65,12 @@ var mihomoInbounds []coreListener
 var mihomoLogMu sync.RWMutex
 var mihomoSink C.mihomo_log_fn
 var mihomoGate int
+var mihomoTunSink C.mihomo_log_fn
+var mihomoTunGate int
+var mihomoTunLogActive bool
 var mihomoLogOnce sync.Once
 
-//export mihomo_set_log
-func mihomo_set_log(sink C.mihomo_log_fn, gate C.int) {
-	mihomoLogMu.Lock()
-	mihomoSink = sink
-	mihomoGate = int(gate)
-	mihomoLogMu.Unlock()
+func mihomoEnsureLogSubscription() {
 	mihomoLogOnce.Do(func() {
 		subscription := mlog.Subscribe()
 		go func() {
@@ -88,15 +86,44 @@ func mihomo_set_log(sink C.mihomo_log_fn, gate C.int) {
 				}
 				mihomoLogMu.RLock()
 				callback, gate := mihomoSink, mihomoGate
+				tunCallback, tunGate, tunActive := mihomoTunSink, mihomoTunGate, mihomoTunLogActive
 				mihomoLogMu.RUnlock()
-				if callback != nil && level <= gate {
+				// A standalone TUN owns its log stream. Do not also route it
+				// through a generic sink left registered by a previous core session;
+				// TUN attached to an existing Mihomo core never sets tunActive.
+				toTun := tunActive && tunCallback != nil && level <= tunGate
+				toCore := !tunActive && callback != nil && level <= gate
+				if toCore || toTun {
 					text := C.CString(event.Payload)
-					C.mihomo_invoke_log(callback, C.int(level), text)
+					if toCore {
+						C.mihomo_invoke_log(callback, C.int(level), text)
+					}
+					if toTun {
+						C.mihomo_invoke_log(tunCallback, C.int(level), text)
+					}
 					C.free(unsafe.Pointer(text))
 				}
 			}
 		}()
 	})
+}
+
+//export mihomo_set_log
+func mihomo_set_log(sink C.mihomo_log_fn, gate C.int) {
+	mihomoLogMu.Lock()
+	mihomoSink = sink
+	mihomoGate = int(gate)
+	mihomoLogMu.Unlock()
+	mihomoEnsureLogSubscription()
+}
+
+//export mihomo_set_tun_log
+func mihomo_set_tun_log(sink C.mihomo_log_fn, gate C.int) {
+	mihomoLogMu.Lock()
+	mihomoTunSink = sink
+	mihomoTunGate = int(gate)
+	mihomoLogMu.Unlock()
+	mihomoEnsureLogSubscription()
 }
 
 //export mihomo_set_home
@@ -253,6 +280,9 @@ func mihomoStart(text *C.char, handle *C.uint64_t, allowTun bool) (result *C.cha
 		if error := mihomoOwnTunFd(parsed); error != nil {
 			return error
 		}
+		mihomoLogMu.Lock()
+		mihomoTunLogActive = true
+		mihomoLogMu.Unlock()
 	}
 	executor.ApplyConfig(parsed, true)
 	if allowTun {
@@ -330,6 +360,9 @@ func mihomoCleanup() {
 		listener.Cleanup()
 	}
 	tunnel.OnSuspend()
+	mihomoLogMu.Lock()
+	mihomoTunLogActive = false
+	mihomoLogMu.Unlock()
 	mihomoID = 0
 	mihomoInbounds = nil
 }

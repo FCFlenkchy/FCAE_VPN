@@ -138,13 +138,14 @@ configure_file(
 # Add binary dir to include path so icon.rc can find version_rc.h
 if(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
   include_directories("${CMAKE_BINARY_DIR}")
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mountain.png")
-    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/mountain.png" _mountain_hex HEX)
-    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _mountain_bytes "${_mountain_hex}")
-    file(WRITE "${CMAKE_BINARY_DIR}/mountain_png.h"
-      "#pragma once\nstatic const unsigned char kMountainPng[] = {${_mountain_bytes}};\nstatic const unsigned int kMountainPngSize = sizeof(kMountainPng);\n")
-  endif()
 endif()
+
+set(FCAE_MOUNTAIN_PNG "${CMAKE_SOURCE_DIR}/mountain.png")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FCAE_MOUNTAIN_PNG}")
+file(READ "${FCAE_MOUNTAIN_PNG}" _mountain_hex HEX)
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _mountain_bytes "${_mountain_hex}")
+file(WRITE "${CMAKE_BINARY_DIR}/mountain_png.h"
+  "#pragma once\nstatic const unsigned char kMountainPng[] = {${_mountain_bytes}};\nstatic const unsigned int kMountainPngSize = sizeof(kMountainPng);\n")
 
 # Source files
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/src_cpp/imgui)
@@ -1255,6 +1256,7 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64" OR AETHER_TARGET STREQUAL "ANDROID_ARM
 else()
     set(AETHER_COMPILE_TARGET fcaevpn)
 endif()
+target_include_directories(${AETHER_COMPILE_TARGET} PRIVATE "${CMAKE_BINARY_DIR}")
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${AETHER_COMPILE_TARGET} PRIVATE -O3 -Wall -Wextra -Wpedantic)

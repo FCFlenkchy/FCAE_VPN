@@ -87,7 +87,7 @@ ImTextureID app_routing_icon(const std::string& executable) {
 }
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
-    const int index = slot >= 0 && slot < 3 ? slot : 0;
+    const int index = slot >= 0 && slot < 4 ? slot : 0;
     ID3D11Texture2D*& texture = g_sponsor_textures[index];
     ID3D11ShaderResourceView*& view = g_sponsor_views[index];
     if (!rgba || width <= 0 || height <= 0 || !g_pd3dDevice || !g_pd3dDeviceContext)
@@ -125,7 +125,7 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
 
 static void release_sponsor_textures() {
     release_app_icons();
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         if (g_sponsor_views[i]) { g_sponsor_views[i]->Release(); g_sponsor_views[i] = nullptr; }
         if (g_sponsor_textures[i]) { g_sponsor_textures[i]->Release(); g_sponsor_textures[i] = nullptr; }
         g_sponsor_loaded[i] = 0;
@@ -246,6 +246,10 @@ static void CleanupDeviceD3D();
 
 static constexpr UINT kTrayMessage = WM_APP + 41;
 static constexpr UINT kTrayIconId = 1;
+static const GUID kTrayGuid = {0x8f7f2b6d, 0x41b3, 0x4f25, {0xa1, 0x37, 0x62, 0x8e, 0x5b, 0x22, 0xd9, 0x10}};
+static constexpr wchar_t kInstanceMutexName[] = L"Local\\FCAE.VPN.UI.Singleton.v1";
+static HANDLE g_instance_mutex = nullptr;
+static bool g_instance_mutex_owned = false;
 static UINT g_taskbar_created = 0;
 static bool g_tray_installed = false;
 
@@ -254,7 +258,8 @@ static bool install_tray(HWND window) {
     data.cbSize = sizeof(data);
     data.hWnd = window;
     data.uID = kTrayIconId;
-    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_GUID;
+    data.guidItem = kTrayGuid;
     data.uCallbackMessage = kTrayMessage;
     data.hIcon = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
     if (!data.hIcon) data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
@@ -269,6 +274,8 @@ static void remove_tray(HWND window) {
     data.cbSize = sizeof(data);
     data.hWnd = window;
     data.uID = kTrayIconId;
+    data.uFlags = NIF_GUID;
+    data.guidItem = kTrayGuid;
     Shell_NotifyIconW(NIM_DELETE, &data);
     g_tray_installed = false;
 }
@@ -283,7 +290,7 @@ static void show_tray_menu(HWND window) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     constexpr UINT open_id = 1, toggle_id = 2, exit_id = 3, tun_id = 4;
-    AppendMenuW(menu, MF_STRING, open_id, L"Open FCAE VPN");
+    AppendMenuW(menu, MF_STRING, open_id, L"Open");
     FcaeTelemetry telemetry = {};
     telemetry.struct_size = sizeof(telemetry);
     telemetry.abi_version = FCAE_ABI_VERSION;
@@ -295,14 +302,17 @@ static void show_tray_menu(HWND window) {
     const wchar_t* action = error ? L"Clear error" : active ? L"Disconnect" : L"Connect";
     AppendMenuW(menu, MF_STRING | (ready && have_state ? MF_ENABLED : MF_GRAYED), toggle_id, action);
     const bool tun_paused = ready && fcae_tun_paused();
-    if (g_app.mode == 1) {
+    // AppState's non-atomic settings are published by the initializer before
+    // ui_runtime_ready() becomes true. The tray callback can arrive while the
+    // hidden UI is still starting, so do not read mode before that acquire.
+    if (ready && g_app.mode == 1) {
         const bool tun_control_ready = have_state &&
             (telemetry.state == FCAE_STATE_CONNECTED || tun_paused);
         AppendMenuW(menu, MF_STRING | (tun_control_ready ? MF_ENABLED : MF_GRAYED),
                     tun_id, tun_paused ? L"Start" : L"Stop");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, exit_id, L"Exit FCAE VPN");
+    AppendMenuW(menu, MF_STRING, exit_id, L"Exit");
     POINT point = {};
     GetCursorPos(&point);
     SetForegroundWindow(window);
@@ -313,13 +323,16 @@ static void show_tray_menu(HWND window) {
     PostMessageW(window, WM_NULL, 0, 0);
     if (choice == open_id) show_main_window(window);
     else if (choice == toggle_id) {
-        // The existing UI action owns validation, UAC handoff and cancellation.
-        // Showing it also makes any validation error or consent prompt visible.
-        show_main_window(window);
-        ui_request_tray_toggle(error ? 3 : active ? 2 : 1);
+        const int action = error ? 3 : active ? 2 : 1;
+        // Only surface the window when this Connect needs Windows consent. The
+        // ShellExecuteEx(runAs) handoff itself owns the prompt; ordinary
+        // Connect/Disconnect actions are processed in a hidden logical frame.
+        const bool needs_uac = ready && action == 1 && g_app.mode == 1
+            && !fcae_windows_process_admin(GetCurrentProcess());
+        if (needs_uac) show_main_window(window);
+        ui_request_tray_toggle(action);
     } else if (choice == tun_id) {
-        // Reuse the UI control and re-check the displayed state in its next frame.
-        show_main_window(window);
+        // Start/Stop runs through the same runtime validation without opening UI.
         ui_request_tray_tun_control(tun_paused);
     } else if (choice == exit_id) {
         DestroyWindow(window); // WM_DESTROY exits the loop and runs ui_shutdown.
@@ -329,7 +342,8 @@ static void show_tray_menu(HWND window) {
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (g_taskbar_created && msg == g_taskbar_created) {
         g_tray_installed = false;
-        if (!install_tray(hWnd) && !IsWindowVisible(hWnd)) show_main_window(hWnd);
+        if (g_instance_mutex_owned && !install_tray(hWnd) && !IsWindowVisible(hWnd))
+            show_main_window(hWnd);
         return 0;
     }
     if (msg == kTrayMessage && wParam == kTrayIconId) {
@@ -427,8 +441,14 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
             break;
         case WM_CLOSE:
-            // Keep the session alive, even when disconnected. Never hide the
-            // only window if the notification icon could not be installed.
+            // Keep the session alive, even when disconnected. An elevated
+            // handoff child cannot own the tray until its parent exits.
+            if (!g_instance_mutex_owned) {
+                MessageBoxW(hWnd, L"FCAE is completing its administrator handoff. Please wait a moment.",
+                            L"FCAE VPN", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            // Never hide the only window if the notification icon could not be installed.
             if (g_tray_installed || install_tray(hWnd)) {
                 ShowWindow(hWnd, SW_HIDE);
             } else {
@@ -536,6 +556,7 @@ struct ElevatedWindow {
     RECT bounds = {};
     int show = SW_SHOWNORMAL;
     bool placed = false;
+    bool handoff_child = false;
     ~ElevatedWindow() { if (ready) CloseHandle(ready); }
 };
 
@@ -544,6 +565,7 @@ static bool read_elevated_window(ElevatedWindow& handoff) {
     LPWSTR* args = CommandLineToArgvW(GetCommandLineW(), &count);
     if (!args) return true;
     if (count >= 3 && std::wcscmp(args[1], L"--fcae-wait-parent") == 0) {
+        handoff.handoff_child = true;
         if (!fcae_windows_process_admin(GetCurrentProcess())) {
             LocalFree(args);
             MessageBoxW(nullptr,L"Windows launched the requested administrator instance without administrator rights. FCAE will keep the original window open instead of requesting elevation repeatedly. Check UAC and application compatibility settings (RunAsInvoker), or start FCAE as administrator.",L"FCAE: administrator access was not granted",MB_OK|MB_ICONERROR);
@@ -586,6 +608,47 @@ static bool read_elevated_window(ElevatedWindow& handoff) {
     return true;
 }
 
+static bool claim_single_instance(bool handoff_child) {
+    SetLastError(ERROR_SUCCESS);
+    HANDLE mutex = CreateMutexW(nullptr, handoff_child ? FALSE : TRUE, kInstanceMutexName);
+    if (!mutex) {
+        const DWORD error = GetLastError();
+        wchar_t message[192];
+        std::swprintf(message, 192,
+            L"FCAE could not check for another running window (Windows error %lu).",
+            static_cast<unsigned long>(error));
+        MessageBoxW(nullptr, message, L"FCAE VPN", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    const DWORD creation_error = GetLastError();
+    if (handoff_child) {
+        // The unelevated parent intentionally remains alive until this copy
+        // has initialized. It will transfer the mutex when its window exits.
+        g_instance_mutex = mutex;
+        g_instance_mutex_owned = false;
+        return true;
+    }
+    if (creation_error == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mutex);
+        HWND existing = nullptr;
+        for (int attempt = 0; attempt < 40 && !existing; ++attempt) {
+            existing = FindWindowW(L"FCAE_VPN_CLASS", nullptr);
+            if (!existing) Sleep(50);
+        }
+        if (existing) {
+            show_main_window(existing);
+        } else {
+            MessageBoxW(nullptr,
+                L"FCAE is already starting. Wait for its window, then use the tray icon.",
+                L"FCAE VPN", MB_OK | MB_ICONINFORMATION);
+        }
+        return false;
+    }
+    g_instance_mutex = mutex;
+    g_instance_mutex_owned = true;
+    return true;
+}
+
 // Must match IDI_ICON1 in icon.rc (resource id 101 is conventional for first ICON).
 #ifndef IDI_ICON1
 #define IDI_ICON1 101
@@ -598,6 +661,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     fcae_ui_diagnostic(8, GetCurrentProcessId());
     ElevatedWindow handoff;
     if (!read_elevated_window(handoff)) return ERROR_ELEVATION_REQUIRED;
+    if (!claim_single_instance(handoff.handoff_child)) return 0;
     ui_init();
 
     HINSTANCE inst = hInst ? hInst : GetModuleHandleW(nullptr);
@@ -659,7 +723,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
 
     g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-    install_tray(hWnd);
+    if (!handoff.handoff_child || g_instance_mutex_owned) install_tray(hWnd);
 
     // A worker thread's redraw request must be able to wake this window's
     // message loop, so the window is registered before the loop can park.
@@ -729,6 +793,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     auto next_device_retry = std::chrono::steady_clock::now();
     bool done = false;
     bool sponsor_window_visible = false;
+    bool handoff_ready_sent = false;
     const auto min_frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(UiFrame::interaction_interval));
     auto last_frame_time = std::chrono::steady_clock::now() - min_frame_interval;
@@ -738,12 +803,26 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     constexpr auto interaction_tail   = std::chrono::milliseconds(700);
 
     g_draw_frame = [&] {
+        const bool hidden = IsIconic(hWnd) || !IsWindowVisible(hWnd);
+        const bool hidden_tray_frame = hidden && ui_tray_action_pending();
         if (g_drawing_frame || !g_app.running.load() || !IsWindow(hWnd)
-                || IsIconic(hWnd) || !IsWindowVisible(hWnd)) return;
+                || (hidden && !hidden_tray_frame)) return;
         struct FrameGuard {
             FrameGuard() { g_drawing_frame = true; }
             ~FrameGuard() { g_drawing_frame = false; }
         } guard;
+        if (hidden_tray_frame) {
+            // Tray actions use the normal UI validation/config snapshot, but
+            // do not reveal or present the main window. This small logical
+            // frame also works while the swapchain is occluded or rebuilding.
+            ui_should_render(false); // refresh telemetry/derived controls before consuming the request
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+            ui_frame();
+            ImGui::EndFrame();
+            return;
+        }
         const auto frame_now = std::chrono::steady_clock::now();
         if (g_device_lost) {
             if (frame_now < next_device_retry) return;
@@ -801,6 +880,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                     fcae_ui_diagnostic(12, GetLastError());
                 } else {
                     fcae_ui_diagnostic(13, GetCurrentProcessId());
+                    handoff_ready_sent = true;
                 }
                 CloseHandle(handoff.ready);
                 handoff.ready = nullptr;
@@ -822,7 +902,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     while (!done && g_app.running.load()) {
         const auto loop_now = std::chrono::steady_clock::now();
 
-        // Keep polling while hidden so the next visible frame is fresh.
+        // Hidden windows stay parked; tray actions force a telemetry refresh
+        // before dispatch, and a visibility transition requests a fresh frame.
         bool paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
 
         DWORD timeout;
@@ -872,6 +953,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         // Complete an approved elevation even while minimized or while the
         // content gate has no reason to open another ImGui frame.
         ui_handoff_tick();
+        if (handoff.handoff_child && handoff_ready_sent
+                && !g_instance_mutex_owned && g_instance_mutex) {
+            const DWORD acquired = WaitForSingleObject(g_instance_mutex, 0);
+            if (acquired == WAIT_OBJECT_0 || acquired == WAIT_ABANDONED) {
+                g_instance_mutex_owned = true;
+                handoff.handoff_child = false;
+                install_tray(hWnd);
+            }
+        }
         if (!g_app.running.load() || !IsWindow(hWnd)) break;
         if (got_input) last_input_time = std::chrono::steady_clock::now();
         paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
@@ -884,6 +974,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                 release_sponsor_textures();
                 sponsor_window_visible = false;
             }
+            if (ui_tray_action_pending()) g_draw_frame();
             continue;
         }
         if (!sponsor_window_visible) {
@@ -912,5 +1003,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (IsWindow(hWnd)) DestroyWindow(hWnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
     if (wc.hbrBackground) DeleteObject(wc.hbrBackground);
+    if (g_instance_mutex) {
+        if (g_instance_mutex_owned) ReleaseMutex(g_instance_mutex);
+        CloseHandle(g_instance_mutex);
+        g_instance_mutex = nullptr;
+        g_instance_mutex_owned = false;
+    }
     return 0;
 }

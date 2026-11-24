@@ -73,23 +73,39 @@ func (c *mtunCore) close() {
 
 var mtunLogMu sync.RWMutex
 var mtunLog C.mtun_log_fn
+var mtunLogGate = 1
 
 //export mtun_set_log
-func mtun_set_log(sink C.mtun_log_fn, _ C.int) {
+func mtun_set_log(sink C.mtun_log_fn, gate C.int) {
 	mtunLogMu.Lock()
-	mtunLog = sink
+	mtunLog, mtunLogGate = sink, int(gate)
 	mtunLogMu.Unlock()
 }
 func mtunLogf(level int, format string, args ...any) {
 	mtunLogMu.RLock()
-	sink := mtunLog
+	sink, gate := mtunLog, mtunLogGate
 	mtunLogMu.RUnlock()
-	if sink == nil {
+	if sink == nil || level > gate {
 		return
 	}
 	text := C.CString(fmt.Sprintf(format, args...))
 	defer C.free(unsafe.Pointer(text))
 	C.mtun_emit_log(sink, C.int(level), text)
+}
+
+func mtunLogGateForSetting(level int) (int, bool) {
+	switch level {
+	case 0, 1, 2:
+		return 1, true // default/silent and error: keep only failure diagnostics
+	case 3:
+		return 2, true
+	case 4:
+		return 3, true
+	case 5:
+		return 4, true
+	default:
+		return 0, false
+	}
 }
 
 var mtunMu sync.Mutex
@@ -112,12 +128,21 @@ func mtun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 		Addresses []string        `json:"addresses"`
 		Socks     string          `json:"socks"`
 		UDP       bool            `json:"udp"`
-		FD        *int            `json:"fd"`
-		Routing   json.RawMessage `json:"routing"`
+		FD            *int            `json:"fd"`
+		Routing       json.RawMessage `json:"routing"`
+		TunLogLevel   int             `json:"fcae-tun-log-level"`
 	}
 	if err := json.Unmarshal([]byte(C.GoString(text)), &cfg); err != nil {
 		return C.CString(err.Error())
 	}
+	gate, validLogLevel := mtunLogGateForSetting(cfg.TunLogLevel)
+	if !validLogLevel {
+		return C.CString("sing-tun TUN log level must be 0..5")
+	}
+	mtunLogMu.Lock()
+	mtunLogGate = gate
+	mtunLogMu.Unlock()
+	mtunLogf(3, "startup entered (%s/%s)", runtime.GOOS, runtime.GOARCH)
 	socksAddr, err := netip.ParseAddrPort(cfg.Socks)
 	if err != nil || !socksAddr.Addr().IsLoopback() || socksAddr.Port() == 0 {
 		return C.CString("sing-tun requires the session's loopback SOCKS exit")

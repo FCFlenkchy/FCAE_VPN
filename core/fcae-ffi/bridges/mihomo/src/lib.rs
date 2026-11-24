@@ -31,6 +31,7 @@ extern "C" {
     fn mihomo_string_free(value: *mut c_char);
     fn mihomo_stats(handle: u64, uplink: *mut i64, downlink: *mut i64) -> c_int;
     fn mihomo_set_log(sink: LogSink, gate: c_int);
+    fn mihomo_set_tun_log(sink: LogSink, gate: c_int);
     fn mihomo_listeners(buf: *mut c_char, capacity: c_int) -> c_int;
 }
 
@@ -40,6 +41,19 @@ type LogSink = Option<unsafe extern "C" fn(c_int, *const c_char)>;
 /// Receives the core's log lines and hands them to the app console.
 unsafe extern "C" fn log_sink(level: c_int, message: *const c_char) {
     fcae_runtime::proxy_cores::forward_log("mihomo", level, message);
+}
+
+unsafe extern "C" fn tun_log_sink(level: c_int, message: *const c_char) {
+    fcae_runtime::proxy_cores::forward_log("mihomo-tun", level, message);
+}
+
+fn tun_log_gate(level: u8) -> c_int {
+    match level {
+        3 => 2,
+        4 => 3,
+        5 => 4,
+        _ => 1,
+    }
 }
 
 pub struct MihomoDialect;
@@ -166,7 +180,15 @@ pub fn register() {
     fcae_runtime::registry::register(FcaeBackend::Mihomo, || Arc::new(MihomoBackend));
 }
 
-pub fn tun_ffi()->CoreFfi {CoreFfi{start:mihomo_tun_start,stop:mihomo_tun_stop,running:mihomo_tun_running,..MihomoDialect::FFI}}
+pub fn tun_ffi(tun_log_level: u8) -> CoreFfi {
+    unsafe { mihomo_set_tun_log(Some(tun_log_sink), tun_log_gate(tun_log_level)); }
+    CoreFfi {
+        start: mihomo_tun_start,
+        stop: mihomo_tun_stop,
+        running: mihomo_tun_running,
+        ..MihomoDialect::FFI
+    }
+}
 pub fn prepare_tun(cfg:&fcae_runtime::config::SessionConfig)->Result<()> {
     let home=cfg.data_dir.as_ref().map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("mihomo");
     let home=std::ffi::CString::new(home.to_string_lossy().as_bytes()).map_err(|e|fcae_runtime::CoreError::InvalidConfig(e.to_string()))?;

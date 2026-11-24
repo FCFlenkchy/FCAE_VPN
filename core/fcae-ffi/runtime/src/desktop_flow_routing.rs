@@ -181,6 +181,7 @@ pub fn degraded(revision: u64, message: &str) {
         s.message = format!("Captured-flow routing degraded: {message}; reconnect required.");
     }
 }
+
 impl FlowPolicy {
     /// Re-resolve identities on the supervisor, never on a GUI render frame.
     pub fn resolve(&self) -> Result<Self> {
@@ -252,14 +253,28 @@ impl FlowPolicy {
             .ok_or_else(|| invalid("FCAE executable path must be UTF-8"))?
             .to_owned();
         let own = native_path(own);
-        let mut rules = vec![
-            json!({"ip_cidr":addresses,"action":"reject"}),
-            json!({"port":53,"action":"route","outbound":"fcae-exit"}),
-            json!({"process_path":[own],"action":"route","outbound":"fcae-direct"}),
-        ];
-        #[cfg(windows)]
-        {
-            rules[2] = process_rule(std::iter::once(own.as_str()), "fcae-direct");
+        let own_rule = {
+            #[cfg(windows)]
+            {
+                process_rule(std::iter::once(own.as_str()), "fcae-direct")
+            }
+            #[cfg(not(windows))]
+            {
+                json!({"process_path":[own],"action":"route","outbound":"fcae-direct"})
+            }
+        };
+        let bypass_selected = self.mode == 2;
+        let mut rules = vec![json!({"ip_cidr":addresses,"action":"reject"})];
+        if bypass_selected {
+            rules.push(own_rule.clone());
+            rules.push(process_rule(
+                self.paths.iter().map(String::as_str),
+                "fcae-direct",
+            ));
+        }
+        rules.push(json!({"port":53,"action":"route","outbound":"fcae-exit"}));
+        if !bypass_selected {
+            rules.push(own_rule);
         }
         if self.mode == 1 {
             rules.push(process_rule(
@@ -270,12 +285,7 @@ impl FlowPolicy {
             rules.push(
                 json!({"process_path_regex":[".+"],"action":"route","outbound":"fcae-direct"}),
             );
-        } else if self.mode == 2 {
-            rules.push(process_rule(
-                self.paths.iter().map(String::as_str),
-                "fcae-direct",
-            ));
-        } else if self.mode != 0 {
+        } else if self.mode != 0 && self.mode != 2 {
             return Err(invalid("invalid application routing mode"));
         }
         let mut exit = json!({"type":"socks","tag":"fcae-exit","server":socks.ip().to_string(),"server_port":socks.port(),"version":"5","inet4_bind_address":"127.0.0.1","inet6_bind_address":"::1"});
@@ -309,7 +319,7 @@ impl FlowPolicy {
             pinned["bind_interface"] = json!(name);
             pinned
         };
-        Ok(json!({"log":{"level":"warn"},
+        Ok(json!({"log":{"disabled":cfg.tun.singbox_tun_log_disabled(),"level":cfg.tun.singbox_tun_log_level()},
             "inbounds":[{"type":"tun","tag":"fcae-app-flows","interface_name":device,"address":addresses,"mtu":cfg.tun.mtu,"auto_route":false,"dns_mode":"disabled"}],
             "outbounds":[exit,direct],
             "route":{"auto_detect_interface":true,"find_process":true,"rules":rules,"final":"fcae-exit"}}))
@@ -348,5 +358,71 @@ fn process_rule<'a>(paths: impl Iterator<Item = &'a str>, outbound: &str) -> Val
     #[cfg(not(windows))]
     {
         json!({"process_path":paths.collect::<Vec<_>>(),"action":"route","outbound":outbound})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SELECTED_PATH: &str = "/opt/apps/browser";
+
+    fn bypass_policy() -> FlowPolicy {
+        FlowPolicy {
+            revision: 1,
+            provider: "captured_flow".into(),
+            mode: 2,
+            paths: BTreeSet::from([SELECTED_PATH.into()]),
+        }
+    }
+
+    #[test]
+    fn sing_box_tun_log_is_independent_of_the_proxy_core_log_level() {
+        use crate::config::TUN_LOG_DEBUG;
+        use fcae_abi::FcaeEngineLog;
+
+        let mut cfg = SessionConfig::default();
+        cfg.tun.tun_log_level = TUN_LOG_DEBUG;
+        assert_eq!(cfg.core.log_level, FcaeEngineLog::Off);
+        let config = bypass_policy()
+            .config(&cfg, "127.0.0.1:1080".parse().unwrap(), "fcae0", true)
+            .unwrap();
+        assert_eq!(config["log"]["disabled"], false);
+        assert_eq!(config["log"]["level"], "debug");
+    }
+
+    #[test]
+    fn bypassed_app_route_precedes_forced_dns_exit() {
+        let cfg = SessionConfig::default();
+        let policy = bypass_policy();
+        let config = policy
+            .config(
+                &cfg,
+                "127.0.0.1:1080".parse().unwrap(),
+                "fcae0",
+                true,
+            )
+            .unwrap();
+        let rules = config["route"]["rules"].as_array().unwrap();
+        let app_rule = rules
+            .iter()
+            .position(|rule| {
+                rule["outbound"] == "fcae-direct"
+                    && ["process_path", "process_path_regex"].iter().any(|key| {
+                        rule[*key].as_array().is_some_and(|paths| {
+                            paths.iter().any(|path| {
+                                path.as_str().is_some_and(|path| path.contains(SELECTED_PATH))
+                            })
+                        })
+                    })
+            })
+            .unwrap();
+        let dns_rule = rules
+            .iter()
+            .position(|rule| rule["port"].as_u64() == Some(53))
+            .unwrap();
+
+        assert!(app_rule < dns_rule);
+        assert_eq!(rules[dns_rule]["outbound"], "fcae-exit");
     }
 }

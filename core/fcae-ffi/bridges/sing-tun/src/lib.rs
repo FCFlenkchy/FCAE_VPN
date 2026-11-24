@@ -21,7 +21,9 @@ unsafe extern "C" fn listeners(_: *mut c_char, _: c_int) -> c_int {
 pub fn tun_ffi() -> CoreFfi {
     // TUN startup bypasses the protocol driver's usual log-sink setup.
     unsafe {
-        mtun_set_log(Some(forward_log), 3);
+        // The per-session gate is supplied in the TUN config; keep errors as
+        // the default until the Go start parses that independent setting.
+        mtun_set_log(Some(forward_log), 1);
     }
     CoreFfi {
         start: mtun_start,

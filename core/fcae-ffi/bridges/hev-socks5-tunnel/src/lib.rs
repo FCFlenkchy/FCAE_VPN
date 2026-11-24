@@ -55,22 +55,22 @@ pub(crate) fn bare_address(cidr: &str) -> &str {
     cidr.split('/').next().unwrap_or(cidr)
 }
 
-/// True when the user asked for no engine logging at all: `FcaeT2sLog`
+/// True when the user asked for no engine logging at all: TUN log levels
 /// 0 = default (which is silent for this engine) and 1 = silent. In that
 /// case nothing may touch the filesystem — not even the temp spool.
-pub(crate) fn engine_log_silent(t2s_log_level: u8) -> bool {
-    matches!(t2s_log_level, 0 | 1)
+pub(crate) fn engine_log_silent(tun_log_level: u8) -> bool {
+    matches!(tun_log_level, 0 | 1)
 }
 
-/// Map the UI's TUN log knob onto the engine's levels.
+/// Map the independent TUN log knob onto HEV's native levels.
 ///
-/// `FcaeT2sLog`: 0 = default, 1 = silent, 2 = error, 3 = warn, 4 = info,
+/// Values are 0 = default, 1 = silent, 2 = error, 3 = warn, 4 = info,
 /// 5 = debug. The engine takes exactly `debug`, `info`, `warn`, `error` (and
 /// falls back to warn); silent levels are handled before this is consulted,
 /// so a quiet non-silent setting still keeps failures — the log is what a
 /// failed startup is diagnosed from.
-pub(crate) fn log_level(t2s_log_level: u8) -> &'static str {
-    match t2s_log_level {
+pub(crate) fn log_level(tun_log_level: u8) -> &'static str {
+    match tun_log_level {
         5 => "debug",
         4 => "info",
         3 => "warn",
@@ -135,8 +135,8 @@ impl LogRelay {
 /// (the spool is named per process, so they can only be from a previous
 /// run of this PID). When the engine log is silent there is no spool to
 /// tail, and this deliberately creates nothing.
-pub(crate) fn relay_engine_log(t2s_log_level: u8) -> Option<LogRelay> {
-    if engine_log_silent(t2s_log_level) {
+pub(crate) fn relay_engine_log(tun_log_level: u8) -> Option<LogRelay> {
+    if engine_log_silent(tun_log_level) {
         return None;
     }
     let path = std::path::PathBuf::from(hev_log_path());
@@ -220,7 +220,7 @@ pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: 
     yaml.push_str(&format!("  address: {}\n", socks.ip()));
     yaml.push_str("  udp: 'udp'\n");
     yaml.push_str("\nmisc:\n");
-    if engine_log_silent(cfg.tun.t2s_log_level) {
+    if engine_log_silent(cfg.tun.tun_log_level) {
         // Silent means silent: hand the engine 'null' and no file is
         // created at all — not even the temp spool. Anything else would
         // leave a stray file behind on every run just to catch lines the
@@ -229,7 +229,7 @@ pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: 
         yaml.push_str("  log-file: 'null'\n");
         log::info!("[hev] engine config: name='{}' mtu={} (engine log silent)", cfg.tun.name, cfg.tun.mtu);
     } else {
-        yaml.push_str(&format!("  log-level: '{}'\n", log_level(cfg.tun.t2s_log_level)));
+        yaml.push_str(&format!("  log-level: '{}'\n", log_level(cfg.tun.tun_log_level)));
         // The C library logs to stderr only when `log-file` is unset, and a GUI
         // process has no stderr — every engine diagnostic used to vanish. It
         // writes a small spool in the temp dir; `relay_engine_log` mirrors every

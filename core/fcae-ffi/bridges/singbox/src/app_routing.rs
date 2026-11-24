@@ -114,6 +114,7 @@ impl FlowTunBridge {
                 "flow-routing start cancelled".into(),
             ));
         }
+        super::set_tun_log(cfg.tun.tun_log_level);
         let start = || -> Result<u64> {
             if stopped() {return Err(CoreError::StartFailed("TUN startup cancelled".into()));}
             let mut id = 0;

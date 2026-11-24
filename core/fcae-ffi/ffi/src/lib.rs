@@ -272,11 +272,11 @@ impl TunEngines {
                 let cfg=&mobile_cfg;
                 let ffi=match cfg.tun.engine {
                     #[cfg(all(feature="singbox",any(target_os="android",target_os="ios")))]
-                    config::TunEngine::SingBox=>Some(fcae_bridge_singbox::tun_ffi()),
+                    config::TunEngine::SingBox=>Some(fcae_bridge_singbox::tun_ffi(cfg.tun.tun_log_level)),
                     #[cfg(feature="xray")]
-                    config::TunEngine::Xray=>Some(fcae_bridge_xray::tun_ffi()),
+                    config::TunEngine::Xray=>Some(fcae_bridge_xray::tun_ffi(cfg.tun.tun_log_level)),
                     #[cfg(feature="mihomo")]
-                    config::TunEngine::Mihomo=>{fcae_bridge_mihomo::prepare_tun(cfg)?;Some(fcae_bridge_mihomo::tun_ffi())},
+                    config::TunEngine::Mihomo=>{fcae_bridge_mihomo::prepare_tun(cfg)?;Some(fcae_bridge_mihomo::tun_ffi(cfg.tun.tun_log_level))},
                     #[cfg(feature="sing-tun")]
                     config::TunEngine::MetaSingTun=>Some(fcae_bridge_sing_tun::tun_ffi()),
                     _=>None,
@@ -650,7 +650,7 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         tun_tcp_rcvbuf: config::DEFAULT_TCP_BUFFER,
         // 0 = follow the app default, which is auto-tuning OFF now.
         tun_tcp_auto_tuning: 0,
-        // 0 = follow the app default: tun2socks logs stay silent.
+        // 0 = app default: selected TUN-engine logs stay quiet except errors.
         tun2socks_log_level: 0,
         // 0 = tun2socks: the long-tested engine stays the default.
         tun_engine: FCAE_TUN_ENGINE_TUN2SOCKS,

@@ -189,9 +189,12 @@ var (
 	// separate from xrayMu: the core logs while xrayMu is held, and Go's
 	// sync.Mutex is not reentrant, so a shared lock would deadlock the shim
 	// against its own caller.
-	xrayLogMu   sync.Mutex
-	xrayLogFn   C.xray_log_fn
-	xrayLogGate int
+	xrayLogMu       sync.Mutex
+	xrayLogFn       C.xray_log_fn
+	xrayLogGate     int
+	xrayTunLogFn    C.xray_log_fn
+	xrayTunLogGate  int
+	xrayTunLogActive bool
 )
 
 // Console records are created by `app/log` for the instance's error logger;
@@ -298,6 +301,7 @@ func xray_stop(id C.uint64_t) {
 //
 //export xray_stop_all
 func xray_stop_all() {
+	xraySetTunLogActive(false)
 	xrayMu.Lock()
 	xrayCloseTunLocked(0)
 	cores := xrayCores
@@ -421,6 +425,15 @@ func xray_set_log(fn C.xray_log_fn, gate C.int) {
 	xrayLogMu.Unlock()
 }
 
+// Installs the independent sink used only by a standalone Xray TUN instance.
+// The regular core sink/gate above remains untouched.
+//export xray_set_tun_log
+func xray_set_tun_log(fn C.xray_log_fn, gate C.int) {
+	xrayLogMu.Lock()
+	xrayTunLogFn, xrayTunLogGate = fn, int(gate)
+	xrayLogMu.Unlock()
+}
+
 //export xray_string_free
 func xray_string_free(value *C.char) {
 	C.free(unsafe.Pointer(value))
@@ -476,13 +489,31 @@ func xrayLevel(severity xlog.Severity) int {
 func xrayEmit(level int, text string) {
 	xrayLogMu.Lock()
 	fn, gate := xrayLogFn, xrayLogGate
+	tunFn, tunGate, tunActive := xrayTunLogFn, xrayTunLogGate, xrayTunLogActive
 	xrayLogMu.Unlock()
-	if fn == nil || level > gate {
+	// A standalone TUN is a core instance in its own right: route its records
+	// exclusively to the TUN sink. The generic core sink can still contain a
+	// callback from an earlier session and must not capture TUN logs. Attached
+	// TUNs leave tunActive false and intentionally share their parent's logger.
+	toTun := tunActive && tunFn != nil && level <= tunGate
+	toCore := !tunActive && fn != nil && level <= gate
+	if !toCore && !toTun {
 		return
 	}
 	msg := C.CString(strings.TrimRight(text, "\n"))
 	defer C.free(unsafe.Pointer(msg))
-	C.xray_invoke_log(fn, C.int(level), msg)
+	if toCore {
+		C.xray_invoke_log(fn, C.int(level), msg)
+	}
+	if toTun {
+		C.xray_invoke_log(tunFn, C.int(level), msg)
+	}
+}
+
+func xraySetTunLogActive(active bool) {
+	xrayLogMu.Lock()
+	xrayTunLogActive = active
+	xrayLogMu.Unlock()
 }
 
 type xrayTunAttachment struct {
@@ -538,8 +569,14 @@ func xray_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 	}
 	if parent == 0 {
 		xrayMu.Unlock()
-		return xrayStart(text, handle)
+		xraySetTunLogActive(true)
+		result = xrayStart(text, handle)
+		if result != nil {
+			xraySetTunLogActive(false)
+		}
+		return result
 	}
+	xraySetTunLogActive(false)
 	defer xrayMu.Unlock()
 	for _, tun := range xrayTuns {
 		if tun.parent == parent {
@@ -619,10 +656,14 @@ func xray_tun_stop(id C.uint64_t) {
 	if attached {
 		xrayDetachTunLocked(uint64(id), tun)
 		xrayMu.Unlock()
+		xraySetTunLogActive(false)
 		return
 	}
 	xrayMu.Unlock()
+	// Keep the TUN sink active through core.Close so any final diagnostics stay
+	// on the TUN stream, then disable it for the next session.
 	xray_stop(id)
+	xraySetTunLogActive(false)
 }
 
 //export xray_tun_running
