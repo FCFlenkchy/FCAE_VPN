@@ -743,6 +743,36 @@ impl Drop for TunGuard {
 }
 
 
+pub fn physical_egress_interface() -> Result<String> {
+    let mut index: u32 = 0;
+    let err = unsafe {
+        windows_sys::Win32::NetworkManagement::IpHelper::GetBestInterface(0x0101_0101, &mut index)
+    };
+    if err != 0 || index == 0 {
+        return Err(CoreError::Internal(format!("GetBestInterface failed: {err}")));
+    }
+    let mut luid = NET_LUID_LH { Value: 0 };
+    let err = unsafe {
+        windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid(index, &mut luid)
+    };
+    if err != 0 {
+        return Err(CoreError::Internal(format!("ConvertInterfaceIndexToLuid failed: {err}")));
+    }
+    let mut buf = [0u16; 257];
+    let err = unsafe {
+        windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceLuidToAlias(
+            &luid,
+            buf.as_mut_ptr(),
+            buf.len(),
+        )
+    };
+    if err != 0 {
+        return Err(CoreError::Internal(format!("ConvertInterfaceLuidToAlias failed: {err}")));
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Ok(String::from_utf16_lossy(&buf[..len]))
+}
+
 pub fn restore_wrapper(guard: TunGuard) {
     drop(guard);
 }
