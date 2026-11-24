@@ -1815,6 +1815,7 @@ dependencies = [
  "fcae-go-bridge",
  "fcae-runtime",
  "fcae-sponsor",
+ "image",
  "libc",
  "log",
  "once_cell",
