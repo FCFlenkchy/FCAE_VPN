@@ -386,6 +386,12 @@ type mtunIdlePacket struct {
 	touch func()
 }
 
+// CopyPacket allocates buffers based on the writer's headroom interfaces.
+// Forward these through the idle wrapper: SOCKS UDP must prepend its header.
+// Do not expose Upstream, which could let the copier bypass deadline updates.
+func (p *mtunIdlePacket) FrontHeadroom() int { return N.CalculateFrontHeadroom(p.PacketConn) }
+func (p *mtunIdlePacket) RearHeadroom() int  { return N.CalculateRearHeadroom(p.PacketConn) }
+
 func (p *mtunIdlePacket) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
 	p.touch()
 	return p.PacketConn.WritePacket(buffer, destination)
