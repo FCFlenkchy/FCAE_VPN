@@ -2146,13 +2146,69 @@ void ui_init() {
     });
 }
 
+#if __has_include("mountain_png.h")
+#include "mountain_png.h"
+#endif
+
+static bool draw_mountain_background(const ImGuiIO& io) {
+    if (strcmp(g_app.background_mode, "mountain") != 0) return false;
+#if __has_include("mountain_png.h")
+    static std::vector<uint8_t> s_mountain_rgba;
+    static int s_mountain_w = 0;
+    static int s_mountain_h = 0;
+    static bool s_mountain_tried = false;
+    if (!s_mountain_tried) {
+        s_mountain_tried = true;
+        uint32_t w = 0, h = 0;
+        const uint32_t size = fcae_decode_png_rgba(kMountainPng, kMountainPngSize, nullptr, 0, &w, &h);
+        if (size && size <= 32 * 1024 * 1024 && w && h && (uint64_t)w * h * 4 == size) {
+            s_mountain_rgba.resize(size);
+            uint32_t aw = 0, ah = 0;
+            if (fcae_decode_png_rgba(kMountainPng, kMountainPngSize, s_mountain_rgba.data(), size, &aw, &ah) == size) {
+                s_mountain_w = (int)w;
+                s_mountain_h = (int)h;
+            } else {
+                s_mountain_rgba.clear();
+            }
+        }
+    }
+    if (!s_mountain_rgba.empty() && s_mountain_w > 0 && s_mountain_h > 0 &&
+        io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
+        const ImTextureID tex = sponsor_texture_update(s_mountain_rgba.data(), s_mountain_w, s_mountain_h, 1, 3);
+        if (tex) {
+            const float view_aspect = io.DisplaySize.x / io.DisplaySize.y;
+            const float img_aspect = (float)s_mountain_w / (float)s_mountain_h;
+            ImVec2 uv0(0.0f, 0.0f), uv1(1.0f, 1.0f);
+            if (view_aspect > img_aspect) {
+                const float h_frac = img_aspect / view_aspect;
+                uv0.y = 0.5f - 0.5f * h_frac;
+                uv1.y = 0.5f + 0.5f * h_frac;
+            } else if (view_aspect < img_aspect) {
+                const float w_frac = view_aspect / img_aspect;
+                uv0.x = 0.5f - 0.5f * w_frac;
+                uv1.x = 0.5f + 0.5f * w_frac;
+            }
+            ImGui::GetBackgroundDrawList()->AddImage(tex, ImVec2(0.0f, 0.0f), io.DisplaySize, uv0, uv1);
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
 static void render_startup_shell(bool failed) {
     const ImGuiIO& io = ImGui::GetIO();
+    const bool has_bg = draw_mountain_background(io);
+    if (has_bg) ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.12f, 0.55f));
+    const bool has_bg = draw_mountain_background(io);
+    if (has_bg) ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.12f, 0.55f));
     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
     ImGui::Begin("##FCAE", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+    if (has_bg) ImGui::PopStyleColor();
+    if (has_bg) ImGui::PopStyleColor();
     ImGui::Text("FCAE VPN");
     ImGui::SameLine();
     ImGui::TextDisabled("%s  |  %s", fcae_display_version(),
