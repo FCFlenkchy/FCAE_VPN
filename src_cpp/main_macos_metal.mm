@@ -89,7 +89,7 @@ struct MetalTextureSlot {
     int height;
 };
 
-static MetalTextureSlot g_slots[3];
+static MetalTextureSlot g_slots[4];
 static id<MTLDevice> g_device = nil;
 
 #include <unordered_map>

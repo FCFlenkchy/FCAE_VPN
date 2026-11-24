@@ -45,7 +45,7 @@ struct Texture {
     int height = 0;
     uint64_t generation = 0;
 };
-Texture textures[3];
+    Texture textures[4];
 struct AppIcon {
     std::vector<uint8_t> rgba;
     GLuint texture = 0;
@@ -338,7 +338,7 @@ void android_ui_telemetry(FcaeTelemetry& telemetry) {
 bool android_ui_paused() { return paused; }
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
-    if (!rgba || width <= 0 || height <= 0 || slot < 0 || slot >= 3) return ImTextureID{};
+    if (!rgba || width <= 0 || height <= 0 || slot < 0 || slot >= 4) return ImTextureID{};
     Texture& texture = textures[slot];
     if (!texture.id) glGenTextures(1, &texture.id);
     GLint previous = 0;

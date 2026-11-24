@@ -1237,6 +1237,10 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "urnetwork_http_port") g_app.ur_http_port = (uint16_t)parse_port(val, g_app.ur_http_port);
     else if (key == "urnetwork_socks_enabled") g_app.ur_socks_enabled = atoi(val.c_str()) != 0;
     else if (key == "urnetwork_http_enabled") g_app.ur_http_enabled = atoi(val.c_str()) != 0;
+    else if (key == "background_mode") {
+        snprintf(g_app.background_mode, sizeof(g_app.background_mode), "%s",
+            val == "none" ? "none" : "mountain");
+    }
     else if (key == "firefox_account_id") snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", val.c_str());
     else if (key == "firefox_location") snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s", val.c_str());
     else if (key == "firefox_server") snprintf(g_app.firefox_server, sizeof(g_app.firefox_server), "%s", val.c_str());
@@ -1429,6 +1433,7 @@ static bool save_config(bool quiet = false) {
     }
     // Always LF; empty values allowed. Line-based load is robust on Win/Linux.
     fprintf(f, "protocol=%d\n", g_app.protocol);
+    fprintf(f, "background_mode=%s\n", g_app.background_mode);
     fprintf(f, "backend=%d\n", g_app.backend);
     fprintf(f, "core_transport_base=%d\n", kCoreTransportBase);
     fprintf(f, "chain_transports=%s\n", join_chain_transports(g_app.chain_transports).c_str());
@@ -2857,7 +2862,7 @@ static void firefox_account_rows(const std::string& root) {
     if (s_firefox_unblock_required && ImGui::Button("Continue sign-in with emailed code")) {
         s_firefox_code_popup_open = true;
     }
-    ImGui::BeginDisabled(g_app.firefox_job != 0 || g_app.firefox_pending_id[0] || s_firefox_unblock_required);
+    ImGui::BeginDisabled(g_app.firefox_job != 0);
     if (ImGui::Button("Add new account")) {
         firefox_clear_login_form();
         s_firefox_add_popup_open = true;
@@ -5648,6 +5653,16 @@ void render_ui() {
 #if defined(ANDROID)
             android_ui_render_controls();
 #endif
+            {
+                const char* bg_items[] = {"Mountain", "None"};
+                int bg_idx = strcmp(g_app.background_mode, "none") == 0 ? 1 : 0;
+                ImGui::SetNextItemWidth(160.0f);
+                if (ImGui::Combo("Background", &bg_idx, bg_items, 2)) {
+                    snprintf(g_app.background_mode, sizeof(g_app.background_mode), "%s",
+                        bg_idx == 1 ? "none" : "mountain");
+                    save_config();
+                }
+            }
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
             if (ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases)) {
                 // Channel change takes effect immediately, like the Android

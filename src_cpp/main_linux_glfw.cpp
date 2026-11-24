@@ -68,10 +68,10 @@ ImTextureID app_routing_icon(const std::string& executable) {
     app_icon_textures.emplace(executable,texture);return (ImTextureID)(intptr_t)texture;
 }
 
-static GLuint sponsor_textures[3] = {};
-static uint64_t sponsor_loaded[3] = {};
-static int sponsor_width[3] = {};
-static int sponsor_height[3] = {};
+static GLuint sponsor_textures[4] = {};
+static uint64_t sponsor_loaded[4] = {};
+static int sponsor_width[4] = {};
+static int sponsor_height[4] = {};
 
 static void release_cached_visuals() {
     release_app_icons();

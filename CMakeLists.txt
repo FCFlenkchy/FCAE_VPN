@@ -138,6 +138,12 @@ configure_file(
 # Add binary dir to include path so icon.rc can find version_rc.h
 if(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
   include_directories("${CMAKE_BINARY_DIR}")
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mountain.png")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/mountain.png" _mountain_hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _mountain_bytes "${_mountain_hex}")
+    file(WRITE "${CMAKE_BINARY_DIR}/mountain_png.h"
+      "#pragma once\nstatic const unsigned char kMountainPng[] = {${_mountain_bytes}};\nstatic const unsigned int kMountainPngSize = sizeof(kMountainPng);\n")
+  endif()
 endif()
 
 # Source files
