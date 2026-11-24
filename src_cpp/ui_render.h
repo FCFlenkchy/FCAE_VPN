@@ -76,6 +76,7 @@ ImTextureID app_routing_icon(const std::string& executable);
 
 struct AppState {
     char background_mode[16] = "mountain";
+    bool dns_firewall = true;
     std::atomic<bool> running{true};
     std::atomic<int>  ffi_state{FCAE_STATE_DISCONNECTED};
     std::atomic<bool> ffi_connected{false};

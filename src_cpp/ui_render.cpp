@@ -1241,6 +1241,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.background_mode, sizeof(g_app.background_mode), "%s",
             val == "none" ? "none" : "mountain");
     }
+    else if (key == "dns_firewall") g_app.dns_firewall = (val != "0");
     else if (key == "firefox_account_id") snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", val.c_str());
     else if (key == "firefox_location") snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s", val.c_str());
     else if (key == "firefox_server") snprintf(g_app.firefox_server, sizeof(g_app.firefox_server), "%s", val.c_str());
@@ -1434,6 +1435,7 @@ static bool save_config(bool quiet = false) {
     // Always LF; empty values allowed. Line-based load is robust on Win/Linux.
     fprintf(f, "protocol=%d\n", g_app.protocol);
     fprintf(f, "background_mode=%s\n", g_app.background_mode);
+    fprintf(f, "dns_firewall=%d\n", g_app.dns_firewall ? 1 : 0);
     fprintf(f, "backend=%d\n", g_app.backend);
     fprintf(f, "core_transport_base=%d\n", kCoreTransportBase);
     fprintf(f, "chain_transports=%s\n", join_chain_transports(g_app.chain_transports).c_str());
@@ -5829,6 +5831,11 @@ void render_ui() {
                 ImGui::PushItemWidth(-1);
                 UiText::InputTextWithHint("##tun_dns4", "IPv4 DNS — e.g. 1.1.1.1,1.0.0.1", g_app.tun_dns4, sizeof(g_app.tun_dns4));
                 UiText::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111", g_app.tun_dns6, sizeof(g_app.tun_dns6));
+#if !defined(ANDROID)
+                if (ImGui::Checkbox("DNS firewall", &g_app.dns_firewall)) {
+                    save_config();
+                }
+#endif
                 ImGui::PopItemWidth();
                 if (g_app.tun_engine == 0) {
                     ImGui::Spacing();
