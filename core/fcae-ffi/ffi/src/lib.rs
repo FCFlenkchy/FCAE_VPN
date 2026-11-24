@@ -1855,6 +1855,24 @@ pub unsafe extern "C" fn fcae_firefox_captcha_rgba(
     { let _ = (id, out, cap, width, height); 0 }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn fcae_decode_png_rgba(
+    png: *const u8, png_len: u32, out: *mut u8, cap: u32, width: *mut u32, height: *mut u32,
+) -> u32 {
+    if png.is_null() || png_len == 0 { return 0; }
+    let bytes = std::slice::from_raw_parts(png, png_len as usize);
+    let Ok(img) = image::load_from_memory(bytes) else { return 0 };
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let pixels = rgba.into_raw();
+    if !width.is_null() { *width = w; }
+    if !height.is_null() { *height = h; }
+    if !out.is_null() && cap as usize >= pixels.len() {
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), out, pixels.len());
+    }
+    pixels.len() as u32
+}
+
 /// Submits a trimmed, non-empty human answer. Returns false for an unknown,
 /// expired, already answered, or invalid request. Answers never enter snapshots.
 #[no_mangle]

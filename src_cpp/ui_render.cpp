@@ -2202,8 +2202,6 @@ static void render_startup_shell(bool failed) {
     const ImGuiIO& io = ImGui::GetIO();
     const bool has_bg = draw_mountain_background(io);
     if (has_bg) ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.12f, 0.55f));
-    const bool has_bg = draw_mountain_background(io);
-    if (has_bg) ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.12f, 0.55f));
     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
     ImGui::Begin("##FCAE", nullptr,
