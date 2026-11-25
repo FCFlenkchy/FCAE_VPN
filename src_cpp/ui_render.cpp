@@ -1134,9 +1134,6 @@ static constexpr size_t kMaxCoreConfigText = 128 * 1024;
 /// Longest saved-config name in bytes, mirroring fcae-runtime's library limit.
 static constexpr size_t kMaxCoreConfigName = 48;
 
-// Defined next to the protocol list, below: the config loader prunes chain
-// positions against it before the UI helpers are in scope.
-static int transport_count();
 static bool transport_is_core(int transport);
 static int current_transport();
 static void apply_transport(int transport);
@@ -3472,10 +3469,6 @@ static void transport_labels(TransportLabels& labels) {
     labels.pointers.clear();
     labels.pointers.reserve(labels.names.size());
     for (const std::string& name : labels.names) labels.pointers.push_back(name.c_str());
-}
-
-static int transport_count() {
-    return kCoreTransportBase + (int)g_app.core_configs.size();
 }
 
 static bool transport_is_core(int transport) {
@@ -6481,7 +6474,7 @@ void render_ui() {
                     const char* engine_logs[] = {
                         "Off", "Error", "Warn", "Info", "Debug", "Trace",
                     };
-                    ImGui::Combo("Aether engine log level", &g_app.engine_log, 6);
+                    ImGui::Combo("Aether engine log level", &g_app.engine_log, engine_logs, 6);
                     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
                 }
             }

@@ -319,13 +319,13 @@ if(NOT FCAE_FREETYPE STREQUAL "OFF")
             set(FT_DISABLE_${_ft_no_dep} TRUE CACHE BOOL "" FORCE)
         endforeach()
 
-        # The vendored tree declares cmake_minimum_required(VERSION 3.10..3.20),
-        # so every configure prints one deprecation warning about its policy
-        # floor. It is left visible on purpose: it is a third-party file this
-        # project does not patch, and the alternatives are worse. The
-        # CMAKE_WARN_DEPRECATED variable that would silence it is itself
-        # deprecated as of CMake 4.4 and ignored under policy CMP0218, so using
-        # it would trade a true warning for a stale mechanism.
+        file(READ "${_ft_source_dir}/CMakeLists.txt" _ft_cmake)
+        string(REPLACE
+            "cmake_minimum_required(VERSION 3.0...3.5)"
+            "cmake_minimum_required(VERSION 3.10)"
+            _ft_cmake "${_ft_cmake}")
+        file(WRITE "${_ft_source_dir}/CMakeLists.txt" "${_ft_cmake}")
+
         add_subdirectory("${_ft_source_dir}" "${CMAKE_BINARY_DIR}/freetype-build"
             EXCLUDE_FROM_ALL)
 

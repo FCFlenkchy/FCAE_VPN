@@ -269,7 +269,8 @@ struct AppState {
             auto row=rows.substr(start,end-start); start=end+1; if(row.empty())continue;
             size_t a=row.find('|'), b=a==std::string::npos?a:row.find('|',a+1), c=b==std::string::npos?b:row.find('|',b+1);
             if(c==std::string::npos) return "{}";
-            if(!first)out+=",";first=false;
+            if(!first)out+=",";
+            first=false;
             auto field=[&](const char* key,const std::string& value){out+="\"";out+=key;out+="\":\"";core_json_escape_into(out,value);out+="\"";};
             out+="{";field("kind",row.substr(0,a));out+=",";field("protocol",row.substr(a+1,b-a-1));out+=",";field("ports",row.substr(b+1,c-b-1));out+=",";field("target",row.substr(c+1));out+="}";
         }
