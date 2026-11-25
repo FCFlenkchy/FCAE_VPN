@@ -1,12 +1,12 @@
-//! The user's saved Xray-core / sing-box configs.
+//! The user's saved Xray, sing-box and Mihomo configs.
 //!
-//! Both cores are built in and driven in-process, so a "config" here is the
-//! profile the bridge turns into the core's own config: a share link or a
-//! complete native JSON object, tagged with the core that understands it and
+//! These cores are built in and driven in-process, so a "config" here is the
+//! profile the bridge turns into the selected core's own config: a share link
+//! or a complete native profile, tagged with the core that understands it and
 //! named by the user. What the UI's config editor writes and the session reads
 //! back is the *list* of them, so this module lives in the runtime rather than
 //! in a bridge: a bridge would have to re-validate what the UI just accepted,
-//! and two validators drift apart.
+//! and the validators would drift apart.
 //!
 //! The list is one JSON document, which keeps the ABI to a single string:
 //!
@@ -344,11 +344,13 @@ fn parse_entry(value: &Value) -> Result<SavedConfig, String> {
         Some("sing-box") | Some("singbox") | Some("sing_box") => FcaeBackend::SingBox,
         Some(other) => {
             return Err(format!(
-                "backend {other:?} is not one of \"xray\" or \"sing-box\""
+                "backend {other:?} is not one of \"xray\", \"sing-box\" or \"mihomo\""
             ))
         }
         None => {
-            return Err("a saved config needs a \"backend\" of \"xray\" or \"sing-box\"".into())
+            return Err(
+                "a saved config needs a \"backend\" of \"xray\", \"sing-box\" or \"mihomo\"".into(),
+            )
         }
     };
 
@@ -362,7 +364,7 @@ fn parse_entry(value: &Value) -> Result<SavedConfig, String> {
         Value::Object(_) => config.to_string(),
         _ => {
             return Err(
-                "\"config\" must be a share link string or a native config JSON object".into(),
+                "\"config\" must be a share link string or a native config object".into(),
             )
         }
     };

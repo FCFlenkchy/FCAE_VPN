@@ -15,6 +15,7 @@
 //! * [`telemetry`] — the single shared telemetry cell + log bus.
 //! * [`deps`] — the `deps/` folder embedded native libraries unpack into.
 //! * [`update`] — app-level update checking: release manifest fetch, decode, compare.
+//! * [`subscription`] — bounded HTTPS fetches for the shared core-profile importer.
 //! * [`upstream`] — the user's upstream proxy and its loopback SOCKS5 relay.
 //! * [`wintun`] — the single embedded copy of `wintun.dll` the Windows TUN bridges drop on disk.
 //! * [`cronet`] — the embedded `libcronet.dll` sing-box's naive outbound loads,
@@ -57,6 +58,7 @@ pub mod tun_dns;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod unix_tun;
 pub mod update;
+pub mod subscription;
 pub mod upstream;
 pub mod wintun;
 

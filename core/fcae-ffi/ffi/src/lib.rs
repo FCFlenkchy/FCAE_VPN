@@ -1524,6 +1524,49 @@ pub unsafe extern "C" fn fcae_normalize_upstream_proxy(text: *const c_char, out:
     parsed.is_ok()
 }
 
+/// Fetch an HTTPS subscription as UTF-8 text. The caller must run this on a
+/// worker thread; it can wait for the network. On success `out` receives the
+/// body, and on failure it receives a short error message. `cap` must be at
+/// least `MAX_BODY_BYTES + 1` so the body and terminating NUL fit.
+/// All platforms use this same core FFI fetcher; callers isolate the blocking
+/// operation on a worker thread and hand the returned text to the shared UI
+/// importer.
+///
+/// # Safety
+/// `url` must be NULL or NUL-terminated; `out` must point to `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_fetch_subscription(
+    url: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+) -> bool {
+    let result = guard_value(
+        "fcae_fetch_subscription",
+        Err("subscription fetch failed".to_string()),
+        || {
+            if url.is_null() {
+                return Err("subscription URL is required".to_string());
+            }
+            if out.is_null() || cap as usize <= fcae_runtime::subscription::MAX_BODY_BYTES {
+                return Err("subscription output buffer is too small".to_string());
+            }
+            let url = CStr::from_ptr(url)
+                .to_str()
+                .map_err(|_| "subscription URL is not valid UTF-8".to_string())?;
+            fcae_runtime::subscription::fetch_blocking(url)
+        },
+    );
+    if !out.is_null() && cap > 0 {
+        let text = match &result {
+            Ok(body) if body.len() >= cap as usize => "subscription output buffer is too small",
+            Ok(body) => body,
+            Err(error) => error,
+        };
+        fill(std::slice::from_raw_parts_mut(out, cap as usize), text);
+    }
+    matches!(result, Ok(ref body) if body.len() < cap as usize)
+}
+
 /// Preflights one saved core config without starting a runtime, so the config
 /// editor can refuse a bad paste while the user is still in the dialog.
 ///

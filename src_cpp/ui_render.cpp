@@ -1141,9 +1141,8 @@ static bool transport_is_core(int transport);
 static int current_transport();
 static void apply_transport(int transport);
 
-/// Positions in the protocol list that are hops and never sessions. Tor and
-/// Psiphon only exist behind a carrier and in front of an exit, so a route
-/// names them among its exits; the carrier is the protocol above them.
+/// Tor can run alone or as a chain hop. Psiphon can run as a standalone backend
+/// or as an exit behind another carrier.
 static constexpr int kTorTransport = 4;
 static constexpr int kPsiphonTransport = 5;
 
@@ -1746,11 +1745,10 @@ static bool load_config_from(const std::string& path) {
         }
     }
     // The protocol is the route's outermost element and the chain is what rides
-    // it, so Tor and Psiphon are as valid there as MASQUE -- they are simply not
-    // a route on their own. What used to be the engine's Tor routing mode says
-    // the same thing in that one order, and is rewritten once: 1 = Tor behind the
-    // tunnel, 2 = the tunnel behind Tor, 3 = the Psiphon egress. The mode itself
-    // is no longer written back.
+    // it. Psiphon can also run directly with no chain. What used to be the
+    // engine's Tor routing mode is rewritten once: 1 = Tor behind the tunnel,
+    // 2 = the tunnel behind Tor, 3 = the Psiphon egress. The mode itself is no
+    // longer written back.
     {
         const int stored = current_transport();
         const bool stored_is_hop = stored == kTorTransport || stored == kPsiphonTransport;
@@ -1761,31 +1759,22 @@ static bool load_config_from(const std::string& path) {
         int exit_hop = -1;
         if (!s_loaded_chain_transports && s_loaded_tor_mode == 2) {
             apply_transport(kTorTransport);
-            exit_hop = stored_is_hop ? 0 : stored;
+            // Preserve the old carrier only when it was a distinct transport;
+            // never invent a MASQUE H3/Aether exit to replace a self-hop.
+            exit_hop = stored_is_hop ? -1 : stored;
         } else if (!s_loaded_chain_transports && s_loaded_tor_mode == 1) {
             exit_hop = kTorTransport;
         } else if (!s_loaded_chain_transports && s_loaded_tor_mode == 3) {
             exit_hop = kPsiphonTransport;
         }
-        if (exit_hop >= 0 && g_app.chain_transports.empty()) {
-            // A hop never rides a copy of itself: where the carrier the profile
-            // keeps is already that hop, the WARP transport becomes the exit it
-            // used to sit on instead.
-            g_app.chain_transports.push_back(exit_hop == current_transport() ? 0 : exit_hop);
-            repaired = true;
-        }
-        // A route whose carrier is Tor or Psiphon needs something behind it, so
-        // what used to be a standalone session becomes that carrier with the
-        // WARP transport as its exit.
-        const int carrier = current_transport();
-        if ((carrier == kTorTransport || carrier == kPsiphonTransport)
-            && g_app.chain_transports.empty()) {
-            g_app.chain_transports.push_back(0);
+        if (exit_hop >= 0 && g_app.chain_transports.empty()
+            && exit_hop != current_transport()) {
+            g_app.chain_transports.push_back(exit_hop);
             repaired = true;
         }
         s_loaded_tor_mode = 0;
         if (repaired)
-            g_app.add_log(4, "[ui] the saved Tor/Psiphon route was rewritten as a chain");
+            g_app.add_log(4, "[ui] the saved legacy route was rewritten as an explicit chain");
     }
     // Saved config references are persistent positions. Keep incomplete slots
     // and dangling selections intact so a damaged file cannot shift a choice
@@ -2269,10 +2258,10 @@ void ui_frame() {
     const bool has_background = draw_mountain_background(io);
     if (has_background) {
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.12f, 0.52f));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.14f, 0.62f));
-        // Modal and combo windows use PopupBg, not WindowBg. Tint these too so
-        // settings/dialogs remain glassy over the selected mountain image.
-        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.06f, 0.08f, 0.12f, 0.62f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.12f, 0.19f, 0.76f));
+        // Keep the mountain visible behind the app shell while giving child
+        // panels and combo/modal surfaces enough opacity for readable controls.
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.06f, 0.08f, 0.13f, 0.95f));
         ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.06f, 0.08f, 0.12f, 0.62f));
         ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.08f, 0.10f, 0.16f, 0.68f));
         ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed, ImVec4(0.06f, 0.08f, 0.12f, 0.52f));
@@ -3452,7 +3441,7 @@ static const char* transport_tag(int transport) {
 }
 
 /// The colour the tag is drawn in: distinct from the row's white name, and the
-/// same for both cores so the list stays quiet.
+/// same across all three cores so the list stays quiet.
 static const ImVec4 kCoreTagColor(0.55f, 0.72f, 0.98f, 1.0f);
 /// Space between a saved config's name and its tag.
 static constexpr float kCoreTagGap = 8.0f;
@@ -3566,7 +3555,7 @@ static void open_protocol_editor() {
     s_chain_editor_popup_open = true;
 }
 
-// ---- Saved Xray / sing-box configs ----------------------------------------
+// ---- Saved Xray / sing-box / Mihomo configs --------------------------------
 //
 // The editor writes AppState::core_configs. The engine only ever sees the
 // resulting library document (FcaeCore::library), and a protocol-list position
@@ -3587,6 +3576,47 @@ static int s_core_backend_buf = 0;
 static std::vector<char> s_core_text_buf;
 static char s_core_status[256] = {};
 static bool s_core_status_error = false;
+
+static bool s_core_import_popup_open = false;
+static bool s_core_import_in_progress = false;
+static char s_core_import_url[4097] = {};
+static char s_core_import_prefix[kMaxCoreConfigName + 1] = {};
+static int s_core_import_backend = 0;
+static char s_core_import_status[512] = {};
+static bool s_core_import_status_error = false;
+static bool s_core_import_status_warning = false;
+static std::mutex s_core_import_mutex;
+static uint64_t s_core_import_request_id = 0;
+static bool s_core_import_awaiting = false;
+static bool s_core_import_result_ready = false;
+static bool s_core_import_result_ok = false;
+static std::string s_core_import_result;
+
+static void ui_core_subscription_fetch_complete(uint64_t request_id, bool success,
+                                                const std::string& response_or_error) {
+    {
+        std::lock_guard<std::mutex> lock(s_core_import_mutex);
+        if (!s_core_import_awaiting || request_id != s_core_import_request_id) return;
+        s_core_import_result_ok = success;
+        s_core_import_result = response_or_error;
+        s_core_import_result_ready = true;
+    }
+    ui_request_redraw();
+}
+
+static void open_core_subscription_import() {
+    s_core_import_popup_open = true;
+    s_core_import_in_progress = false;
+    s_core_import_url[0] = 0;
+    s_core_import_prefix[0] = 0;
+    const int listener_core = g_app.final_listener_core();
+    s_core_import_backend = (listener_core >= 3 && listener_core <= 5)
+        ? listener_core - 3
+        : ((g_app.backend >= 3 && g_app.backend <= 5) ? g_app.backend - 3 : 0);
+    s_core_import_status[0] = 0;
+    s_core_import_status_error = false;
+    s_core_import_status_warning = false;
+}
 
 static void open_core_configs() {
     s_core_configs_popup_open = true;
@@ -3666,6 +3696,427 @@ static bool core_config_name_free(const char* name, int row) {
     return true;
 }
 
+static std::string trim_subscription_text(std::string text) {
+    if (text.size() >= 3 && (unsigned char)text[0] == 0xef
+        && (unsigned char)text[1] == 0xbb && (unsigned char)text[2] == 0xbf)
+        text.erase(0, 3);
+    size_t begin = 0;
+    while (begin < text.size() && std::isspace((unsigned char)text[begin])) ++begin;
+    size_t end = text.size();
+    while (end > begin && std::isspace((unsigned char)text[end - 1])) --end;
+    return text.substr(begin, end - begin);
+}
+
+static bool subscription_uri_line(const std::string& line) {
+    if (line.size() >= 11) {
+        static const char* const kAnyConnect = "anyconnect:";
+        bool match = true;
+        for (size_t i = 0; i < 11; ++i)
+            if (std::tolower((unsigned char)line[i]) != kAnyConnect[i]) match = false;
+        if (match) return true;
+    }
+    const size_t scheme_end = line.find("://");
+    if (scheme_end == std::string::npos || scheme_end == 0) return false;
+    for (size_t i = 0; i < scheme_end; ++i) {
+        const unsigned char c = (unsigned char)line[i];
+        if (!std::isalnum(c) && c != '+' && c != '.' && c != '-') return false;
+    }
+    return true;
+}
+
+static bool subscription_metadata_line(const std::string& line) {
+    const size_t colon = line.find(':');
+    if (colon == std::string::npos) return false;
+    std::string key = line.substr(0, colon);
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+        return (char)std::tolower(c);
+    });
+    static const char* const keys[] = {
+        "profile-title", "profile-update-interval", "profile-web-page-url",
+        "subscription-userinfo", "support-url", "announce", "expire"
+    };
+    for (const char* known : keys) if (key == known) return true;
+    return false;
+}
+
+static bool is_valid_subscription_utf8(const std::string& text);
+
+static int subscription_base64_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '-') return 62;
+    if (c == '/' || c == '_') return 63;
+    return -1;
+}
+
+/// Accept the standard and URL-safe base64 spellings used by proxy feeds,
+/// with or without padding. Whitespace between encoded characters is ignored.
+static bool decode_subscription_base64(const std::string& text, std::string& decoded) {
+    uint32_t accumulator = 0;
+    int bits = 0;
+    size_t characters = 0;
+    size_t padding = 0;
+    bool saw_padding = false;
+    decoded.clear();
+    decoded.reserve(text.size() * 3 / 4);
+    for (unsigned char c : text) {
+        if (std::isspace(c)) continue;
+        if (c == '=') {
+            saw_padding = true;
+            if (++padding > 2) return false;
+            continue;
+        }
+        const int value = subscription_base64_value(c);
+        if (value < 0 || saw_padding) return false;
+        accumulator = (accumulator << 6) | (uint32_t)value;
+        bits += 6;
+        ++characters;
+        if (bits >= 8) {
+            bits -= 8;
+            decoded.push_back((char)((accumulator >> bits) & 0xff));
+        }
+    }
+    if (characters == 0 || characters % 4 == 1) return false;
+    if (padding && ((characters + padding) % 4 != 0
+        || (padding == 1 && characters % 4 != 3)
+        || (padding == 2 && characters % 4 != 2))) return false;
+    if (bits && (accumulator & ((1u << bits) - 1u)) != 0) return false;
+    return !decoded.empty() && decoded.find('\0') == std::string::npos
+        && is_valid_subscription_utf8(decoded);
+}
+
+static std::vector<std::string> subscription_links(const std::string& text,
+                                                    int& ignored, int& overflow) {
+    std::vector<std::string> links;
+    ignored = 0;
+    overflow = 0;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find('\n', start);
+        std::string line = trim_subscription_text(text.substr(start,
+            end == std::string::npos ? std::string::npos : end - start));
+        if (!line.empty() && line[0] != '#' && line.rfind("//", 0) != 0) {
+            if (subscription_uri_line(line)) {
+                if (links.size() < (size_t)kMaxCoreConfigs) links.push_back(std::move(line));
+                else ++overflow;
+            } else if (!subscription_metadata_line(line)) {
+                ++ignored;
+            }
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return links;
+}
+
+static std::string subscription_fragment_name(const std::string& link) {
+    const size_t marker = link.rfind('#');
+    if (marker == std::string::npos || marker + 1 >= link.size()) return {};
+    std::string decoded;
+    decoded.reserve(link.size() - marker - 1);
+    for (size_t i = marker + 1; i < link.size(); ++i) {
+        if (link[i] == '%' && i + 2 < link.size()) {
+            const auto hex = [](unsigned char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            const int hi = hex((unsigned char)link[i + 1]);
+            const int lo = hex((unsigned char)link[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                const unsigned char c = (unsigned char)((hi << 4) | lo);
+                if (c >= 0x20 && c != 0x7f) decoded.push_back((char)c);
+                else decoded.push_back(' ');
+                i += 2;
+                continue;
+            }
+        }
+        const unsigned char c = (unsigned char)link[i];
+        decoded.push_back(std::iscntrl(c) ? ' ' : (char)c);
+    }
+    return trim_subscription_text(std::move(decoded));
+}
+
+static std::string valid_subscription_utf8(const std::string& text) {
+    std::string valid;
+    valid.reserve(text.size());
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char first = (unsigned char)text[i];
+        size_t length = 0;
+        if (first <= 0x7f) length = 1;
+        else if (first >= 0xc2 && first <= 0xdf) length = 2;
+        else if (first >= 0xe0 && first <= 0xef) length = 3;
+        else if (first >= 0xf0 && first <= 0xf4) length = 4;
+        bool well_formed = length != 0 && i + length <= text.size();
+        for (size_t j = 1; well_formed && j < length; ++j) {
+            const unsigned char byte = (unsigned char)text[i + j];
+            well_formed = (byte & 0xc0) == 0x80;
+            if (j == 1 && ((first == 0xe0 && byte < 0xa0)
+                || (first == 0xed && byte >= 0xa0)
+                || (first == 0xf0 && byte < 0x90)
+                || (first == 0xf4 && byte >= 0x90))) well_formed = false;
+        }
+        if (!well_formed) {
+            valid.push_back('?');
+            ++i;
+            continue;
+        }
+        valid.append(text, i, length);
+        i += length;
+    }
+    return valid;
+}
+
+static bool is_valid_subscription_utf8(const std::string& text) {
+    return valid_subscription_utf8(text) == text;
+}
+
+static std::string utf8_prefix(std::string text, size_t max_bytes) {
+    text = valid_subscription_utf8(text);
+    if (text.size() <= max_bytes) return text;
+    text.resize(max_bytes);
+    while (!text.empty() && ((unsigned char)text.back() & 0xc0) == 0x80) text.pop_back();
+    if (!text.empty() && (unsigned char)text.back() >= 0xc0) text.pop_back();
+    return text;
+}
+
+static std::string unique_subscription_name(std::string name) {
+    name = trim_subscription_text(std::move(name));
+    std::replace_if(name.begin(), name.end(), [](unsigned char c) { return std::iscntrl(c) != 0; }, ' ');
+    if (name.empty()) name = "Imported profile";
+    name = utf8_prefix(std::move(name), kMaxCoreConfigName);
+    if (core_config_name_free(name.c_str(), -1)) return name;
+    for (unsigned suffix = 2; suffix < 10000; ++suffix) {
+        const std::string tail = " (" + std::to_string(suffix) + ")";
+        const std::string candidate = utf8_prefix(name, kMaxCoreConfigName - tail.size()) + tail;
+        if (core_config_name_free(candidate.c_str(), -1)) return candidate;
+    }
+    return utf8_prefix(name, kMaxCoreConfigName - 5) + " (new)";
+}
+
+struct CoreSubscriptionImportSummary {
+    int added = 0;
+    int skipped = 0;
+    std::string first_problem;
+};
+
+static bool validate_subscription_profile(const std::string& text, int backend,
+                                          std::string& reason) {
+    if (text.empty()) {
+        reason = "the profile is empty";
+        return false;
+    }
+    if (text.size() > kMaxCoreConfigText) {
+        reason = "the profile exceeds the 128 KiB saved-config limit";
+        return false;
+    }
+    char error[224] = {};
+    if (!fcae_core_check_profile(text.c_str(), AppState::core_backend_id(backend),
+                                 error, sizeof(error))) {
+        reason = error[0] ? error : "the selected core rejected this profile";
+        return false;
+    }
+    return true;
+}
+
+static void append_subscription_profile(const std::string& text,
+                                        const std::string& preferred_name,
+                                        int backend,
+                                        CoreSubscriptionImportSummary& summary) {
+    if (g_app.core_configs.size() >= (size_t)kMaxCoreConfigs) {
+        ++summary.skipped;
+        if (summary.first_problem.empty()) summary.first_problem = "the saved-config list reached its 1000-entry limit";
+        return;
+    }
+    std::string reason;
+    if (!validate_subscription_profile(text, backend, reason)) {
+        ++summary.skipped;
+        if (summary.first_problem.empty()) summary.first_problem = std::move(reason);
+        return;
+    }
+    AppState::CoreConfigEntry entry;
+    entry.name = unique_subscription_name(preferred_name);
+    entry.backend = backend;
+    entry.text = text;
+    g_app.core_configs.push_back(std::move(entry));
+    ++summary.added;
+}
+
+static void import_core_subscription_body(const std::string& raw_body) {
+    CoreSubscriptionImportSummary summary;
+    const int previous_count = (int)g_app.core_configs.size();
+    const std::string body = trim_subscription_text(raw_body);
+    const std::string prefix = trim_subscription_text(s_core_import_prefix);
+    const int backend = s_core_import_backend;
+    const std::string core = AppState::core_backend_name(backend);
+    std::string validation_error;
+
+    // Native Xray/sing-box JSON, Mihomo YAML, and a single share link are all
+    // already accepted by the selected core's existing profile validator.
+    if (body.size() <= kMaxCoreConfigText
+        && validate_subscription_profile(body, backend, validation_error)) {
+        std::string name = subscription_uri_line(body)
+            ? subscription_fragment_name(body) : std::string();
+        if (!prefix.empty()) name = name.empty() ? prefix : prefix + " - " + name;
+        if (name.empty()) name = core + " subscription";
+        append_subscription_profile(body, name, backend, summary);
+    } else {
+        int ignored = 0, overflow = 0;
+        std::vector<std::string> links = subscription_links(body, ignored, overflow);
+        if (links.empty()) {
+            std::string decoded;
+            if (decode_subscription_base64(body, decoded) && decoded != body) {
+                ignored = 0;
+                overflow = 0;
+                std::string decoded_error;
+                if (decoded.size() <= kMaxCoreConfigText
+                    && validate_subscription_profile(decoded, backend, decoded_error)) {
+                    std::string name = prefix.empty() ? core + " subscription" : prefix;
+                    append_subscription_profile(decoded, name, backend, summary);
+                } else {
+                    int decoded_ignored = 0, decoded_overflow = 0;
+                    links = subscription_links(decoded, decoded_ignored, decoded_overflow);
+                    ignored = decoded_ignored;
+                    overflow = decoded_overflow;
+                    if (links.empty() && !decoded_error.empty()) validation_error = decoded_error;
+                }
+            }
+        }
+        size_t ordinal = 0;
+        for (const std::string& link : links) {
+            ++ordinal;
+            std::string name = subscription_fragment_name(link);
+            if (!prefix.empty()) name = name.empty()
+                ? prefix + " " + std::to_string(ordinal)
+                : prefix + " - " + name;
+            else if (name.empty()) name = core + " " + std::to_string(ordinal);
+            append_subscription_profile(link, name, backend, summary);
+        }
+        summary.skipped += overflow + ignored;
+        if (summary.first_problem.empty() && overflow)
+            summary.first_problem = "the subscription has more profiles than the importer can process";
+        if (summary.first_problem.empty() && ignored)
+            summary.first_problem = "some lines are not share links or recognized subscription headers";
+        if (summary.first_problem.empty() && links.empty())
+            summary.first_problem = validation_error.empty()
+                ? "no supported share links or native config were found"
+                : validation_error;
+    }
+
+    if (summary.added > 0) {
+        // Preserve dangling saved-config references: a newly appended row must
+        // not turn a broken selection into a different, silently chosen profile.
+        const int new_count = previous_count + summary.added;
+        if (g_app.core_selected >= previous_count && g_app.core_selected < new_count)
+            g_app.core_selected += summary.added;
+        for (int& transport : g_app.chain_transports) {
+            const int first_new = kCoreTransportBase + previous_count;
+            const int after_new = kCoreTransportBase + new_count;
+            if (transport >= first_new && transport < after_new) transport += summary.added;
+        }
+        g_app.refresh_core_listeners();
+        s_core_import_status_error = false;
+        s_core_import_status_warning = summary.skipped > 0;
+        if (summary.skipped > 0) {
+            snprintf(s_core_import_status, sizeof(s_core_import_status),
+                "Imported %d profile%s; skipped %d incompatible or extra line%s. %s",
+                summary.added, summary.added == 1 ? "" : "s", summary.skipped,
+                summary.skipped == 1 ? "" : "s",
+                summary.first_problem.empty() ? "" : summary.first_problem.c_str());
+        } else {
+            snprintf(s_core_import_status, sizeof(s_core_import_status),
+                "Imported %d profile%s.", summary.added, summary.added == 1 ? "" : "s");
+        }
+    } else {
+        s_core_import_status_error = true;
+        s_core_import_status_warning = false;
+        snprintf(s_core_import_status, sizeof(s_core_import_status), "No compatible profiles imported. %s",
+            summary.first_problem.empty() ? "Check the URL and selected core." : summary.first_problem.c_str());
+    }
+}
+
+static void begin_core_subscription_fetch() {
+    std::string url = trim_subscription_text(s_core_import_url);
+    if (g_app.core_configs.size() >= (size_t)kMaxCoreConfigs) {
+        s_core_import_status_error = true;
+        s_core_import_status_warning = false;
+        snprintf(s_core_import_status, sizeof(s_core_import_status),
+            "The saved-config list is already at its %d-entry limit.", kMaxCoreConfigs);
+        return;
+    }
+    snprintf(s_core_import_url, sizeof(s_core_import_url), "%s", url.c_str());
+    s_core_import_status_error = false;
+    s_core_import_status_warning = false;
+    snprintf(s_core_import_status, sizeof(s_core_import_status), "Downloading subscription…");
+    uint64_t request_id;
+    {
+        std::lock_guard<std::mutex> lock(s_core_import_mutex);
+        request_id = ++s_core_import_request_id;
+        s_core_import_awaiting = true;
+        s_core_import_result_ready = false;
+        s_core_import_result.clear();
+    }
+    s_core_import_in_progress = true;
+    try {
+        std::thread([request_id, url] {
+            try {
+                std::vector<char> response((size_t)FCAE_SUBSCRIPTION_MAX_BODY + 1, '\0');
+                const bool success = fcae_fetch_subscription(
+                    url.c_str(), response.data(), (uint32_t)response.size());
+                ui_core_subscription_fetch_complete(request_id, success, response.data());
+            } catch (...) {
+                ui_core_subscription_fetch_complete(request_id, false,
+                    "Could not start the subscription download.");
+            }
+        }).detach();
+    } catch (...) {
+        ui_core_subscription_fetch_complete(request_id, false,
+            "Could not start the subscription download.");
+    }
+}
+
+static void cancel_core_subscription_fetch() {
+    {
+        std::lock_guard<std::mutex> lock(s_core_import_mutex);
+        ++s_core_import_request_id;
+        s_core_import_awaiting = false;
+        s_core_import_result_ready = false;
+        s_core_import_result.clear();
+    }
+    s_core_import_in_progress = false;
+    s_core_import_status_error = false;
+    s_core_import_status_warning = false;
+    snprintf(s_core_import_status, sizeof(s_core_import_status), "Download cancelled.");
+}
+
+static void poll_core_subscription_fetch() {
+    bool ready = false;
+    bool success = false;
+    std::string result;
+    {
+        std::lock_guard<std::mutex> lock(s_core_import_mutex);
+        if (s_core_import_result_ready) {
+            ready = true;
+            success = s_core_import_result_ok;
+            result = std::move(s_core_import_result);
+            s_core_import_result.clear();
+            s_core_import_result_ready = false;
+            s_core_import_awaiting = false;
+        }
+    }
+    if (!ready) return;
+    s_core_import_in_progress = false;
+    if (!success) {
+        s_core_import_status_error = true;
+        s_core_import_status_warning = false;
+        snprintf(s_core_import_status, sizeof(s_core_import_status), "%s", result.c_str());
+    } else {
+        import_core_subscription_body(result);
+    }
+}
+
 /// Validate the editor's buffers against the rules the engine parses the
 /// library with, so a config that saves is a config that runs: the name is a
 /// reference in that document and must be unique, the profile has to parse for
@@ -3703,7 +4154,7 @@ static void core_config_check(int row) {
     }
     if (empty_text) {
         snprintf(s_core_status, sizeof(s_core_status),
-                 "Paste a share link or the core's own config JSON.");
+                 "Paste a share link or the core's native config.");
         return;
     }
     const size_t length = strlen(s_core_text_buf.data());
@@ -3824,8 +4275,8 @@ static void render_core_editor() {
     changed |= UiText::InputTextWithHint("##core_name", "a name for this config",
                                         s_core_name_buf, kMaxCoreConfigName + 1);
     ImGui::PopItemWidth();
-    // Two cores, so both stay on screen: radio circles like Outbound IP version,
-    // not a dropdown that hides half the choice behind a click.
+    // Three cores, so all stay on screen: radio circles like Outbound IP
+    // version, not a dropdown that hides a choice behind a click.
     ImGui::TextDisabled("Core");
     {
         // The circles take the colour the saved-configs list gives the same
@@ -3886,6 +4337,60 @@ static void render_core_editor() {
     ImGui::EndPopup();
 }
 
+static void render_core_subscription_import() {
+    static const char* const kTitle = "##core-subscription-import";
+    if (s_core_import_popup_open) {
+        ImGui::OpenPopup(kTitle);
+        s_core_import_popup_open = false;
+    }
+    poll_core_subscription_fetch();
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(modal_size(620.0f, 470.0f), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
+
+    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Import a subscription URL");
+    ImGui::Separator();
+    UiText::TextColoredWrapped(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+        "HTTPS only. Imports plaintext or base64 feeds of share links, or one native config accepted by the selected core. "
+        "Entries are stored locally; remove old imported entries before importing again to refresh.");
+    ImGui::Spacing();
+    ImGui::BeginDisabled(s_core_import_in_progress);
+    ImGui::TextDisabled("Subscription URL");
+    ImGui::PushItemWidth(-FLT_MIN);
+    UiText::InputTextWithHint("##core_subscription_url", "https://example.com/subscription",
+                              s_core_import_url, sizeof(s_core_import_url));
+    ImGui::TextDisabled("Name prefix (optional)");
+    UiText::InputTextWithHint("##core_subscription_prefix", "e.g. Work", s_core_import_prefix,
+                              sizeof(s_core_import_prefix));
+    ImGui::PopItemWidth();
+    ImGui::TextDisabled("Core");
+    ImGui::PushStyleColor(ImGuiCol_CheckMark, kCoreTagColor);
+    if (ImGui::RadioButton("Xray", s_core_import_backend == 0)) s_core_import_backend = 0;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("sing-box", s_core_import_backend == 1)) s_core_import_backend = 1;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Mihomo", s_core_import_backend == 2)) s_core_import_backend = 2;
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+
+    const ImVec4 status_color = s_core_import_status_error
+        ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
+        : s_core_import_status_warning ? ImVec4(0.95f, 0.72f, 0.25f, 1.0f)
+        : ImVec4(0.3f, 0.9f, 0.4f, 1.0f);
+    UiText::TextColoredWrapped(status_color, "%s", s_core_import_status);
+    ImGui::Spacing();
+    ImGui::BeginDisabled(s_core_import_in_progress);
+    if (ImGui::Button("Import")) begin_core_subscription_fetch();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button(s_core_import_in_progress ? "Cancel" : "Close")) {
+        if (s_core_import_in_progress) cancel_core_subscription_fetch();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 static void render_core_configs() {
     static const char* const kTitle = "Xray / sing-box / Mihomo settings";
     if (s_core_configs_popup_open) {
@@ -3896,8 +4401,8 @@ static void render_core_configs() {
     ImGui::SetNextWindowSize(modal_size(760.0f, 720.0f), ImGuiCond_Always);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
 
-    // The library first: one list of configs, because that is what both cores
-    // run. A row is the name the user gave the config, the core that runs it and
+    // The library first: one list of configs, because that is what all three
+    // cores run. A row is the name the user gave the config, the core that runs it and
     // the two things that can be done to it -- the same `name  core` row the
     // Android dialog shows. Buttons are the only items in a row that take input,
     // so nothing can swallow their clicks: a full-width Selectable claimed the
@@ -3956,7 +4461,12 @@ static void render_core_configs() {
     // beside it is the list's place in the library the engine accepts, and
     // nothing gates on it: the limit is there to be read, not to be hit.
     if (ImGui::Button("+ Add config")) open_core_editor(-1);
-    ImGui::SameLine();
+    const float import_button_width = ImGui::CalcTextSize("+ Import URL").x
+        + ImGui::GetStyle().FramePadding.x * 2.0f;
+    if (ImGui::GetContentRegionAvail().x >= import_button_width + ImGui::GetStyle().ItemSpacing.x + 44.0f)
+        ImGui::SameLine();
+    if (ImGui::Button("+ Import URL")) open_core_subscription_import();
+    if (ImGui::GetContentRegionAvail().x >= 44.0f) ImGui::SameLine();
     ImGui::TextDisabled("%d/%d", (int)g_app.core_configs.size(), kMaxCoreConfigs);
     ImGui::Separator();
 
@@ -3969,9 +4479,10 @@ static void render_core_configs() {
         core_configs_forget(remove_row);
         g_app.refresh_core_listeners();
     }
-    // The editor is a modal of its own, opened from the buttons above and drawn
-    // inside this one so it stays scoped to the dialog that owns it.
+    // The editor and importer are modals of their own, opened from the buttons
+    // above and drawn inside this one so they stay scoped to the core settings.
     render_core_editor();
+    render_core_subscription_import();
     core_listener_block(0);
     core_listener_block(1);
     core_listener_block(2);
@@ -4050,15 +4561,8 @@ static void render_protocol_editor() {
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     if (changed) {
         if (s_protocol_draft != protocol_before) apply_transport(s_protocol_draft);
-        // A carrier of Tor or Psiphon has to carry something: picking one for an
-        // otherwise empty route adds the WARP transport as its exit rather than
-        // leaving a session that is only the hop. Any exit can be swapped or
-        // removed afterwards, so this is a default and not a rule.
-        if (s_protocol_draft != protocol_before
-            && (s_protocol_draft == kTorTransport || s_protocol_draft == kPsiphonTransport)
-            && s_chain_draft.empty()) {
-            s_chain_draft.push_back(0);
-        }
+        // Selecting Tor or Psiphon never invents a MASQUE H3/Aether exit; only
+        // the chain edits the user made above are applied.
         g_app.chain_transports = s_chain_draft;
     }
     ImGui::EndPopup();
@@ -4292,78 +4796,77 @@ static void render_home_summary(const FcaeTelemetry& telem) {
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     {
         const float avail_w = ImGui::GetContentRegionAvail().x;
-        // The Home dashboard uses two columns when there is room: transfer
-        // statistics on the left, the sponsor card on the right.
-        //
-        // The left column's width is measured from the widest line it actually
-        // draws, rather than from the old flat 230. At the doubled font size a
-        // download figure with its rate beside it is wider than 230, so the old
-        // constant let the telemetry run underneath the sponsor card.
-        float left_column_w = ImGui::CalcTextSize("Upload:  ").x;
-        {
-            // A byte total and its rate on one line, at the widest they get:
-            // "1023.99 MB" and a rate beside it, joined by a small gap.
-            const float stats_w = std::max(ImGui::CalcTextSize("Download:").x,
-                                           ImGui::CalcTextSize("Upload:").x)
-                                + 6.0f + ImGui::CalcTextSize("1023.99 GB").x
-                                + 6.0f + ImGui::CalcTextSize("(1023.99 GB/s)").x;
-            left_column_w = (std::max)(left_column_w, stats_w);
-            // The RTT readout and the INFO button that follows it.
-            left_column_w = (std::max)(left_column_w,
-                                       ImGui::CalcTextSize("9999ms").x + 10.0f
-                                       + ImGui::CalcTextSize("INFO").x
-                                       + ImGui::GetStyle().FramePadding.x * 2.0f);
-        }
-        left_column_w += 8.0f;
-        // A floor so a narrow window still has a usable column rather than one
-        // that collapses to the width of a word.
-        const float min_left_w = 260.0f;
-        if (left_column_w < min_left_w) left_column_w = min_left_w;
-        // Space the card needs to be worth having.
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float value_w = ImGui::CalcTextSize("1023.99 GB").x;
+        const float rate_w = ImGui::CalcTextSize("1023.99 GB/s").x;
+        const float label_w = (std::max)(ImGui::CalcTextSize("DOWNLOAD").x,
+                                         ImGui::CalcTextSize("UPLOAD").x);
+        const float stats_w = (std::max)(label_w + style.ItemSpacing.x + value_w, rate_w);
+        float left_column_w = (std::max)(260.0f,
+            stats_w + style.WindowPadding.x * 2.0f + 4.0f);
+        if (avail_w > 0.0f && left_column_w > avail_w) left_column_w = avail_w;
         const float min_card_w = 320.0f;
-        const float column_gap  = 24.0f;
-        const bool use_columns  = (avail_w - (left_column_w + column_gap)) >= min_card_w;
+        const float column_gap = 24.0f;
+        const bool use_columns = (avail_w - (left_column_w + column_gap)) >= min_card_w;
+        if (!use_columns && avail_w > 0.0f) left_column_w = avail_w;
         const float card_w = std::floor(std::max(1.0f, use_columns
             ? std::clamp(avail_w * 0.4f, min_card_w, avail_w - left_column_w - column_gap)
             : avail_w));
         const float sponsor_offset_x = ImGui::GetCursorPosX() + (use_columns ? avail_w - card_w : 0.0f);
 
-        ImGui::BeginGroup(); // Left column: Stats
+        ImGui::BeginGroup(); // Left column: independent transfer cards
         {
-            char total_buf[32], rate_buf[32];
-            ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "Download:");
-            ImGui::SameLine(0, 6);
-            fmt_bytes(total_buf, sizeof(total_buf), telem.total_rx);
-            ImGui::Text("%s", total_buf);
-            ImGui::SameLine(0, 6);
-            fmt_rate(rate_buf, sizeof(rate_buf), telem.rx_bytes_sec);
-            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "(%s)", rate_buf);
+            auto stat_card = [&](const char* id, const char* label, uint64_t total,
+                                 uint64_t rate, const ImVec4& label_color) {
+                char total_buf[32], rate_buf[32];
+                fmt_bytes(total_buf, sizeof(total_buf), total);
+                fmt_rate(rate_buf, sizeof(rate_buf), rate);
+                const float pad_x = 10.0f;
+                const float pad_y = 6.0f;
+                const float inner_w = std::max(1.0f, left_column_w - pad_x * 2.0f - 2.0f);
+                const bool inline_total = ImGui::CalcTextSize(label).x
+                    + style.ItemSpacing.x + ImGui::CalcTextSize(total_buf).x <= inner_w;
+                const float lines = inline_total ? 2.0f : 3.0f;
+                const float card_h = ImGui::GetTextLineHeight() * lines
+                    + style.ItemSpacing.y * (lines - 1.0f) + pad_y * 2.0f + 2.0f;
 
-            ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload:  ");
-            ImGui::SameLine(0, 6);
-            fmt_bytes(total_buf, sizeof(total_buf), telem.total_tx);
-            ImGui::Text("%s", total_buf);
-            ImGui::SameLine(0, 6);
-            fmt_rate(rate_buf, sizeof(rate_buf), telem.tx_bytes_sec);
-            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "(%s)", rate_buf);
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.15f, 0.24f, 0.96f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.40f, 0.58f, 0.92f));
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad_x, pad_y));
+                ImGui::BeginChild(id, ImVec2(left_column_w, card_h), ImGuiChildFlags_Borders,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
+                        | ImGuiWindowFlags_NoNavInputs | ImGuiWindowFlags_NoNavFocus);
+                ImGui::TextColored(label_color, "%s", label);
+                if (inline_total) {
+                    ImGui::SameLine();
+                    const float total_x = ImGui::GetWindowContentRegionMax().x
+                        - ImGui::CalcTextSize(total_buf).x;
+                    if (total_x > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(total_x);
+                    ImGui::Text("%s", total_buf);
+                } else {
+                    ImGui::Text("%s", total_buf);
+                }
+                ImGui::TextDisabled("%s", rate_buf);
+                ImGui::EndChild();
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor(2);
+            };
 
+            stat_card("##download_stat", "DOWNLOAD", telem.total_rx, telem.rx_bytes_sec,
+                      ImVec4(0.30f, 0.80f, 1.00f, 1.0f));
+            ImGui::Spacing();
+            stat_card("##upload_stat", "UPLOAD", telem.total_tx, telem.tx_bytes_sec,
+                      ImVec4(1.00f, 0.55f, 0.20f, 1.0f));
             ImGui::Spacing();
             char rtt_buf[24];
             if (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0)
                 snprintf(rtt_buf, sizeof(rtt_buf), "%ums", telem.rtt_ms);
             else
                 snprintf(rtt_buf, sizeof(rtt_buf), "--");
+            ImGui::TextDisabled("RTT");
+            ImGui::SameLine(0, 8);
             ImGui::TextColored(ImVec4(0.70f, 0.90f, 0.70f, 1.0f), "%s", rtt_buf);
-            ImGui::SameLine(0, 10);
-            // No vertical nudge needed: SmallButton() zeroes its own vertical
-            // frame padding and passes ImGuiButtonFlags_AlignTextBaseLine, so it
-            // already sits on the text baseline rather than the text's top edge.
-            if (ImGui::SmallButton("INFO")) {
-                s_connection_info_popup_open = true;
-                ui_request_redraw();
-            }
-            if (ImGui::IsItemHovered())
-                UiText::Tooltip("Show connection details");
         }
         ImGui::EndGroup();
 
@@ -5702,97 +6205,86 @@ void render_ui() {
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-    const float remain = std::max(ImGui::GetTextLineHeightWithSpacing() * 8.0f, ImGui::GetContentRegionAvail().y);
-    ImGui::BeginChild("##tabs_host", ImVec2(0, remain), ImGuiChildFlags_None,
+    // Main navigation is a full-width bottom bar: Settings on the left,
+    // Home in the center (the initial page), and Logs on the right.
+    static int main_page = 1; // 0 = Settings, 1 = Home, 2 = Logs
+    const ImGuiStyle& page_style = ImGui::GetStyle();
+    const float nav_height = std::max(42.0f, ImGui::GetFrameHeight() + 8.0f);
+    const float nav_y = ImGui::GetWindowContentRegionMax().y - nav_height;
+    const float page_height = std::max(1.0f, nav_y - ImGui::GetCursorPosY()
+                                       - page_style.ItemSpacing.y);
+    // This sizing/clipping child stays transparent; the active page owns the
+    // single translucent panel layer so the mountain remains visible below it.
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::BeginChild("##main_page_content", ImVec2(0, page_height), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleColor();
 
-    if (ImGui::BeginTabBar("##PrimaryTabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
-        if (ImGui::BeginTabItem("Home")) {
+    if (main_page == 1) {
             ImGui::BeginChild("##home_scroll", ImVec2(0, 0), ImGuiChildFlags_None,
                               ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "QUICK CONNECT");
-            UiText::TextColoredWrapped(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled],
-                "Pick a protocol and routing mode. Your connection controls stay above.");
-            ImGui::Spacing();
             ImGui::BeginChild("##home_controls", ImVec2(0, 0),
                               ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
-            ImGui::TextDisabled("CURRENT PROTOCOL");
-            TransportLabels home_labels;
-            transport_labels(home_labels);
-            const int home_transport = current_transport();
-            const bool has_protocol = home_transport >= 0
-                && home_transport < static_cast<int>(home_labels.names.size());
-            ImGui::TextWrapped("%s", has_protocol ? home_labels.names[(size_t)home_transport].c_str()
-                                                   : "Select a protocol");
-            if (ImGui::Button("Choose protocol", ImVec2(-FLT_MIN, 0)))
+
+            if (ImGui::Button("Protocol", ImVec2(-FLT_MIN, 0)))
                 open_protocol_editor();
-            UiText::TextColoredWrapped(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled],
-                "Select a transport and optional chain. Saved profiles are in Settings > Services.");
+
             ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::TextDisabled("CONNECTION MODE");
-            const float mode_gap = ImGui::GetStyle().ItemSpacing.x;
-            const float mode_avail = ImGui::GetContentRegionAvail().x;
-            const float mode_min_width = std::max(ImGui::CalcTextSize("PROXY").x,
-                                                  ImGui::CalcTextSize("TUN").x)
-                + ImGui::GetStyle().FramePadding.x * 2.0f;
-            const bool mode_side_by_side = mode_avail >= mode_min_width * 2.0f + mode_gap;
-            const float mode_width = mode_side_by_side
-                ? (mode_avail - mode_gap) * 0.5f : mode_avail;
+            const char* mode_items[] = {"Proxy", "TUN"};
+            int mode_selection = g_app.mode == 1 ? 1 : 0;
             const bool mode_locked = connected || busy || s_tun_paused;
-            if (mode_locked) ImGui::BeginDisabled();
-            auto mode_button = [&](const char* label, int value) {
-                const bool selected = g_app.mode == value;
-                ImGui::PushStyleColor(ImGuiCol_Button,
-                    selected ? ImVec4(0.10f, 0.43f, 0.68f, 1.0f)
-                             : ImVec4(0.16f, 0.19f, 0.27f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                    selected ? ImVec4(0.14f, 0.52f, 0.78f, 1.0f)
-                             : ImVec4(0.22f, 0.27f, 0.37f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                    ImVec4(0.12f, 0.36f, 0.55f, 1.0f));
-                if (ImGui::Button(label, ImVec2(mode_width, 0)))
-                    g_app.mode = value;
-                ImGui::PopStyleColor(3);
-            };
-            mode_button("PROXY", 0);
-            if (mode_side_by_side) ImGui::SameLine(0, mode_gap);
-            mode_button("TUN", 1);
-            if (mode_locked) {
-                ImGui::EndDisabled();
-                UiText::TextColoredWrapped(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled],
-                    "Disconnect before changing the mode.");
+            const float mode_avail = ImGui::GetContentRegionAvail().x;
+            const float info_width = ImGui::CalcTextSize("INFO").x
+                + ImGui::GetStyle().FramePadding.x * 2.0f;
+            const float mode_label_width = ImGui::CalcTextSize("MODE").x;
+            const float mode_gap = ImGui::GetStyle().ItemSpacing.x;
+            const float combo_width = mode_avail - mode_label_width - mode_gap
+                - info_width - mode_gap;
+            const bool mode_row_fits = combo_width >= 84.0f;
+            ImGui::TextDisabled("MODE");
+            if (mode_row_fits) {
+                ImGui::SameLine();
+                if (mode_locked) ImGui::BeginDisabled();
+                ImGui::SetNextItemWidth(combo_width);
+                if (ImGui::Combo("##connection_mode", &mode_selection, mode_items, 2))
+                    g_app.mode = mode_selection;
+                if (mode_locked) ImGui::EndDisabled();
+                ImGui::SameLine(0, mode_gap);
+                if (ImGui::Button("INFO", ImVec2(info_width, 0))) {
+                    s_connection_info_popup_open = true;
+                    ui_request_redraw();
+                }
+                if (ImGui::IsItemHovered()) UiText::Tooltip("Show connection details");
             } else {
-                UiText::TextColoredWrapped(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled],
-                    "Proxy exposes local listeners; TUN routes device traffic.");
+                if (mode_locked) ImGui::BeginDisabled();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                if (ImGui::Combo("##connection_mode", &mode_selection, mode_items, 2))
+                    g_app.mode = mode_selection;
+                if (mode_locked) ImGui::EndDisabled();
+                ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - info_width);
+                if (ImGui::Button("INFO", ImVec2(info_width, 0))) {
+                    s_connection_info_popup_open = true;
+                    ui_request_redraw();
+                }
+                if (ImGui::IsItemHovered()) UiText::Tooltip("Show connection details");
             }
+
             ImGui::EndChild();
             render_home_summary(telem);
             ImGui::EndChild();
-            ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Settings")) {
+        if (main_page == 0) {
             ImGui::BeginChild("##settings_scroll", ImVec2(0, 0), ImGuiChildFlags_None,
                               ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             static int settings_category = 0;
-            static const char* const settings_categories[] = {
-                "App Settings", "TUN", "Aether", "Psiphon", "Tor", "Services",
-                "Zero Trust", "Routes", "Obfuscation", "Scanner",
+            static int aether_settings_section = 0;
+            static const char* const aether_settings_sections[] = {
+                "Aether", "Routes", "Tor", "Zero Trust", "Obfuscation", "Scanner",
             };
-            static const char* const settings_descriptions[] = {
-                "App appearance, updates, and shared network defaults.",
-                "System-wide tunnel engine, DNS, and device routing.",
-                "Aether listeners and transport options.",
-                "Psiphon region, transport, and local listeners.",
-                "Tor listeners and bridge configuration.",
-                "Firefox, URnetwork, and saved core profiles.",
-                "Cloudflare Zero Trust credentials.",
-                "Inline Aether routing rules.",
-                "Noize, TLS fragmentation, and fingerprint options.",
-                "Scanner, SNI, API, and exit-location options.",
+            static const char* const settings_categories[] = {
+                "App Settings", "TUN", "Aether", "Psiphon", "Services",
             };
             if (settings_category < 0 || settings_category >= IM_ARRAYSIZE(settings_categories))
                 settings_category = 0;
@@ -5801,8 +6293,6 @@ void render_ui() {
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::Combo("Category", &settings_category, settings_categories,
                          IM_ARRAYSIZE(settings_categories));
-            UiText::TextColoredWrapped(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled],
-                "%s", settings_descriptions[settings_category]);
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
@@ -5954,41 +6444,46 @@ void render_ui() {
             }
             if (settings_category == 2) {
                 ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "AETHER SETTINGS");
-                ImGui::Separator();
-                listener_row("Aether SOCKS5", &g_app.socks_enabled, &g_app.socks_port, 1, 65535);
-                listener_row("Aether HTTP", &g_app.http_enabled, &g_app.http_port, 1, 65535);
-                ImGui::Text("Transport Options");
-                ImGui::Checkbox("ECH", &g_app.ech_enabled);
-                if (g_app.ech_enabled) {
-                    ImGui::PushItemWidth(260);
-                    UiText::InputTextWithHint("ECH resolver", "udp://1.1.1.1 | tcp:// | https:// DoH",
-                                             g_app.ech_dns, sizeof(g_app.ech_dns));
-                    UiText::InputTextWithHint("ECH domain", "cloudflare-ech.com",
-                                             g_app.ech_domain, sizeof(g_app.ech_domain));
-                    ImGui::PopItemWidth();
-                }
-                ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
-                if (g_app.protocol == 6) {
-                    ImGui::PushItemWidth(260);
-                    UiText::InputTextWithHint("Inner WireGuard endpoint", "auto (ip:port)",
-                                             g_app.gool_inner, sizeof(g_app.gool_inner));
-                    ImGui::PopItemWidth();
-                }
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                ImGui::Combo("Section", &aether_settings_section, aether_settings_sections,
+                             IM_ARRAYSIZE(aether_settings_sections));
                 ImGui::Spacing();
-                UiText::InputTextWithHint("Force peer (optional)", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
-                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-                const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
-                ImGui::Combo("Performance profile", &g_app.sys_profile, sysprofiles, 4);
+                if (aether_settings_section == 0) {
+                    ImGui::Separator();
+                    listener_row("Aether SOCKS5", &g_app.socks_enabled, &g_app.socks_port, 1, 65535);
+                    listener_row("Aether HTTP", &g_app.http_enabled, &g_app.http_port, 1, 65535);
+                    ImGui::Text("Transport Options");
+                    ImGui::Checkbox("ECH", &g_app.ech_enabled);
+                    if (g_app.ech_enabled) {
+                        ImGui::PushItemWidth(260);
+                        UiText::InputTextWithHint("ECH resolver", "udp://1.1.1.1 | tcp:// | https:// DoH",
+                                                 g_app.ech_dns, sizeof(g_app.ech_dns));
+                        UiText::InputTextWithHint("ECH domain", "cloudflare-ech.com",
+                                                 g_app.ech_domain, sizeof(g_app.ech_domain));
+                        ImGui::PopItemWidth();
+                    }
+                    ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
+                    if (g_app.protocol == 6) {
+                        ImGui::PushItemWidth(260);
+                        UiText::InputTextWithHint("Inner WireGuard endpoint", "auto (ip:port)",
+                                                 g_app.gool_inner, sizeof(g_app.gool_inner));
+                        ImGui::PopItemWidth();
+                    }
+                    ImGui::Spacing();
+                    UiText::InputTextWithHint("Force peer (optional)", "ip:port",
+                                             g_app.force_peer, sizeof(g_app.force_peer));
+                    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+                    const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
+                    ImGui::Combo("Performance profile", &g_app.sys_profile, sysprofiles, 4);
 
-                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-                // Verbosity of the aether engine itself, not of this UI's log
-                // pane -- the FFI always reports to the host at info.
-                const char* engine_logs[] = {
-                    "Off", "Error", "Warn", "Info", "Debug", "Trace",
-                };
-                ImGui::Combo("Aether engine log level", &g_app.engine_log, engine_logs, 6);
-
-                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+                    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+                    // Verbosity of the Aether engine, not the UI log pane.
+                    const char* engine_logs[] = {
+                        "Off", "Error", "Warn", "Info", "Debug", "Trace",
+                    };
+                    ImGui::Combo("Aether engine log level", &g_app.engine_log, 6);
+                    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+                }
             }
             if (settings_category == 3) {
                 ImGui::TextColored(ImVec4(0.65f, 0.55f, 1.0f, 1.0f), "PSIPHON SETTINGS");
@@ -6123,7 +6618,7 @@ void render_ui() {
 
                 ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             }
-            if (settings_category == 4) {
+            if (settings_category == 2 && aether_settings_section == 2) {
                 ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f), "TOR SETTINGS (AETHER)");
                 ImGui::Separator();
                 // Tor is a hop, not a routing mode: an exit of the ordered chain is
@@ -6150,9 +6645,8 @@ void render_ui() {
                 UiText::InputTextMultiline("##tor_bridge_lines", g_app.tor_bridge_lines,
                                           sizeof(g_app.tor_bridge_lines), ImVec2(0, 60));
             }
-            if (settings_category == 5) {
+            if (settings_category == 4) {
                 ImGui::TextUnformatted("Protocol services");
-                ImGui::TextDisabled("Manage specialized backends and saved core profiles.");
                 ImGui::Spacing();
                 if (ImGui::Button("Firefox IP Protection settings", ImVec2(-FLT_MIN, 0)))
                     open_firefox_settings();
@@ -6160,10 +6654,8 @@ void render_ui() {
                     open_urnetwork_settings();
                 if (ImGui::Button("Xray / sing-box / Mihomo profiles", ImVec2(-FLT_MIN, 0)))
                     open_core_configs();
-                ImGui::Spacing();
-                ImGui::TextDisabled("Choose a saved profile from Home → Protocol.");
             }
-            if (settings_category == 6) {
+            if (settings_category == 2 && aether_settings_section == 3) {
                 ImGui::Spacing();
                 ImGui::Text("Cloudflare Zero Trust (Teams)");
                 UiText::InputTextWithHint("##team_name", "team-name", g_app.team_name, sizeof(g_app.team_name));
@@ -6180,7 +6672,7 @@ void render_ui() {
                 ImGui::Text("--- or Email OTP ---");
                 UiText::InputTextWithHint("##access_email", "user@example.com", g_app.access_email, sizeof(g_app.access_email));
             }
-            if (settings_category == 7) {
+            if (settings_category == 2 && aether_settings_section == 1) {
                 ImGui::Spacing();
                 ImGui::TextUnformatted("Inline Routing Rules (Aether only)");
                 const float rules_height = (std::max)(ImGui::GetTextLineHeightWithSpacing() * 4.0f,
@@ -6190,7 +6682,7 @@ void render_ui() {
                     g_app.routes_inline, sizeof(g_app.routes_inline), ImVec2(-FLT_MIN, rules_height),
                     ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_WordWrap);
             }
-            if (settings_category == 8) {
+            if (settings_category == 2 && aether_settings_section == 4) {
                 ImGui::Spacing();
                 ImGui::Text("Noize Profile");
                 const char* profiles[] = { "off", "light", "balanced", "aggressive", "firewall", "gfw" };
@@ -6247,7 +6739,7 @@ void render_ui() {
                 UiText::InputTextWithHint("##tls_server_padding", "Server padding (0-65535)", g_app.tls_server_padding, sizeof(g_app.tls_server_padding));
                 ImGui::PopItemWidth();
             }
-            if (settings_category == 9) {
+            if (settings_category == 2 && aether_settings_section == 5) {
                 ImGui::Spacing();
                 const char* modes[] = { "Turbo", "Balanced", "Thorough", "Verified", "Ironclad" };
                 if (g_app.scan_mode > 4) g_app.scan_mode = 1;
@@ -6269,11 +6761,10 @@ void render_ui() {
                                          g_app.exit_loc, sizeof(g_app.exit_loc));
             }
             ImGui::EndChild();
-            ImGui::EndTabItem();
         }
 
         s_log_scroll_pending = false;
-        if (ImGui::BeginTabItem("Logs")) {
+        if (main_page == 2) {
             static bool follow_tail = true;
             static bool manual_scroll_last_frame = false;
             static uint64_t rendered_revision = 0;
@@ -6384,17 +6875,59 @@ void render_ui() {
                 manual_scroll_last_frame = false;
                 s_log_scroll_pending = true;
             }
-            ImGui::SameLine();
-            ImGui::TextDisabled("Scroll up to pause; Latest resumes following");
             ImGui::EndChild();
-            ImGui::EndTabItem();
         }
 
-
-        ImGui::EndTabBar();
-    }
-
     ImGui::EndChild();
+
+    // The content pane ends above the fixed bottom navigation row, so each
+    // page gets the full remaining width and height without the nav covering it.
+    ImGui::SetCursorPosY(nav_y);
+    ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMin().x);
+    const ImVec2 nav_origin = ImGui::GetCursorScreenPos();
+    const float nav_width_all = ImGui::GetContentRegionAvail().x;
+    ImGui::GetWindowDrawList()->AddLine(
+        ImVec2(nav_origin.x, nav_origin.y - 6.0f),
+        ImVec2(nav_origin.x + nav_width_all, nav_origin.y - 6.0f),
+        IM_COL32(95, 112, 143, 185), 1.0f);
+    const float nav_gap = page_style.ItemSpacing.x;
+    const float nav_width = std::max(1.0f, (nav_width_all - nav_gap * 2.0f) / 3.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    auto nav_button = [&](const char* label, int page) {
+        const bool selected = main_page == page;
+        const ImVec4 base = selected ? ImVec4(0.10f, 0.38f, 0.60f, 0.98f)
+                                     : ImVec4(0.10f, 0.13f, 0.20f, 0.92f);
+        ImGui::PushStyleColor(ImGuiCol_Button, base);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+            selected ? ImVec4(0.15f, 0.49f, 0.74f, 1.0f)
+                     : ImVec4(0.16f, 0.22f, 0.33f, 0.98f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.09f, 0.32f, 0.51f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            selected ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f)
+                     : ImVec4(0.78f, 0.82f, 0.90f, 1.0f));
+        const float text_width = ImGui::CalcTextSize(label).x;
+        const float inner_width = std::max(1.0f,
+            nav_width - ImGui::GetStyle().FramePadding.x * 2.0f);
+        const bool shrink_text = text_width > inner_width && text_width > 0.0f;
+        if (shrink_text) {
+            const float scale = std::max(0.72f, inner_width / text_width);
+            ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale);
+        }
+        if (ImGui::Button(label, ImVec2(nav_width, nav_height)) && main_page != page) {
+            main_page = page;
+            ui_request_redraw();
+        }
+        if (shrink_text) ImGui::PopFont();
+        ImGui::PopStyleColor(4);
+    };
+    nav_button("Settings", 0);
+    ImGui::SameLine(0, nav_gap);
+    nav_button("Home", 1);
+    ImGui::SameLine(0, nav_gap);
+    nav_button("Logs", 2);
+    ImGui::PopStyleVar(3);
 
 #if defined(ANDROID)
     android_ui_render_app_picker();

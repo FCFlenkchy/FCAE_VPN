@@ -101,7 +101,7 @@ struct AppState {
         std::string name;
         // 0 = Xray, 1 = sing-box, 2 = Mihomo.
         int backend = 0;
-        // Share link or the core's own config JSON, verbatim.
+        // Share link or the core's native profile text, verbatim.
         std::string text;
         // Bitwise FCAE_CORE_LISTENER_*: what this config can answer on. Cached
         // because reading it parses the document and the UI asks for it on

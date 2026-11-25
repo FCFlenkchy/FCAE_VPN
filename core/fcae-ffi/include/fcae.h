@@ -46,11 +46,11 @@ extern "C" {
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
 #define FCAE_ABI_VERSION 26
 
-/* Protocol-list positions at and above this index name a saved Xray/sing-box
- * config (its position in FcaeCore::library) instead of one of the built-in
- * transports. Shared by the desktop and Android UIs, so a saved config is
- * pickable everywhere a built-in transport is: as the main protocol and as a
- * chained exit. Below it, positions follow the built-in transport order. */
+/* Protocol-list positions at and above this index name a saved Xray, sing-box
+ * or Mihomo config (its position in FcaeCore::library) instead of one of the
+ * built-in transports. Shared by the desktop and Android UIs, so a saved config
+ * is pickable everywhere a built-in transport is: as the main protocol and as
+ * a chained exit. Below it, positions follow the built-in transport order. */
 #define FCAE_CORE_TRANSPORT_BASE 12
 
 /* fcae_core_listeners() bits: the listener types a saved core config can
@@ -58,6 +58,8 @@ extern "C" {
  * types it declares (a `mixed` inbound counts as SOCKS5). */
 #define FCAE_CORE_LISTENER_SOCKS 1u
 #define FCAE_CORE_LISTENER_HTTP 2u
+/* Maximum UTF-8 body accepted by the subscription fetcher/importer. */
+#define FCAE_SUBSCRIPTION_MAX_BODY (2u * 1024u * 1024u)
 
 /* Opt in to an HTTP listener in TUN mode when http_port is nonzero. */
 #define FCAE_CONFIG_TUN_HTTP (UINT64_C(1) << 63)
@@ -369,18 +371,18 @@ typedef struct {
 } FcaeFirefox;
 
 /* Options for the built-in proxy cores (FCAE_BACKEND_XRAY,
- * FCAE_BACKEND_SINGBOX). Both are compiled into the app's Go archive and
- * started in-process: the app supplies only the outbound profile, the bridge
- * generates the core's config and drives the core it links. There is no
+ * FCAE_BACKEND_SINGBOX, FCAE_BACKEND_MIHOMO). They are compiled into the app
+ * and started in-process: the app supplies only the outbound profile, the
+ * bridge generates the core's config and drives the core it links. There is no
  * executable to ship or point at. `profile` is NULL only when no core is in
  * the route. ABI v24; `library` and `config_ref` are ABI v25.
  *
  * `library` is the user's saved configs, a JSON array of
- *   {"name": "...", "backend": "xray" | "sing-box", "config": ...}
- * where "config" is a share link string or the core's own config object. The
+ *   {"name": "...", "backend": "xray" | "sing-box" | "mihomo", "config": ...}
+ * where "config" is a share link string or the core's native profile text. The
  * UI owns that document; positions in it are what `config_ref` points at. */
 typedef struct {
-    const char     *profile;      /* share link or native config JSON       */
+    const char     *profile;      /* share link or native profile text      */
     FcaeEngineLog   log_level;    /* the core's own log verbosity; 0=silent */
     const char     *library;      /* saved configs JSON array, or NULL      */
     const char     *config_ref;   /* "#<index>" or a saved config's name    */
@@ -620,10 +622,16 @@ uint32_t fcae_parse_tcp_buffer_size(const char *text);
  * writes the reason (truncated to `cap`). */
 bool fcae_normalize_upstream_proxy(const char *text, char *out, uint32_t cap);
 
-/* Validates one saved core config (a share link or the core's own config JSON)
- * for the given backend (FCAE_BACKEND_XRAY or FCAE_BACKEND_SINGBOX). Returns
- * true and writes "" into `out`, or false and writes the reason there. */
+/* Validates one saved core config (a share link or the core's own native config)
+ * for the given backend (Xray, sing-box or Mihomo). Returns true and writes
+ * "" into `out`, or false and writes the reason there. */
 bool fcae_core_check_profile(const char *config, int32_t backend, char *out, uint32_t cap);
+
+/* Fetch an HTTPS subscription as UTF-8 text. All platforms use this same
+ * implementation. Call from a worker thread: it blocks up to 25 seconds.
+ * `cap` must exceed FCAE_SUBSCRIPTION_MAX_BODY by at least one byte. Returns
+ * true and writes the response body to `out`; on failure, writes an error. */
+bool fcae_fetch_subscription(const char *url, char *out, uint32_t cap);
 
 /* What a saved core config lets a session serve, bitwise (FCAE_CORE_LISTENER_*),
  * and the ports it pins for those listeners. `socks_port`/`http_port` receive 0
