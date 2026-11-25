@@ -2269,10 +2269,16 @@ void ui_frame() {
     const bool has_background = draw_mountain_background(io);
     if (has_background) {
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.12f, 0.52f));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.14f, 0.70f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.14f, 0.62f));
+        // Modal and combo windows use PopupBg, not WindowBg. Tint these too so
+        // settings/dialogs remain glassy over the selected mountain image.
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.06f, 0.08f, 0.12f, 0.62f));
+        ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.06f, 0.08f, 0.12f, 0.62f));
+        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.08f, 0.10f, 0.16f, 0.68f));
+        ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed, ImVec4(0.06f, 0.08f, 0.12f, 0.52f));
     }
     render_ui();
-    if (has_background) ImGui::PopStyleColor(2);
+    if (has_background) ImGui::PopStyleColor(6);
 
     // The connect/scan spinner keeps requesting frames while it moves; every
     // other repaint is gated on content changes in ui_should_render().
@@ -5580,7 +5586,6 @@ void render_ui() {
         ImGui::TextUnformatted("Connection info");
         ImGui::Spacing();
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
         // The pane is exactly as tall as the rows it printed.
         //
@@ -5684,7 +5689,7 @@ void render_ui() {
             }
         }
         ImGui::EndChild();
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor();
         ImGui::PopStyleVar();
         ImGui::Spacing();
         if (ImGui::Button("Close"))
