@@ -34,8 +34,13 @@ use std::process::Command;
 use crate::target::{Arch, Os, Target};
 
 /// Replace a source file from a selected Go module while compiling the archive.
-/// The replacement is supplied with `go build -overlay`; module-cache sources
-/// remain untouched.
+///
+/// The module is copied next to the generated `go.mod`, `replacement` is
+/// written over `target` in that copy, and a `replace` directive points the
+/// build at it. `go build -overlay` cannot do this job: the go command aborts
+/// on any overlay entry beneath GOMODCACHE ("Files beneath GOMODCACHE must not
+/// be replaced"), which is exactly where a pinned dependency's sources live.
+/// Module-cache sources remain untouched.
 pub struct GoSourceOverlay {
     pub module: &'static str,
     pub target: &'static str,
@@ -57,7 +62,8 @@ pub struct CArchive<'a> {
     pub ldflags: Vec<String>,
     /// Go build tags.
     pub tags: Vec<String>,
-    /// Target-specific source overlays for the pinned dependency graph.
+    /// Target-specific source overlays for the pinned dependency graph,
+    /// applied to generated copies of the modules they patch.
     pub source_overlays: Vec<GoSourceOverlay>,
 }
 
@@ -230,99 +236,137 @@ impl<'a> CArchive<'a> {
         Ok(())
     }
 
-    fn source_overlay_file(&self, go: &str, out_dir: &Path) -> Result<Option<PathBuf>, GoError> {
-        if self.source_overlays.is_empty() {
-            return Ok(None);
-        }
-        let mut replacements = Vec::with_capacity(self.source_overlays.len());
+    /// Apply `source_overlays` to generated copies of the modules they patch.
+    ///
+    /// Each module is resolved through the build list (never a guessed cache
+    /// path), copied into the generated module directory and `replace`d there.
+    /// The copy carries the module's own `go.mod`, so the requirement graph and
+    /// `go.sum` stay exactly as resolved and the `-mod=readonly` build accepts
+    /// the copy as is, the same way it accepts the Mihomo metrics copy.
+    fn stage_source_overlays(&self, go: &str) -> Result<(), GoError> {
+        // Modules copied by this call: several files of one module must land
+        // in the same copy.
+        let mut staged: Vec<(&str, PathBuf)> = Vec::new();
         for overlay in &self.source_overlays {
-            let downloaded = Command::new(go)
-                .current_dir(self.module_dir)
-                .args(["mod", "download", overlay.module])
-                .env_remove("GOFLAGS")
-                .env("CGO_ENABLED", "0")
-                .env("GOTOOLCHAIN", "auto")
-                .output()
-                .map_err(|error| {
-                    GoError::Build(format!(
-                        "could not download Go overlay module {}: {error}",
-                        overlay.module
-                    ))
-                })?;
-            if !downloaded.status.success() {
-                return Err(GoError::Build(format!(
-                    "could not download Go overlay module {}: {}\n{}",
-                    overlay.module,
-                    downloaded.status,
-                    String::from_utf8_lossy(&downloaded.stderr)
-                )));
-            }
-            let output = Command::new(go)
-                .current_dir(self.module_dir)
-                .args(["list", "-m", "-f", "{{.Dir}}", overlay.module])
-                .env("GOFLAGS", "-mod=readonly")
-                .env("CGO_ENABLED", "0")
-                .env("GOTOOLCHAIN", "auto")
-                .output()
-                .map_err(|error| {
-                    GoError::Build(format!(
-                        "could not resolve Go overlay module {}: {error}",
-                        overlay.module
-                    ))
-                })?;
-            if !output.status.success() {
-                return Err(GoError::Build(format!(
-                    "could not resolve Go overlay module {}: {}\n{}",
-                    overlay.module,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                )));
-            }
-            let module_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-            if !module_dir.is_absolute() {
-                return Err(GoError::Build(format!(
-                    "Go overlay module {} has no local source directory",
-                    overlay.module
-                )));
-            }
-            let target = module_dir.join(overlay.target);
+            let replacement = std::fs::read(&overlay.replacement).map_err(|error| {
+                GoError::Build(format!(
+                    "could not read Go overlay replacement {}: {error}",
+                    overlay.replacement.display()
+                ))
+            })?;
+            let known = staged
+                .iter()
+                .find(|(module, _)| *module == overlay.module)
+                .map(|(_, directory)| directory.clone());
+            let directory = match known {
+                Some(directory) => directory,
+                None => {
+                    let directory = self.stage_overlay_module(go, overlay.module)?;
+                    staged.push((overlay.module, directory.clone()));
+                    directory
+                }
+            };
+            let target = directory.join(overlay.target);
             if !target.is_file() {
                 return Err(GoError::Build(format!(
-                    "Go overlay target does not exist: {}",
-                    target.display()
+                    "Go overlay target does not exist: {} has no {}",
+                    overlay.module, overlay.target
                 )));
             }
-            let replacement = if overlay.replacement.is_absolute() {
-                overlay.replacement.clone()
-            } else {
-                overlay.replacement.canonicalize().map_err(|error| {
-                    GoError::Build(format!(
-                        "could not resolve Go overlay replacement {}: {error}",
-                        overlay.replacement.display()
-                    ))
-                })?
-            };
-            if !replacement.is_file() {
-                return Err(GoError::Build(format!(
-                    "Go overlay replacement does not exist: {}",
-                    replacement.display()
-                )));
-            }
-            replacements.push(format!(
-                "{}:{}",
-                json_quote(&target.to_string_lossy()),
-                json_quote(&replacement.to_string_lossy())
-            ));
+            std::fs::write(&target, replacement).map_err(|error| {
+                GoError::Build(format!("could not write {}: {error}", target.display()))
+            })?;
         }
-        let path = out_dir.join("go-source-overlay.json");
-        std::fs::write(
-            &path,
-            format!("{{\"Replace\":{{{}}}}}", replacements.join(",")),
-        )
-        .map_err(|error| {
-            GoError::Build(format!("could not write {}: {error}", path.display()))
-        })?;
-        Ok(Some(path))
+        Ok(())
+    }
+
+    /// Copy the resolved source of `module` into the generated module directory
+    /// and point the build at that copy.
+    fn stage_overlay_module(&self, go: &str, module: &str) -> Result<PathBuf, GoError> {
+        let downloaded = Command::new(go)
+            .current_dir(self.module_dir)
+            .args(["mod", "download", module])
+            .env_remove("GOFLAGS")
+            .env("CGO_ENABLED", "0")
+            .env("GOTOOLCHAIN", "auto")
+            .output()
+            .map_err(|error| {
+                GoError::Build(format!(
+                    "could not download Go overlay module {module}: {error}"
+                ))
+            })?;
+        if !downloaded.status.success() {
+            return Err(GoError::Build(format!(
+                "could not download Go overlay module {module}: {}\n{}",
+                downloaded.status,
+                String::from_utf8_lossy(&downloaded.stderr)
+            )));
+        }
+        let output = Command::new(go)
+            .current_dir(self.module_dir)
+            .args(["list", "-m", "-f", "{{.Dir}}", module])
+            .env("GOFLAGS", "-mod=readonly")
+            .env("CGO_ENABLED", "0")
+            .env("GOTOOLCHAIN", "auto")
+            .output()
+            .map_err(|error| {
+                GoError::Build(format!(
+                    "could not resolve Go overlay module {module}: {error}"
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(GoError::Build(format!(
+                "could not resolve Go overlay module {module}: {}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let source = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if !source.is_absolute() {
+            return Err(GoError::Build(format!(
+                "Go overlay module {module} has no local source directory"
+            )));
+        }
+        let label: String = module
+            .chars()
+            .map(|character| match character {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => character,
+                _ => '-',
+            })
+            .collect();
+        let destination = self.module_dir.join(format!("source-overlay-{label}"));
+        // The generated go.mod is rewritten on every build, so the module
+        // normally resolves to its pinned source here. Should it already point
+        // at this copy, refresh the files in place: clearing the copy would
+        // delete the only source there is.
+        let staged = source == destination
+            || matches!(
+                (source.canonicalize(), destination.canonicalize()),
+                (Ok(resolved), Ok(copy)) if resolved == copy
+            );
+        if staged {
+            return Ok(destination);
+        }
+        let fail = |error: std::io::Error| {
+            GoError::Build(format!(
+                "could not stage Go overlay module {module}: {error}"
+            ))
+        };
+        if destination.exists() {
+            std::fs::remove_dir_all(&destination).map_err(fail)?;
+        }
+        copy_windows_module(&source, &destination)?;
+        let replacement = format!(
+            "{module}={}",
+            destination.to_string_lossy().replace('\\', "/")
+        );
+        Self::run_go_step(
+            go,
+            self.module_dir,
+            &["mod", "edit", "-replace", &replacement],
+            "stage Go source overlay",
+        )?;
+        Ok(destination)
     }
 
     pub fn build(&self) -> Result<Built, GoError> {
@@ -394,7 +438,7 @@ impl<'a> CArchive<'a> {
         if self.target.os == Os::Windows {
             stage_windows_adapter_guids(&go, self.module_dir)?;
         }
-        let source_overlay = self.source_overlay_file(&go, &out_dir)?;
+        self.stage_source_overlays(&go)?;
         let mut ldflags = self.ldflags.clone();
         if shared && self.target.is_android() {
             // Android 15 ships 16 KB memory pages. A shared object linked with
@@ -422,9 +466,6 @@ impl<'a> CArchive<'a> {
 
         if !ldflags.is_empty() {
             cmd.arg("-ldflags").arg(ldflags.join(" "));
-        }
-        if let Some(source_overlay) = source_overlay {
-            cmd.arg("-overlay").arg(source_overlay);
         }
         cmd.arg("-o").arg(&archive).arg(self.package);
 
@@ -499,28 +540,6 @@ impl<'a> CArchive<'a> {
             shared,
         })
     }
-}
-
-fn json_quote(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            '\u{8}' => quoted.push_str("\\b"),
-            '\u{9}' => quoted.push_str("\\t"),
-            '\u{a}' => quoted.push_str("\\n"),
-            '\u{c}' => quoted.push_str("\\f"),
-            '\u{d}' => quoted.push_str("\\r"),
-            character if (character as u32) < 0x20 => {
-                quoted.push_str(&format!("\\u{:04x}", character as u32));
-            }
-            character => quoted.push(character),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 impl Built {

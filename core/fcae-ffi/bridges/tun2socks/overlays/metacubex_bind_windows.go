@@ -1,7 +1,9 @@
 // Windows dual-stack interface binding adapted to MetaCubeX/sing's pinned
 // control implementation using SagerNet/sing commit
-// 951be67f90df61f232e3d148191802df2a03fe1c. build.rs applies this file
-// through go build -overlay; the module cache stays untouched.
+// 951be67f90df61f232e3d148191802df2a03fe1c. build.rs applies this file to a
+// generated copy of the module that the archive's go.mod replaces the pinned
+// one with (go build -overlay refuses files beneath GOMODCACHE); the module
+// cache stays untouched.
 package control
 
 import (
