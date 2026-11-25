@@ -2255,9 +2255,7 @@ void ui_frame() {
     const bool has_background = draw_mountain_background(io);
     if (has_background) {
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.12f, 0.52f));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.12f, 0.19f, 0.76f));
-        // Keep the mountain visible behind the app shell while giving child
-        // panels and combo/modal surfaces enough opacity for readable controls.
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.06f, 0.08f, 0.13f, 0.95f));
         ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.06f, 0.08f, 0.12f, 0.62f));
         ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.08f, 0.10f, 0.16f, 0.68f));
@@ -4785,115 +4783,47 @@ bool ui_tray_action_pending() {
 }
 #endif
 
-static void render_home_summary(const FcaeTelemetry& telem) {
-    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+static void render_home_summary() {
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
     {
-        const float avail_w = ImGui::GetContentRegionAvail().x;
-        const ImGuiStyle& style = ImGui::GetStyle();
-        const float value_w = ImGui::CalcTextSize("1023.99 GB").x;
-        const float rate_w = ImGui::CalcTextSize("1023.99 GB/s").x;
-        const float label_w = (std::max)(ImGui::CalcTextSize("DOWNLOAD").x,
-                                         ImGui::CalcTextSize("UPLOAD").x);
-        const float stats_w = (std::max)(label_w + style.ItemSpacing.x + value_w, rate_w);
-        float left_column_w = (std::max)(260.0f,
-            stats_w + style.WindowPadding.x * 2.0f + 4.0f);
-        if (avail_w > 0.0f && left_column_w > avail_w) left_column_w = avail_w;
-        const float min_card_w = 320.0f;
-        const float column_gap = 24.0f;
-        const bool use_columns = (avail_w - (left_column_w + column_gap)) >= min_card_w;
-        if (!use_columns && avail_w > 0.0f) left_column_w = avail_w;
-        const float card_w = std::floor(std::max(1.0f, use_columns
-            ? std::clamp(avail_w * 0.4f, min_card_w, avail_w - left_column_w - column_gap)
-            : avail_w));
-        const float sponsor_offset_x = ImGui::GetCursorPosX() + (use_columns ? avail_w - card_w : 0.0f);
+        const float card_w = std::floor(std::max(1.0f, ImGui::GetContentRegionAvail().x));
+        const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
+        const bool sponsor_has_content = s_sponsor.available;
+        const char* sponsor_destination = sponsor_has_content ? s_sponsor.destination_url : sponsor_policy;
+        const char* sponsor_title = sponsor_has_content ? s_sponsor.title : "Become a sponsor";
+        const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Click to learn more";
 
-        ImGui::BeginGroup(); // Left column: independent transfer cards
-        {
-            auto stat_card = [&](const char* id, const char* label, uint64_t total,
-                                 uint64_t rate, const ImVec4& label_color) {
-                char total_buf[32], rate_buf[32];
-                fmt_bytes(total_buf, sizeof(total_buf), total);
-                fmt_rate(rate_buf, sizeof(rate_buf), rate);
-                const float pad_x = 10.0f;
-                const float pad_y = 6.0f;
-                const float inner_w = std::max(1.0f, left_column_w - pad_x * 2.0f - 2.0f);
-                const bool inline_total = ImGui::CalcTextSize(label).x
-                    + style.ItemSpacing.x + ImGui::CalcTextSize(total_buf).x <= inner_w;
-                const float lines = inline_total ? 2.0f : 3.0f;
-                const float card_h = ImGui::GetTextLineHeight() * lines
-                    + style.ItemSpacing.y * (lines - 1.0f) + pad_y * 2.0f + 2.0f;
+        const float kHeaderPadV = 4.0f;
+        const float kHeaderHeight = icon_button_size() + kHeaderPadV * 2.0f;
+        const float icon_scale = std::clamp((float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
+        const float background_scale = std::clamp((float)s_sponsor.background_scale / 100.0f, 0.5f, 1.6f);
+        const float title_scale = std::clamp((float)(s_sponsor.title_scale ? s_sponsor.title_scale : 100) / 100.0f, 0.5f, 2.0f);
+        constexpr float kSponsorMessageFontRatio = 14.0f / 16.0f;
+        const float message_scale = kSponsorMessageFontRatio
+            * std::clamp((float)(s_sponsor.message_scale ? s_sponsor.message_scale : 100) / 100.0f, 0.5f, 2.0f);
+        constexpr float kSponsorTextInset = 8.0f;
+        const float sponsor_card_height = std::max(80.0f,
+            ImGui::GetTextLineHeightWithSpacing() * 2.0f * message_scale
+            + kSponsorTextInset * 3.0f + 8.0f);
 
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.15f, 0.24f, 0.96f));
-                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.40f, 0.58f, 0.92f));
-                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad_x, pad_y));
-                ImGui::BeginChild(id, ImVec2(left_column_w, card_h), ImGuiChildFlags_Borders,
-                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
-                        | ImGuiWindowFlags_NoNavInputs | ImGuiWindowFlags_NoNavFocus);
-                ImGui::TextColored(label_color, "%s", label);
-                if (inline_total) {
-                    ImGui::SameLine();
-                    const float total_x = ImGui::GetWindowContentRegionMax().x
-                        - ImGui::CalcTextSize(total_buf).x;
-                    if (total_x > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(total_x);
-                    ImGui::Text("%s", total_buf);
-                } else {
-                    ImGui::Text("%s", total_buf);
-                }
-                ImGui::TextDisabled("%s", rate_buf);
-                ImGui::EndChild();
-                ImGui::PopStyleVar(2);
-                ImGui::PopStyleColor(2);
-            };
-
-            stat_card("##download_stat", "DOWNLOAD", telem.total_rx, telem.rx_bytes_sec,
-                      ImVec4(0.30f, 0.80f, 1.00f, 1.0f));
-            ImGui::Spacing();
-            stat_card("##upload_stat", "UPLOAD", telem.total_tx, telem.tx_bytes_sec,
-                      ImVec4(1.00f, 0.55f, 0.20f, 1.0f));
-            ImGui::Spacing();
-            char rtt_buf[24];
-            if (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0)
-                snprintf(rtt_buf, sizeof(rtt_buf), "%ums", telem.rtt_ms);
-            else
-                snprintf(rtt_buf, sizeof(rtt_buf), "--");
-            ImGui::TextDisabled("RTT");
-            ImGui::SameLine(0, 8);
-            ImGui::TextColored(ImVec4(0.70f, 0.90f, 0.70f, 1.0f), "%s", rtt_buf);
-        }
-        ImGui::EndGroup();
-
-        if (use_columns) {
-            ImGui::SameLine(sponsor_offset_x);
-        } else {
-            ImGui::Spacing();
+        const float sponsor_total_h = kHeaderHeight + 8.0f + sponsor_card_height;
+        const float avail_y = ImGui::GetContentRegionAvail().y;
+        if (avail_y > sponsor_total_h + 4.0f) {
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + std::floor(avail_y - sponsor_total_h - 4.0f));
         }
 
-        ImGui::BeginGroup(); // Right column: Sponsor Section
+        ImGui::BeginGroup();
         {
-            const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
-            const bool sponsor_has_content = s_sponsor.available;
-            const char* sponsor_destination = sponsor_has_content ? s_sponsor.destination_url : sponsor_policy;
-            const char* sponsor_title = sponsor_has_content ? s_sponsor.title : "Become a sponsor";
-            const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Click to learn more";
-
-            // Mirrors Android's 38dp rounded_rectangle row: #171A26 fill,
-            // 1px #292D3D border, 10/4 horizontal padding, 8px gap to the card.
-            const float kHeaderPadV = 4.0f;
-            // Follows the icon size, which follows the font: a fixed height here
-            // would clip the buttons once the type grew.
-            const float kHeaderHeight = icon_button_size() + kHeaderPadV * 2.0f;
-            const float kHeaderRounding = kHeaderHeight * 12.0f / 38.0f;
             const ImVec2 cursor = ImGui::GetCursorScreenPos();
             const ImVec2 header_min(std::floor(cursor.x), std::floor(cursor.y));
             const ImVec2 header_max(header_min.x + card_w, header_min.y + kHeaderHeight);
             ImDrawList* const header_draw = ImGui::GetWindowDrawList();
-            header_draw->AddRectFilled(header_min, header_max, IM_COL32(23, 26, 38, 255), kHeaderRounding);
-            header_draw->AddRect(header_min, header_max, IM_COL32(41, 45, 61, 255), kHeaderRounding, 0, 1.0f);
             const float header_icon = icon_button_size();
-            const float audio_x = header_max.x - 10.0f - header_icon;
+            const float audio_x = header_max.x - header_icon;
             const float refresh_x = audio_x - 6.0f - header_icon;
-            const float title_x = header_min.x + 10.0f;
+            const float title_x = header_min.x;
             constexpr float text_gap = 8.0f;
             const char* const cta = "become a sponsor";
             const float natural_text_w = ImGui::CalcTextSize("SPONSORS").x
@@ -4909,7 +4839,6 @@ static void render_home_summary(const FcaeTelemetry& telem) {
                 IM_COL32(140, 184, 255, 255), "SPONSORS");
             const float link_left = title_x + title_w + text_gap;
             const float link_right = refresh_x - text_gap;
-            // NewLine clears the inherited text baseline before absolute placement.
             ImGui::NewLine();
             ImGui::SetCursorScreenPos(ImVec2(
                 link_left + std::max(0.0f, (link_right - link_left - cta_w) * 0.5f), header_text_y));
@@ -4948,20 +4877,6 @@ static void render_home_summary(const FcaeTelemetry& telem) {
                     (int)s_sponsor.background_height,
                     s_sponsor_loaded_background_generation & ~kSponsorForegroundFrameMask, 1);
             }
-            const float icon_scale = std::clamp((float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
-            const float background_scale = std::clamp((float)s_sponsor.background_scale / 100.0f, 0.5f, 1.6f);
-            const float title_scale = std::clamp((float)(s_sponsor.title_scale ? s_sponsor.title_scale : 100) / 100.0f, 0.5f, 2.0f);
-            // Android's 16sp title / 14sp message hierarchy.
-            constexpr float kSponsorMessageFontRatio = 14.0f / 16.0f;
-            const float message_scale = kSponsorMessageFontRatio
-                * std::clamp((float)(s_sponsor.message_scale ? s_sponsor.message_scale : 100) / 100.0f, 0.5f, 2.0f);
-            constexpr float kSponsorTextInset = 8.0f;
-            // Was a flat 80 px, sized for the old type. The icon band and the
-            // two text lines inside are drawn relative to the message scale, so
-            // the card is sized from the text it has to hold.
-            const float sponsor_card_height = std::max(80.0f,
-                ImGui::GetTextLineHeightWithSpacing() * 2.0f * message_scale
-                + kSponsorTextInset * 3.0f + 8.0f);
             const ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f),
                 s_sponsor.background_color_opacity);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
@@ -6206,19 +6121,92 @@ void render_ui() {
     const float nav_y = ImGui::GetWindowContentRegionMax().y - nav_height;
     const float page_height = std::max(1.0f, nav_y - ImGui::GetCursorPosY()
                                        - page_style.ItemSpacing.y);
-    // This sizing/clipping child stays transparent; the active page owns the
-    // single translucent panel layer so the mountain remains visible below it.
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
     ImGui::BeginChild("##main_page_content", ImVec2(0, page_height), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    ImGui::PopStyleColor();
 
     if (main_page == 1) {
-            ImGui::BeginChild("##home_scroll", ImVec2(0, 0), ImGuiChildFlags_None,
-                              ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::BeginChild("##home_scroll", ImVec2(0, 0), ImGuiChildFlags_None);
             ImGui::Spacing();
-            ImGui::BeginChild("##home_controls", ImVec2(0, 0),
-                              ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+            {
+                char dl_rate[32], dl_total[32], ul_rate[32], ul_total[32], rtt_buf[24];
+                fmt_rate(dl_rate, sizeof(dl_rate), telem.rx_bytes_sec);
+                fmt_bytes(dl_total, sizeof(dl_total), telem.total_rx);
+                fmt_rate(ul_rate, sizeof(ul_rate), telem.tx_bytes_sec);
+                fmt_bytes(ul_total, sizeof(ul_total), telem.total_tx);
+                const bool rtt_live = (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0);
+                if (rtt_live)
+                    snprintf(rtt_buf, sizeof(rtt_buf), "%ums", telem.rtt_ms);
+                else
+                    snprintf(rtt_buf, sizeof(rtt_buf), "--");
+
+                char dl_total_line[48], ul_total_line[48];
+                snprintf(dl_total_line, sizeof(dl_total_line), "Total %s", dl_total);
+                snprintf(ul_total_line, sizeof(ul_total_line), "Total %s", ul_total);
+
+                const ImGuiStyle& style = ImGui::GetStyle();
+                const float avail_w = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+                const float col_w = avail_w / 3.0f;
+                const float base_x = ImGui::GetCursorPosX();
+                const float base_y = ImGui::GetCursorPosY();
+                const float line_h = ImGui::GetTextLineHeight();
+                const float row_gap = style.ItemSpacing.y;
+                const float info_btn_w = ImGui::CalcTextSize("INFO").x
+                    + style.FramePadding.x * 2.0f + 8.0f;
+                const float info_btn_h = ImGui::GetFrameHeight();
+
+                auto col_text_x = [&](int col, const char* text) -> float {
+                    const float w = ImGui::CalcTextSize(text).x;
+                    const float col_min = base_x + col_w * (float)col;
+                    const float col_max = col_min + col_w;
+                    const float cx = col_min + (col_w - w) * 0.5f;
+                    return std::floor(std::clamp(cx, col_min, std::max(col_min, col_max - w)));
+                };
+
+                ImGui::SetCursorPos(ImVec2(col_text_x(0, "DOWNLOAD"), base_y));
+                ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "DOWNLOAD");
+
+                ImGui::SetCursorPos(ImVec2(col_text_x(1, "RTT"), base_y));
+                ImGui::TextDisabled("RTT");
+
+                ImGui::SetCursorPos(ImVec2(col_text_x(2, "UPLOAD"), base_y));
+                ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "UPLOAD");
+
+                const float y2 = base_y + line_h + row_gap;
+                ImGui::SetCursorPos(ImVec2(col_text_x(0, dl_rate), y2));
+                ImGui::TextUnformatted(dl_rate);
+
+                ImGui::SetCursorPos(ImVec2(col_text_x(1, rtt_buf), y2));
+                ImGui::TextColored(rtt_live ? ImVec4(0.45f, 0.92f, 0.55f, 1.0f)
+                                            : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
+                                   "%s", rtt_buf);
+
+                ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_rate), y2));
+                ImGui::TextUnformatted(ul_rate);
+
+                const float y3 = y2 + line_h + row_gap;
+                const float total_text_y = y3 + std::floor((info_btn_h - line_h) * 0.5f);
+
+                ImGui::SetCursorPos(ImVec2(col_text_x(0, dl_total_line), total_text_y));
+                ImGui::TextDisabled("%s", dl_total_line);
+
+                const float info_x = std::floor(base_x + (avail_w - info_btn_w) * 0.5f);
+                ImGui::SetCursorPos(ImVec2(std::max(base_x, info_x), y3));
+                if (ImGui::Button("INFO", ImVec2(info_btn_w, info_btn_h))) {
+                    s_connection_info_popup_open = true;
+                    ui_request_redraw();
+                }
+                if (ImGui::IsItemHovered()) UiText::Tooltip("Show connection details");
+
+                ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_total_line), total_text_y));
+                ImGui::TextDisabled("%s", ul_total_line);
+
+                ImGui::SetCursorPos(ImVec2(base_x, y3 + info_btn_h + row_gap));
+                ImGui::Dummy(ImVec2(0.0f, 0.0f));
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
 
             if (ImGui::Button("Protocol", ImVec2(-FLT_MIN, 0)))
                 open_protocol_editor();
@@ -6228,43 +6216,27 @@ void render_ui() {
             int mode_selection = g_app.mode == 1 ? 1 : 0;
             const bool mode_locked = connected || busy || s_tun_paused;
             const float mode_avail = ImGui::GetContentRegionAvail().x;
-            const float info_width = ImGui::CalcTextSize("INFO").x
-                + ImGui::GetStyle().FramePadding.x * 2.0f;
             const float mode_label_width = ImGui::CalcTextSize("MODE").x;
             const float mode_gap = ImGui::GetStyle().ItemSpacing.x;
-            const float combo_width = mode_avail - mode_label_width - mode_gap
-                - info_width - mode_gap;
-            const bool mode_row_fits = combo_width >= 84.0f;
+            const float combo_width = mode_avail - mode_label_width - mode_gap;
+            ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("MODE");
-            if (mode_row_fits) {
-                ImGui::SameLine();
+            if (combo_width >= 84.0f) {
+                ImGui::SameLine(0, mode_gap);
                 if (mode_locked) ImGui::BeginDisabled();
-                ImGui::SetNextItemWidth(combo_width);
+                ImGui::SetNextItemWidth(-FLT_MIN);
                 if (ImGui::Combo("##connection_mode", &mode_selection, mode_items, 2))
                     g_app.mode = mode_selection;
                 if (mode_locked) ImGui::EndDisabled();
-                ImGui::SameLine(0, mode_gap);
-                if (ImGui::Button("INFO", ImVec2(info_width, 0))) {
-                    s_connection_info_popup_open = true;
-                    ui_request_redraw();
-                }
-                if (ImGui::IsItemHovered()) UiText::Tooltip("Show connection details");
             } else {
                 if (mode_locked) ImGui::BeginDisabled();
                 ImGui::SetNextItemWidth(-FLT_MIN);
                 if (ImGui::Combo("##connection_mode", &mode_selection, mode_items, 2))
                     g_app.mode = mode_selection;
                 if (mode_locked) ImGui::EndDisabled();
-                ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - info_width);
-                if (ImGui::Button("INFO", ImVec2(info_width, 0))) {
-                    s_connection_info_popup_open = true;
-                    ui_request_redraw();
-                }
-                if (ImGui::IsItemHovered()) UiText::Tooltip("Show connection details");
             }
 
-            ImGui::EndChild();
-            render_home_summary(telem);
+            render_home_summary();
             ImGui::EndChild();
         }
 

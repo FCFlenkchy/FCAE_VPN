@@ -16,7 +16,7 @@ inline void ui_apply_style(float base_font_size) {
 
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_WindowBg]        = ImVec4(0.08f, 0.08f, 0.12f, 1.0f);
-    colors[ImGuiCol_ChildBg]         = ImVec4(0.10f, 0.10f, 0.14f, 1.0f);
+    colors[ImGuiCol_ChildBg]         = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
     colors[ImGuiCol_PopupBg]         = ImVec4(0.08f, 0.11f, 0.17f, 0.98f);
     colors[ImGuiCol_FrameBg]         = ImVec4(0.12f, 0.16f, 0.24f, 1.0f);
     colors[ImGuiCol_FrameBgHovered]  = ImVec4(0.17f, 0.24f, 0.36f, 1.0f);
