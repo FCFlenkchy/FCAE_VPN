@@ -128,8 +128,9 @@ public:
         ImGui::SetNextWindowPos(viewport->GetWorkCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(std::min(560.0f, room.x), std::min(640.0f, room.y)), ImGuiCond_Always);
         ImGui::SetNextWindowSizeConstraints(ImVec2(1, 1), room);
-        bool opened = true;
-        if (!ImGui::BeginPopupModal(title, &opened, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) return;
+        // No close box in the title bar: like every other dialog, this one is
+        // left by its Close button.
+        if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) return;
         if (inventory_stale_) {
             inventory_stale_ = false;
             loading_apps_ = true;

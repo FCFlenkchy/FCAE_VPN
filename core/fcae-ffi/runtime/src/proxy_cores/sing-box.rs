@@ -517,7 +517,7 @@ fn tls_config(security: &Security, server: &str) -> Option<Value> {
                 tls.insert("ech".into(), json!({"enabled": true, "config": [ech]}));
             }
             if let Some(pins) = pinned_cert_sha256 {
-                tls.insert("certificate_sha256".into(), json!(super::proxy_cores::profile::certificate_pins(pins).expect("pins validated before generation")));
+                tls.insert("certificate_sha256".into(), json!(super::profile::certificate_pins(pins).expect("pins validated before generation")));
             }
             Some(Value::Object(tls))
         }
@@ -1385,7 +1385,7 @@ pub(crate) fn link_blocker(outbound: &Outbound) -> Option<String> {
             return Some("sing-box has no REALITY spiderX field; remove spx or select Xray".into());
         }
         Security::Tls { pinned_cert_sha256: Some(pins), .. } => {
-            if let Err(error) = super::proxy_cores::profile::certificate_pins(pins) { return Some(error); }
+            if let Err(error) = super::profile::certificate_pins(pins) { return Some(error); }
         },
         _ => {}
     }

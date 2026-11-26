@@ -1997,6 +1997,87 @@ pub unsafe extern "C" fn fcae_decode_png_rgba(
     pixels.len() as u32
 }
 
+/// A picture the user chose, as it should be drawn: upright, and no longer
+/// than `max_side` on its longer side. Returns the size and, when `decode` is
+/// set, the RGBA pixels; the size alone is read from the file's header.
+///
+/// A photo is stored the way the sensor was held and says in its EXIF block
+/// how to turn it, and a phone photo is several times the pixels a window has.
+/// The limits are what keeps a file that claims an enormous size from being
+/// allocated for.
+fn user_image(bytes: &[u8], max_side: u32, decode: bool) -> Option<(u32, u32, Vec<u8>)> {
+    use image::metadata::Orientation;
+    use image::ImageDecoder;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(512 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let (width, height) = decoder.dimensions();
+    let (width, height) = match orientation {
+        Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Rotate90FlipH
+        | Orientation::Rotate270FlipH => (height, width),
+        _ => (width, height),
+    };
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let longer = width.max(height);
+    let max_side = max_side.max(1);
+    let fit = |side: u32| {
+        if longer <= max_side {
+            side
+        } else {
+            ((u64::from(side) * u64::from(max_side) + u64::from(longer) / 2) / u64::from(longer))
+                .max(1) as u32
+        }
+    };
+    let (width, height) = (fit(width), fit(height));
+    if !decode {
+        return Some((width, height, Vec::new()));
+    }
+    let mut picture = image::DynamicImage::from_decoder(decoder).ok()?;
+    picture.apply_orientation(orientation);
+    if (picture.width(), picture.height()) != (width, height) {
+        picture = picture.resize_exact(width, height, image::imageops::FilterType::Triangle);
+    }
+    Some((width, height, picture.into_rgba8().into_raw()))
+}
+
+/// Decodes a PNG, JPEG, WebP, GIF or BMP file to RGBA for the background
+/// picture: upright and at most `max_side` on its longer side. Called like
+/// `fcae_decode_png_rgba`: it returns the bytes the pixels take and fills `out`
+/// when `cap` holds them; with no `out` only the header is read. 0 means the
+/// file is not an image this build decodes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_decode_image_rgba(
+    data: *const u8, len: u32, max_side: u32, out: *mut u8, cap: u32, width: *mut u32, height: *mut u32,
+) -> u32 {
+    if data.is_null() || len == 0 { return 0; }
+    let bytes = std::slice::from_raw_parts(data, len as usize);
+    let fill = !out.is_null();
+    let Some((w, h, pixels)) = guard_value("fcae_decode_image_rgba", None, || user_image(bytes, max_side, fill)) else {
+        return 0;
+    };
+    let Some(size) = u64::from(w).checked_mul(u64::from(h) * 4).and_then(|size| u32::try_from(size).ok()) else {
+        return 0;
+    };
+    if !width.is_null() { *width = w; }
+    if !height.is_null() { *height = h; }
+    if fill {
+        if pixels.len() != size as usize || cap < size { return 0; }
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), out, pixels.len());
+    }
+    size
+}
+
 /// Submits a trimmed, non-empty human answer. Returns false for an unknown,
 /// expired, already answered, or invalid request. Answers never enter snapshots.
 #[no_mangle]

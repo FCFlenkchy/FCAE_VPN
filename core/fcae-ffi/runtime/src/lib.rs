@@ -43,9 +43,9 @@ pub mod config;
 pub mod saved_configs;
 pub mod cronet;
 pub mod proxy_cores;
-pub mod xray;
-#[path = "sing-box.rs"]
-pub mod singbox;
+// The three cores' own modules live with the rest of the proxy-core code and
+// keep the paths they have always had from the crate root.
+pub use proxy_cores::{mihomo, singbox, xray};
 pub mod deps;
 pub mod error;
 pub mod exit_adapter;
@@ -71,4 +71,3 @@ mod windows_dns_firewall;
 #[cfg(windows)]
 pub mod windows_tun;
 
-pub mod mihomo;

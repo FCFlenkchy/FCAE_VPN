@@ -75,7 +75,12 @@ ImTextureID app_routing_icon(const std::string& executable);
 #endif
 
 struct AppState {
+    // "mountain", "none", or "image": the picture named by background_image.
     char background_mode[16] = "mountain";
+    // The pictures the user added, as file names inside data_dir()/backgrounds,
+    // oldest first, and the one of them that is drawn.
+    std::vector<std::string> background_images;
+    std::string background_image;
     bool dns_firewall = true;
     std::atomic<bool> running{true};
     std::atomic<int>  ffi_state{FCAE_STATE_DISCONNECTED};
@@ -1011,3 +1016,13 @@ void ui_set_window_focused(bool focused);
 
 /// Monotonic clock in seconds, shared by the telemetry poll and the render gate.
 double ui_now_seconds();
+
+/// What the system's file picker answered to "+ Add image...": the UTF-8 path
+/// of the file the user chose. Safe to call from any thread. An empty path says
+/// that no picker could be opened; a cancelled one answers nothing.
+void ui_background_image_picked(const char* path);
+#if defined(__APPLE__) && !defined(FCAE_IOS)
+/// Implemented by the macOS host: opens the system's open panel for one image
+/// and answers through ui_background_image_picked().
+void mac_pick_background_image();
+#endif

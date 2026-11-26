@@ -121,6 +121,33 @@ class MainActivity : AppCompatActivity() {
                 showError("VPN permission was not granted.")
             }
         }
+        if (requestCode == 2) {
+            val uri = data?.data
+            if (resultCode == Activity.RESULT_OK && uri != null) copyBackgroundImage(uri)
+        }
+    }
+
+    /// The native side reads files, and a picked document is only a stream: it
+    /// is copied into the cache under its own name and handed over as a path.
+    /// The native side keeps its own copy, so the next pick clears this one.
+    private fun copyBackgroundImage(uri: Uri) {
+        Thread {
+            val folder = java.io.File(cacheDir, "background")
+            folder.deleteRecursively()
+            folder.mkdirs()
+            val name = try {
+                contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+            } catch (_: Exception) { null }
+            val file = java.io.File(folder, name?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "image")
+            val copied = try {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    file.outputStream().use { output -> input.copyTo(output) }
+                } != null
+            } catch (_: Exception) { false }
+            if (copied) surface?.enqueue { ImGuiBridge.nativeBackgroundImage(file.absolutePath) }
+            else showError("Could not read the image.")
+        }.start()
     }
 
     private fun disconnect() {
@@ -157,6 +184,15 @@ class MainActivity : AppCompatActivity() {
                     payload == "https://accounts.firefox.com/signup" || payload == "https://ur.io/c?bonus=HZ0G13"))
                 startActivity(Intent(Intent.ACTION_VIEW, uri))
             } catch (_: Exception) { showError("Could not open the link.") }
+            // "+ Add image..." in the Background setting: the system's document
+            // picker, for one image. onActivityResult hands the choice over.
+            "backgroundImage" -> try {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("image/*")
+                    .putExtra(Intent.EXTRA_MIME_TYPES,
+                        arrayOf("image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp")), 2)
+            } catch (_: Exception) { showError("No app on this device can choose an image.") }
             "clipboardRead" -> {
                 val manager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val value = manager.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()

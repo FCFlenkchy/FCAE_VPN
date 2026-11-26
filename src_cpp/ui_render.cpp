@@ -46,6 +46,7 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #include "windows_privilege.h"
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -1095,6 +1096,20 @@ static std::string resolve_data_path(const char* stored) {
     return join_path(data_dir(), stored);
 }
 
+// Where the background pictures the user added are kept.
+static std::string background_dir() {
+    return join_path(data_dir(), "backgrounds");
+}
+
+// `name` when it is a plain file name, "" otherwise. The settings file is text
+// anyone can edit, and a name read from it is joined onto that folder.
+static std::string background_file_name(const std::string& name) {
+    if (name.empty() || name.size() > 96 || name == "." || name == "..") return {};
+    for (unsigned char c : name)
+        if (c < 0x20 || c == '/' || c == '\\' || c == ':') return {};
+    return name;
+}
+
 // An absolute path written by an older build becomes relative when it lies
 // inside data_dir(), and falls back to its file name when it points into a
 // folder that no longer exists (the portable folder moved).
@@ -1249,7 +1264,15 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "urnetwork_http_enabled") g_app.ur_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "background_mode") {
         snprintf(g_app.background_mode, sizeof(g_app.background_mode), "%s",
-            val == "none" ? "none" : "mountain");
+            val == "none" ? "none" : val == "image" ? "image" : "mountain");
+    }
+    else if (key == "background_image") g_app.background_image = background_file_name(val);
+    else if (key == "background_saved") {
+        // One line per picture the user added.
+        const std::string name = background_file_name(val);
+        if (!name.empty() && std::find(g_app.background_images.begin(), g_app.background_images.end(), name)
+                == g_app.background_images.end())
+            g_app.background_images.push_back(name);
     }
     else if (key == "dns_firewall") g_app.dns_firewall = (val != "0");
     else if (key == "firefox_account_id") snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", val.c_str());
@@ -1463,6 +1486,8 @@ static bool save_config(bool quiet = false) {
     // Always LF; empty values allowed. Line-based load is robust on Win/Linux.
     fprintf(f, "protocol=%d\n", g_app.protocol);
     fprintf(f, "background_mode=%s\n", g_app.background_mode);
+    fprintf(f, "background_image=%s\n", g_app.background_image.c_str());
+    for (const std::string& name : g_app.background_images) fprintf(f, "background_saved=%s\n", name.c_str());
     fprintf(f, "dns_firewall=%d\n", g_app.dns_firewall ? 1 : 0);
     fprintf(f, "backend=%d\n", g_app.backend);
     fprintf(f, "core_transport_base=%d\n", kCoreTransportBase);
@@ -2196,8 +2221,403 @@ void ui_init() {
 
 #include "mountain_png.h"
 
+// ---- Background pictures the user added -----------------------------------------
+//
+// "+ Add image..." in the Background setting opens the system's file picker.
+// The picture chosen is copied into data_dir()/backgrounds, so it is still
+// there when the original is moved or deleted, and the copies are what the
+// setting lists after the built-in choices. Deleting an entry deletes the
+// copy, never the file it was made from.
+
+static constexpr size_t kMaxBackgroundImages = 16;
+static constexpr size_t kMaxBackgroundFile = 64u * 1024u * 1024u;
+// The longer side a picture is drawn from. A window is rarely wider, and a
+// phone photo is several times this.
+#if defined(ANDROID) || defined(FCAE_IOS)
+static constexpr uint32_t kBackgroundMaxSide = 2048;
+#else
+static constexpr uint32_t kBackgroundMaxSide = 2560;
+#endif
+
+/// What the last add or delete has to say, shown under the setting.
+static std::string s_background_note;
+
+static void background_note(const char* text) {
+    s_background_note = text;
+    g_app.add_log(FCAE_LOG_WARN, (std::string("[ui] background: ") + text).c_str());
+    ui_request_redraw();
+}
+
+static bool background_read_file(const std::string& path, std::vector<uint8_t>& bytes) {
+    bytes.clear();
+    FILE* f = open_cfg(path, "rb");
+    if (!f) return false;
+    std::vector<uint8_t> chunk(64 * 1024);
+    bool ok = true;
+    for (;;) {
+        const size_t n = fread(chunk.data(), 1, chunk.size(), f);
+        if (n == 0) break;
+        if (bytes.size() + n > kMaxBackgroundFile) {
+            ok = false;
+            break;
+        }
+        bytes.insert(bytes.end(), chunk.begin(), chunk.begin() + (ptrdiff_t)n);
+    }
+    if (ferror(f)) ok = false;
+    fclose(f);
+    return ok && !bytes.empty();
+}
+
+static void background_delete_file(const std::string& path) {
+#if defined(_WIN32)
+    _wremove(widen(path).c_str());
+#else
+    remove(path.c_str());
+#endif
+}
+
+static bool background_is_saved(const std::string& name) {
+    return std::find(g_app.background_images.begin(), g_app.background_images.end(), name)
+        != g_app.background_images.end();
+}
+
+/// Whether the picture drawn is one the user added.
+static bool background_custom_active() {
+    return strcmp(g_app.background_mode, "image") == 0 && background_is_saved(g_app.background_image);
+}
+
+/// The chosen picture's pixels. `generation` is what tells the renderer that
+/// the pixels in the background's texture changed; 1 is the built-in picture's.
+struct CustomBackground {
+    std::string name;
+    std::vector<uint8_t> rgba;
+    int w = 0;
+    int h = 0;
+    uint64_t generation = 1;
+};
+static CustomBackground s_custom_background;
+
+/// Drop the decoded picture: another one is chosen, or none of them is.
+static void background_forget_pixels() {
+    s_custom_background.name.clear();
+    std::vector<uint8_t>().swap(s_custom_background.rgba);
+    s_custom_background.w = s_custom_background.h = 0;
+}
+
+/// Decode the chosen picture when the choice changed. A picture that cannot be
+/// read is tried once, not on every frame.
+static bool background_load_pixels() {
+    CustomBackground& bg = s_custom_background;
+    if (bg.name == g_app.background_image) return !bg.rgba.empty();
+    background_forget_pixels();
+    bg.name = g_app.background_image;
+    std::vector<uint8_t> bytes;
+    if (background_read_file(join_path(background_dir(), bg.name.c_str()), bytes)) {
+        uint32_t w = 0, h = 0;
+        const uint32_t size = fcae_decode_image_rgba(bytes.data(), (uint32_t)bytes.size(),
+            kBackgroundMaxSide, nullptr, 0, &w, &h);
+        if (size && w && h) {
+            bg.rgba.resize(size);
+            uint32_t aw = 0, ah = 0;
+            if (fcae_decode_image_rgba(bytes.data(), (uint32_t)bytes.size(), kBackgroundMaxSide,
+                    bg.rgba.data(), size, &aw, &ah) == size && aw == w && ah == h) {
+                bg.w = (int)w;
+                bg.h = (int)h;
+                ++bg.generation;
+            } else {
+                std::vector<uint8_t>().swap(bg.rgba);
+            }
+        }
+    }
+    if (bg.rgba.empty())
+        g_app.add_log(FCAE_LOG_WARN, ("[ui] background: " + bg.name
+            + " could not be loaded; the built-in picture is shown").c_str());
+    return !bg.rgba.empty();
+}
+
+/// What a picked file is saved as: its own name, reduced to what every file
+/// system and the UI font can spell, and told apart from the ones already saved.
+static std::string background_new_name(const std::string& source) {
+    const size_t slash = source.find_last_of("/\\");
+    std::string stem = slash == std::string::npos ? source : source.substr(slash + 1);
+    std::string extension;
+    const size_t dot = stem.find_last_of('.');
+    if (dot != std::string::npos && dot > 0 && stem.size() - dot <= 6) {
+        for (size_t i = dot + 1; i < stem.size(); ++i) {
+            const unsigned char c = (unsigned char)stem[i];
+            if (c < 0x80 && std::isalnum(c)) extension.push_back((char)std::tolower(c));
+        }
+        if (!extension.empty()) extension.insert(extension.begin(), '.');
+        stem.erase(dot);
+    }
+    std::string plain;
+    for (unsigned char c : stem) {
+        const bool keep = (c < 0x80 && std::isalnum(c)) || c == '-' || c == '.' || c == ' ' || c == '(' || c == ')';
+        if (keep) plain.push_back((char)c);
+        else if (plain.empty() || plain.back() != '_') plain.push_back('_');
+    }
+    while (!plain.empty() && (plain.back() == '_' || plain.back() == ' ' || plain.back() == '.')) plain.pop_back();
+    size_t first = 0;
+    while (first < plain.size() && (plain[first] == '_' || plain[first] == ' ' || plain[first] == '.')) ++first;
+    plain.erase(0, first);
+    if (plain.empty()) plain = "image";
+    if (plain.size() > 40) plain.resize(40);
+    const auto taken = [](const std::string& name) {
+        for (const std::string& saved : g_app.background_images) {
+            if (saved.size() == name.size()
+                && std::equal(saved.begin(), saved.end(), name.begin(), [](char a, char b) {
+                       return std::tolower((unsigned char)a) == std::tolower((unsigned char)b);
+                   }))
+                return true;
+        }
+        return file_exists(join_path(background_dir(), name.c_str()));
+    };
+    std::string name = plain + extension;
+    for (unsigned suffix = 2; taken(name) && suffix < 10000; ++suffix)
+        name = plain + "-" + std::to_string(suffix) + extension;
+    return name;
+}
+
+/// Copy the picture at `source` into the backgrounds folder and draw it.
+static void background_add_image(const std::string& source) {
+    std::vector<uint8_t> bytes;
+    if (!background_read_file(source, bytes)) {
+        background_note("That file could not be read, or it is larger than 64 MB.");
+        return;
+    }
+    uint32_t w = 0, h = 0;
+    if (!fcae_decode_image_rgba(bytes.data(), (uint32_t)bytes.size(), kBackgroundMaxSide, nullptr, 0, &w, &h)) {
+        background_note("That file is not a PNG, JPEG, WebP, GIF or BMP image.");
+        return;
+    }
+    if (g_app.background_images.size() >= kMaxBackgroundImages) {
+        background_note("The list holds 16 pictures. Delete one to add another.");
+        return;
+    }
+    const std::string dir = background_dir();
+    const std::string name = background_new_name(source);
+    const std::string path = join_path(dir, name.c_str());
+    bool saved = make_dir(dir, false);
+    if (saved) {
+        FILE* f = open_cfg(path, "wb");
+        saved = f && fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
+        if (f && fclose(f) != 0) saved = false;
+        if (!saved) background_delete_file(path);
+    }
+    if (!saved) {
+        background_note("The picture could not be saved in the app's folder.");
+        return;
+    }
+    background_forget_pixels();
+    g_app.background_images.push_back(name);
+    g_app.background_image = name;
+    snprintf(g_app.background_mode, sizeof(g_app.background_mode), "image");
+    s_background_note.clear();
+    save_config();
+    ui_request_redraw();
+}
+
+/// Delete a picture the user added. The built-in one takes its place when it
+/// was the one drawn.
+static void background_remove_image(size_t index) {
+    if (index >= g_app.background_images.size()) return;
+    const std::string name = g_app.background_images[index];
+    background_delete_file(join_path(background_dir(), name.c_str()));
+    g_app.background_images.erase(g_app.background_images.begin() + (ptrdiff_t)index);
+    if (g_app.background_image == name) {
+        g_app.background_image.clear();
+        if (strcmp(g_app.background_mode, "image") == 0)
+            snprintf(g_app.background_mode, sizeof(g_app.background_mode), "mountain");
+    }
+    background_forget_pixels();
+    s_background_note.clear();
+    save_config();
+    ui_request_redraw();
+}
+
+// ---- The system's file picker ---------------------------------------------------
+
+static std::mutex s_background_pick_mutex;
+static std::string s_background_picked;
+static bool s_background_pick_ready = false;
+#if !defined(__APPLE__) && !defined(ANDROID)
+// Set while this process runs the dialog itself: one at a time.
+static std::atomic<bool> s_background_picking{false};
+#endif
+
+void ui_background_image_picked(const char* path) {
+    {
+        std::lock_guard<std::mutex> lock(s_background_pick_mutex);
+        s_background_picked = path ? path : "";
+        s_background_pick_ready = true;
+    }
+    ui_request_redraw();
+}
+
+/// Take in what the picker answered. Called on the UI thread, once a frame.
+static void background_pick_poll() {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(s_background_pick_mutex);
+        if (!s_background_pick_ready) return;
+        s_background_pick_ready = false;
+        path.swap(s_background_picked);
+    }
+    if (path.empty()) {
+        background_note("No file dialog could be opened. On Linux, install zenity or kdialog.");
+        return;
+    }
+    background_add_image(path);
+}
+
+/// Whether this build has a file picker to open.
+static bool background_picker_exists() {
+#if defined(FCAE_IOS)
+    return false;
+#else
+    return true;
+#endif
+}
+
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(ANDROID)
+/// Run a desktop's own file dialog and read the path it prints. Returns its
+/// exit status: 0 with a path, 1 when the user cancelled, 127 when the program
+/// is not installed. The arguments are passed as they are, never through a
+/// shell.
+static int background_run_dialog(const char* const* argv, std::string& chosen) {
+    chosen.clear();
+    int out[2];
+    if (pipe(out) != 0) return -1;
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(out[0]);
+        close(out[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        dup2(out[1], STDOUT_FILENO);
+        close(out[0]);
+        close(out[1]);
+        const int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execvp(argv[0], const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(out[1]);
+    char buffer[1024];
+    for (;;) {
+        const ssize_t n = read(out[0], buffer, sizeof(buffer));
+        if (n > 0) {
+            if (chosen.size() < 8192) chosen.append(buffer, (size_t)n);
+        } else if (n == 0 || errno != EINTR) {
+            break;
+        }
+    }
+    close(out[0]);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    while (!chosen.empty() && (chosen.back() == '\n' || chosen.back() == '\r')) chosen.pop_back();
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+#endif
+
+/// Open the system's file picker for one image. It answers through
+/// ui_background_image_picked(); the UI keeps drawing meanwhile.
+static void background_pick_request() {
+#if defined(FCAE_IOS)
+    // No picker is wired up on iOS, and the setting does not offer one.
+#elif defined(ANDROID)
+    // The activity opens the system's document picker and copies the choice
+    // somewhere this side can read: a picked document is a stream, not a path.
+    android_ui_command("backgroundImage");
+#elif defined(__APPLE__)
+    mac_pick_background_image();
+#else
+    if (s_background_picking.exchange(true)) return;
+#if defined(_WIN32)
+    // On a thread of its own: the dialog runs a message loop, and this window's
+    // procedure paints from inside one. The owner makes it modal to the window.
+    const HWND owner = reinterpret_cast<HWND>(s_ui_window.load());
+    std::thread([owner] {
+        std::vector<wchar_t> file(32768, L'\0');
+        OPENFILENAMEW dialog = {};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = owner;
+        dialog.lpstrFilter = L"Images (*.png;*.jpg;*.jpeg;*.webp;*.gif;*.bmp)\0"
+                             L"*.png;*.jpg;*.jpeg;*.webp;*.gif;*.bmp\0"
+                             L"All files (*.*)\0*.*\0";
+        dialog.lpstrFile = file.data();
+        dialog.nMaxFile = (DWORD)file.size();
+        dialog.lpstrTitle = L"Choose a background image";
+        dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY
+            | OFN_NOCHANGEDIR;
+        if (GetOpenFileNameW(&dialog)) ui_background_image_picked(narrow(file.data()).c_str());
+        s_background_picking.store(false);
+    }).detach();
+#else
+    // GTK desktops ship zenity and KDE ships kdialog: each is that desktop's
+    // own file dialog.
+    std::thread([] {
+        const std::string home = home_dir();
+        const char* const zenity[] = {
+            "zenity", "--file-selection", "--title=Choose a background image",
+            "--file-filter=Images | *.png *.jpg *.jpeg *.webp *.gif *.bmp *.PNG *.JPG *.JPEG *.WEBP *.GIF *.BMP",
+            "--file-filter=All files | *", nullptr,
+        };
+        const char* const kdialog[] = {
+            "kdialog", "--title", "Choose a background image", "--getopenfilename",
+            home.empty() ? "." : home.c_str(),
+            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp)", nullptr,
+        };
+        std::string chosen;
+        int status = background_run_dialog(zenity, chosen);
+        if (status == 127) status = background_run_dialog(kdialog, chosen);
+        if (status == 0 && !chosen.empty()) ui_background_image_picked(chosen.c_str());
+        else if (status == 127 || status < 0) ui_background_image_picked("");
+        s_background_picking.store(false);
+    }).detach();
+#endif
+#endif
+}
+
+/// `rgba` over the whole window: scaled to cover it, cropped around its centre.
+static bool draw_background_picture(const ImGuiIO& io, const std::vector<uint8_t>& rgba, int w, int h,
+                                    uint64_t generation) {
+    if (rgba.empty() || w <= 0 || h <= 0 || io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f)
+        return false;
+    const ImTextureID tex = sponsor_texture_update(rgba.data(), w, h, generation, 3);
+    if (!tex) return false;
+    const float view_aspect = io.DisplaySize.x / io.DisplaySize.y;
+    const float img_aspect = (float)w / (float)h;
+    ImVec2 uv0(0.0f, 0.0f), uv1(1.0f, 1.0f);
+    if (view_aspect > img_aspect) {
+        const float h_frac = img_aspect / view_aspect;
+        uv0.y = 0.5f - 0.5f * h_frac;
+        uv1.y = 0.5f + 0.5f * h_frac;
+    } else if (view_aspect < img_aspect) {
+        const float w_frac = view_aspect / img_aspect;
+        uv0.x = 0.5f - 0.5f * w_frac;
+        uv1.x = 0.5f + 0.5f * w_frac;
+    }
+    ImGui::GetBackgroundDrawList()->AddImage(tex, ImVec2(0.0f, 0.0f), io.DisplaySize, uv0, uv1);
+    return true;
+}
+
+/// Draw the background the setting names: the built-in picture, one the user
+/// added, or nothing. Returns whether a picture is behind the window.
 static bool draw_mountain_background(const ImGuiIO& io) {
-    if (strcmp(g_app.background_mode, "mountain") != 0) return false;
+    if (background_custom_active()) {
+        if (background_load_pixels())
+            return draw_background_picture(io, s_custom_background.rgba, s_custom_background.w,
+                s_custom_background.h, s_custom_background.generation);
+        // The file is gone or unreadable: the built-in picture, not nothing.
+    } else {
+        if (!s_custom_background.name.empty()) background_forget_pixels();
+        if (strcmp(g_app.background_mode, "none") == 0) return false;
+    }
     static std::vector<uint8_t> s_mountain_rgba;
     static int s_mountain_w = 0;
     static int s_mountain_h = 0;
@@ -2217,27 +2637,7 @@ static bool draw_mountain_background(const ImGuiIO& io) {
             }
         }
     }
-    if (!s_mountain_rgba.empty() && s_mountain_w > 0 && s_mountain_h > 0 &&
-        io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
-        const ImTextureID tex = sponsor_texture_update(s_mountain_rgba.data(), s_mountain_w, s_mountain_h, 1, 3);
-        if (tex) {
-            const float view_aspect = io.DisplaySize.x / io.DisplaySize.y;
-            const float img_aspect = (float)s_mountain_w / (float)s_mountain_h;
-            ImVec2 uv0(0.0f, 0.0f), uv1(1.0f, 1.0f);
-            if (view_aspect > img_aspect) {
-                const float h_frac = img_aspect / view_aspect;
-                uv0.y = 0.5f - 0.5f * h_frac;
-                uv1.y = 0.5f + 0.5f * h_frac;
-            } else if (view_aspect < img_aspect) {
-                const float w_frac = view_aspect / img_aspect;
-                uv0.x = 0.5f - 0.5f * w_frac;
-                uv1.x = 0.5f + 0.5f * w_frac;
-            }
-            ImGui::GetBackgroundDrawList()->AddImage(tex, ImVec2(0.0f, 0.0f), io.DisplaySize, uv0, uv1);
-            return true;
-        }
-    }
-    return false;
+    return draw_background_picture(io, s_mountain_rgba, s_mountain_w, s_mountain_h, 1);
 }
 
 static void render_startup_shell(bool failed) {
@@ -2273,6 +2673,7 @@ void ui_frame() {
     // never fired again -- the relaunched elevated instance appeared while this
     // one went on living, which is the second window behind it.
     ui_handoff_tick();
+    background_pick_poll();
 
     // The user's text scale, applied every frame. Font size is not baked at
     // init in this ImGui: the base size is multiplied by the scale factors
@@ -3644,7 +4045,6 @@ static bool s_core_import_popup_open = false;
 static bool s_core_import_in_progress = false;
 static char s_core_import_url[4097] = {};
 static char s_core_import_name[kMaxCoreConfigName + 1] = {};
-static int s_core_import_backend = 0;
 static char s_core_import_status[512] = {};
 static bool s_core_import_status_error = false;
 static bool s_core_import_status_warning = false;
@@ -3661,7 +4061,6 @@ static bool s_core_import_should_close = false;
 static int s_core_fetch_group = -1;
 static std::string s_core_fetch_url;
 static std::string s_core_fetch_name;
-static int s_core_fetch_backend = 0;
 /// Where the download in flight was asked for. The list's Refresh fetches what
 /// the group already says; the dialog fetches what its fields say, and those
 /// become the group's only once the download has succeeded.
@@ -3675,9 +4074,6 @@ static int s_core_group_reveal = -1;
 /// Whether the subscription dialog is on screen. It says how a download is
 /// going itself, so the list behind it does not say it a second time.
 static bool s_core_import_visible = false;
-/// The group whose removal is waiting for the user's confirmation, or -1.
-static int s_core_group_remove = -1;
-static bool s_core_group_remove_open = false;
 static std::mutex s_core_import_mutex;
 static uint64_t s_core_import_request_id = 0;
 static bool s_core_import_awaiting = false;
@@ -3712,14 +4108,6 @@ static void open_core_subscription_import(int group = -1) {
     s_core_import_should_close = false;
     snprintf(s_core_import_url, sizeof(s_core_import_url), "%s", entry ? entry->url.c_str() : "");
     snprintf(s_core_import_name, sizeof(s_core_import_name), "%s", entry ? entry->name.c_str() : "");
-    if (entry) {
-        s_core_import_backend = entry->backend;
-    } else {
-        const int listener_core = g_app.final_listener_core();
-        s_core_import_backend = (listener_core >= 3 && listener_core <= 5)
-            ? listener_core - 3
-            : ((g_app.backend >= 3 && g_app.backend <= 5) ? g_app.backend - 3 : 0);
-    }
     if (!s_core_import_in_progress) {
         s_core_import_status[0] = 0;
         s_core_import_status_error = false;
@@ -4153,6 +4541,8 @@ struct SubscriptionProfile {
     std::string text;
     /// The name the profile gives itself, or "" when it gives none.
     std::string name;
+    /// The core it is stored under: 0 = Xray, 1 = sing-box, 2 = Mihomo.
+    int backend = 0;
 };
 
 struct SubscriptionParse {
@@ -4204,10 +4594,24 @@ static bool subscription_starts_with_link(const std::string& text) {
     return false;
 }
 
-/// Read what a subscription offers `backend`: share links, one to a line, or
-/// one native config, either of them possibly base64-encoded. Nothing is
-/// stored here; the caller decides what the profiles replace.
-static SubscriptionParse parse_core_subscription(const std::string& raw_body, int backend) {
+/// The core a profile from a subscription is stored under: the first of Xray,
+/// sing-box and Mihomo that accepts it, so a feed that mixes protocols is
+/// imported whole and nobody has to know which core runs which. -1 when none
+/// of them does, with `reason` saying why: what two cores agree on is the
+/// profile's own fault, and otherwise the first core's answer stands.
+static int subscription_profile_backend(const std::string& text, std::string& reason) {
+    std::string reasons[3];
+    for (int backend = 0; backend < 3; ++backend)
+        if (validate_subscription_profile(text, backend, reasons[backend])) return backend;
+    reason = reasons[1] == reasons[2] ? reasons[1] : reasons[0];
+    return -1;
+}
+
+/// Read what a subscription offers: share links, one to a line, or one native
+/// config, either of them possibly base64-encoded, each under the core that
+/// takes it. Nothing is stored here; the caller decides what the profiles
+/// replace.
+static SubscriptionParse parse_core_subscription(const std::string& raw_body) {
     SubscriptionParse parsed;
     const std::string body = trim_subscription_text(raw_body);
     parsed.title = subscription_body_title(body);
@@ -4222,10 +4626,11 @@ static SubscriptionParse parse_core_subscription(const std::string& raw_body, in
         // after all the others: asked first, it made one config of a feed.
         if (!links.empty() && subscription_starts_with_link(text)) return true;
         std::string reason;
-        if (validate_subscription_profile(text, backend, reason)) {
+        const int backend = subscription_profile_backend(text, reason);
+        if (backend >= 0) {
             links.clear();
             ignored = overflow = 0;
-            parsed.profiles.push_back({text, core_profile_own_name(text, backend)});
+            parsed.profiles.push_back({text, core_profile_own_name(text, backend), backend});
             return true;
         }
         // Links under lines that are neither links nor a config.
@@ -4242,8 +4647,9 @@ static SubscriptionParse parse_core_subscription(const std::string& raw_body, in
     }
     for (const std::string& link : links) {
         std::string reason;
-        if (validate_subscription_profile(link, backend, reason)) {
-            parsed.profiles.push_back({link, core_profile_own_name(link, backend)});
+        const int backend = subscription_profile_backend(link, reason);
+        if (backend >= 0) {
+            parsed.profiles.push_back({link, core_profile_own_name(link, backend), backend});
         } else {
             ++parsed.skipped;
             if (parsed.first_problem.empty()) parsed.first_problem = std::move(reason);
@@ -4251,8 +4657,8 @@ static SubscriptionParse parse_core_subscription(const std::string& raw_body, in
     }
     if (links.empty()) {
         if (parsed.profiles.empty())
-            parsed.first_problem = "no share links were found, and the text is not a native "
-                + std::string(AppState::core_backend_name(backend)) + " config"
+            parsed.first_problem = "no share links were found, and the text is not a native Xray, "
+                "sing-box or Mihomo config"
                 + (validation_error.empty() ? std::string() : " (" + validation_error + ")");
         return parsed;
     }
@@ -4319,7 +4725,7 @@ struct CoreGroupChange {
 /// as the protocol choice and the chain are concerned. Returns false and leaves
 /// the group alone when nothing usable came back: a feed that is down must not
 /// empty the list the user connects with.
-static bool core_group_apply(int group, int backend, const std::string& group_name,
+static bool core_group_apply(int group, const std::string& group_name,
                              SubscriptionParse& parsed, CoreGroupChange& change) {
     const int old_count = (int)g_app.core_configs.size();
     int outside = 0;
@@ -4343,13 +4749,13 @@ static bool core_group_apply(int group, int backend, const std::string& group_na
             continue;
         }
         AppState::CoreConfigEntry entry;
-        entry.backend = backend;
+        entry.backend = profile.backend;
         entry.group = group;
         // A feed that is one unnamed config is what the group is: it goes by
         // the group's name instead of a made-up one.
         if (!profile.name.empty()) entry.name = unique_core_name(profile.name, taken);
         else if (lone && !group_name.empty()) entry.name = unique_core_name(group_name, taken);
-        else entry.name = numbered_config_name(profile.text, backend, taken);
+        else entry.name = numbered_config_name(profile.text, profile.backend, taken);
         entry.text = std::move(profile.text);
         AppState::refresh_core_listeners(entry);
         fresh.push_back(std::move(entry));
@@ -4502,7 +4908,7 @@ static std::string sentence_end(std::string text) {
 /// A download finished: fill the group it was for, creating it for an import.
 static void finish_core_subscription_fetch(const std::string& body, const std::string& header_title,
                                            const std::string& file_name) {
-    SubscriptionParse parsed = parse_core_subscription(body, s_core_fetch_backend);
+    SubscriptionParse parsed = parse_core_subscription(body);
     int group = s_core_fetch_group;
     const bool creating = group < 0;
     if (!creating && group >= (int)g_app.core_groups.size()) {
@@ -4535,10 +4941,10 @@ static void finish_core_subscription_fetch(const std::string& body, const std::s
         group = (int)g_app.core_groups.size() - 1;
     }
     CoreGroupChange change;
-    if (!core_group_apply(group, s_core_fetch_backend, name, parsed, change)) {
+    if (!core_group_apply(group, name, parsed, change)) {
         if (creating) g_app.core_groups.pop_back();
         const std::string problem = sentence_end(parsed.first_problem.empty()
-            ? "check the URL and the selected core" : parsed.first_problem);
+            ? "check the URL" : parsed.first_problem);
         set_core_import_status(true, false, "Nothing was imported: %s%s", problem.c_str(),
             creating ? "" : " The group keeps the configs it had.");
         return;
@@ -4547,7 +4953,9 @@ static void finish_core_subscription_fetch(const std::string& body, const std::s
         AppState::CoreGroupEntry& entry = g_app.core_groups[(size_t)group];
         entry.name = name;
         entry.url = s_core_fetch_url;
-        entry.backend = s_core_fetch_backend;
+        // Each config keeps its own core now. The field stays in the settings
+        // file for the builds that read one core per group.
+        entry.backend = parsed.profiles.empty() ? 0 : parsed.profiles.front().backend;
         entry.updated = (int64_t)std::time(nullptr);
     }
     if (s_core_group_open.size() < g_app.core_groups.size())
@@ -4585,7 +4993,7 @@ static void finish_core_subscription_fetch(const std::string& body, const std::s
 /// Download `url` for `group`, or for a group that does not exist yet (`-1`).
 /// `name` is what the user typed as the group's name, "" when nothing.
 static void begin_core_subscription_fetch(int group, const std::string& url_text, const std::string& name,
-                                          int backend, CoreFetchOrigin origin) {
+                                          CoreFetchOrigin origin) {
     const std::string url = trim_subscription_text(url_text);
     if (url.empty()) {
         set_core_import_status(true, false, "Enter the subscription URL.");
@@ -4594,7 +5002,6 @@ static void begin_core_subscription_fetch(int group, const std::string& url_text
     s_core_fetch_group = group;
     s_core_fetch_url = url;
     s_core_fetch_name = name;
-    s_core_fetch_backend = std::clamp(backend, 0, 2);
     s_core_fetch_origin = origin;
     if (group >= 0 && group < (int)g_app.core_groups.size())
         set_core_import_status(false, false, "Refreshing \"%s\"...", g_app.core_groups[(size_t)group].name.c_str());
@@ -4935,9 +5342,10 @@ static void core_button_tooltip(bool pressed, const char* text) {
     if (over && ImGui::IsItemHovered()) UiText::Tooltip("%s", text);
 }
 
-/// The subscription dialog: a URL, the group it fills and the core its configs
-/// are stored under. It imports a new group, or manages one that exists:
-/// refresh it from its URL, rename or re-point it, remove it.
+/// The subscription dialog: a URL and the group it fills. It imports a new
+/// group, or edits one that exists: refresh it from its URL, rename or
+/// re-point it, remove it. The core is not asked for: each config goes under
+/// the first of Xray, sing-box and Mihomo that takes it.
 static void render_core_subscription_import() {
     static const char* const kTitle = "##core-subscription-import";
     if (s_core_import_popup_open) {
@@ -4962,7 +5370,7 @@ static void render_core_subscription_import() {
     const bool busy_here = busy && s_core_fetch_origin != kCoreFetchList;
 
     ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f),
-                       managing ? "Manage subscription group" : "Import a subscription URL");
+                       managing ? "Edit subscription group" : "Import a subscription URL");
     ImGui::Separator();
     ImGui::BeginDisabled(busy_here);
     // Enter in either field is the dialog's primary button.
@@ -4977,14 +5385,6 @@ static void render_core_subscription_import() {
                                        s_core_import_name, sizeof(s_core_import_name),
                                        ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
-    ImGui::TextDisabled("Core");
-    ImGui::PushStyleColor(ImGuiCol_CheckMark, kCoreTagColor);
-    if (ImGui::RadioButton("Xray", s_core_import_backend == 0)) s_core_import_backend = 0;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("sing-box", s_core_import_backend == 1)) s_core_import_backend = 1;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Mihomo", s_core_import_backend == 2)) s_core_import_backend = 2;
-    ImGui::PopStyleColor();
     ImGui::EndDisabled();
     if (managing) {
         const int count = core_group_size(s_core_import_group);
@@ -4997,14 +5397,13 @@ static void render_core_subscription_import() {
     ImGui::BeginDisabled(!can_fetch);
     if (!managing) {
         if ((ImGui::Button("Import") || enter) && can_fetch) {
-            // The same URL for the same core is the group that already exists:
-            // importing it again refreshes that group instead of copying it.
+            // The same URL is the group that already exists: importing it
+            // again refreshes that group instead of copying it.
             const std::string url = trim_subscription_text(s_core_import_url);
             int existing = -1;
             for (int g = 0; g < (int)g_app.core_groups.size() && existing < 0; ++g)
-                if (g_app.core_groups[(size_t)g].url == url
-                    && g_app.core_groups[(size_t)g].backend == s_core_import_backend) existing = g;
-            begin_core_subscription_fetch(existing, url, s_core_import_name, s_core_import_backend, kCoreFetchImport);
+                if (g_app.core_groups[(size_t)g].url == url) existing = g;
+            begin_core_subscription_fetch(existing, url, s_core_import_name, kCoreFetchImport);
         }
     } else {
         const bool refresh = ImGui::Button("Refresh");
@@ -5012,16 +5411,15 @@ static void render_core_subscription_import() {
             "Download the subscription again and replace this group's configs with what it lists now.");
         if ((refresh || enter) && can_fetch)
             begin_core_subscription_fetch(s_core_import_group, s_core_import_url, s_core_import_name,
-                                          s_core_import_backend, kCoreFetchManage);
+                                          kCoreFetchManage);
         // Refresh fetches what the fields say and keeps it when that worked;
         // Save keeps it without asking the URL anything.
         button_row_next("Save");
         const bool save = secondary_button("Save");
-        core_button_tooltip(save, "Keep the name, URL and core as written here without downloading anything.");
+        core_button_tooltip(save, "Keep the name and URL as written here without downloading anything.");
         if (save) {
             AppState::CoreGroupEntry& group = g_app.core_groups[(size_t)s_core_import_group];
             group.url = trim_subscription_text(s_core_import_url);
-            group.backend = std::clamp(s_core_import_backend, 0, 2);
             group.name = core_group_auto_name(s_core_import_name, {}, group.url, s_core_import_group);
             snprintf(s_core_import_name, sizeof(s_core_import_name), "%s", group.name.c_str());
             snprintf(s_core_import_url, sizeof(s_core_import_url), "%s", group.url.c_str());
@@ -5032,9 +5430,13 @@ static void render_core_subscription_import() {
     if (managing) {
         button_row_next("Remove group");
         ImGui::BeginDisabled(busy);
+        // One click, and no second question: the button says what it does,
+        // and the URL brings the group back.
         if (secondary_button("Remove group")) {
-            s_core_group_remove = s_core_import_group;
-            s_core_group_remove_open = true;
+            const std::string name = g_app.core_groups[(size_t)s_core_import_group].name;
+            core_group_remove(s_core_import_group);
+            s_core_import_group = -1;
+            set_core_import_status(false, false, "Removed \"%s\".", name.c_str());
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();
@@ -5048,45 +5450,6 @@ static void render_core_subscription_import() {
     // comes and goes makes the dialog longer or shorter and moves nothing in it.
     if (s_core_import_status[0])
         UiText::TextColoredWrapped(core_import_status_color(), "%s", s_core_import_status);
-    ImGui::EndPopup();
-}
-
-/// Removing a group takes every config in it and the URL they came from, so it
-/// asks first.
-static void render_core_group_remove() {
-    static const char* const kTitle = "Remove group?";
-    if (s_core_group_remove_open) {
-        ImGui::OpenPopup(kTitle);
-        s_core_group_remove_open = false;
-    }
-    if (!begin_account_dialog(kTitle, 480.0f)) return;
-    if (s_core_group_remove < 0 || s_core_group_remove >= (int)g_app.core_groups.size()) {
-        s_core_group_remove = -1;
-        ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-        return;
-    }
-    const int count = core_group_size(s_core_group_remove);
-    ImGui::TextWrapped("Remove \"%s\" and the %d config%s imported from it?",
-        g_app.core_groups[(size_t)s_core_group_remove].name.c_str(), count, count == 1 ? "" : "s");
-    ImGui::Spacing();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.22f, 0.22f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.74f, 0.28f, 0.28f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.54f, 0.18f, 0.18f, 1.0f));
-    const bool remove = ImGui::Button("Remove");
-    ImGui::PopStyleColor(3);
-    if (remove) {
-        const std::string name = g_app.core_groups[(size_t)s_core_group_remove].name;
-        core_group_remove(s_core_group_remove);
-        set_core_import_status(false, false, "Removed \"%s\".", name.c_str());
-        s_core_group_remove = -1;
-        ImGui::CloseCurrentPopup();
-    }
-    button_row_next("Cancel");
-    if (secondary_button("Cancel")) {
-        s_core_group_remove = -1;
-        ImGui::CloseCurrentPopup();
-    }
     ImGui::EndPopup();
 }
 
@@ -5138,7 +5501,7 @@ static bool core_group_header(int g, int& refresh_group, int& manage_group) {
     snprintf(count_text, sizeof(count_text), "%d config%s", count, count == 1 ? "" : "s");
     const std::string age = core_group_age(group.updated);
     const std::string count_and_age = age.empty() ? std::string(count_text) : std::string(count_text) + ", " + age;
-    const float buttons_width = ImGui::CalcTextSize("Refresh").x + ImGui::CalcTextSize("Manage").x
+    const float buttons_width = ImGui::CalcTextSize("Refresh").x + ImGui::CalcTextSize("Edit").x
         + 4.0f * style.FramePadding.x + style.ItemSpacing.x;
     const float row_x = ImGui::GetCursorPosX();
     const float row_avail = std::max(ImGui::GetContentRegionAvail().x,
@@ -5184,7 +5547,7 @@ static bool core_group_header(int g, int& refresh_group, int& manage_group) {
     core_button_tooltip(refresh,
         "Download the subscription again and replace this group's configs with what it lists now.");
     ImGui::SameLine();
-    if (ImGui::SmallButton("Manage")) manage_group = g;
+    if (ImGui::SmallButton("Edit")) manage_group = g;
     if (ImGui::IsItemHovered()) {
         button_hovered = true;
         UiText::Tooltip("Rename the group, change its URL, or remove it with its configs.");
@@ -5192,8 +5555,7 @@ static bool core_group_header(int g, int& refresh_group, int& manage_group) {
     // Everything about the group in one place, for the rows too narrow to say
     // it. The buttons lie on the bar, so over them it is theirs to explain.
     if (bar_hovered && !button_hovered)
-        UiText::Tooltip("%s\n%s, %s, %s", name.c_str(), AppState::core_backend_name(group.backend),
-                        count_text, core_group_updated(group.updated).c_str());
+        UiText::Tooltip("%s\n%s, %s", name.c_str(), count_text, core_group_updated(group.updated).c_str());
     ImGui::PopID();
     ImGui::PopID();
     return open;
@@ -5307,7 +5669,7 @@ static void render_core_library() {
     if (manage_group >= 0) open_core_subscription_import(manage_group);
     if (refresh_group >= 0) {
         const AppState::CoreGroupEntry& group = g_app.core_groups[(size_t)refresh_group];
-        begin_core_subscription_fetch(refresh_group, group.url, {}, group.backend, kCoreFetchList);
+        begin_core_subscription_fetch(refresh_group, group.url, {}, kCoreFetchList);
     }
 }
 
@@ -5364,12 +5726,11 @@ static void render_core_configs() {
         }
         ImGui::EndTabBar();
     }
-    // The editor, the subscription dialog and its confirmation are modals of
-    // their own, opened from the buttons above and drawn inside this one so
-    // they stay scoped to the core settings.
+    // The editor and the subscription dialog are modals of their own, opened
+    // from the buttons above and drawn inside this one so they stay scoped to
+    // the core settings.
     render_core_editor();
     render_core_subscription_import();
-    render_core_group_remove();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
@@ -5688,9 +6049,9 @@ bool ui_tray_action_pending() {
 /// the sky is the brightest part. The panel has no colour of its own: it is
 /// the window's colour without a picture (`ImGuiCol_WindowBg` in ui_style.h),
 /// 30% see-through. With "Background: None" it is that background.
-static void home_panel_background(const ImVec2& min, const ImVec2& max) {
+static void home_panel_background(const ImVec2& min, const ImVec2& max, float rounding = 10.0f) {
     ImGui::GetWindowDrawList()->AddRectFilled(min, max,
-        ImGui::GetColorU32(ImVec4(0.08f, 0.08f, 0.12f, 0.70f)), 10.0f);
+        ImGui::GetColorU32(ImVec4(0.08f, 0.08f, 0.12f, 0.70f)), rounding);
 }
 /// The room a Home panel leaves around what it holds.
 static float home_panel_padding() {
@@ -7205,14 +7566,62 @@ void render_ui() {
                 android_ui_render_controls();
     #endif
                 {
-                    const char* bg_items[] = {"Mountain", "None"};
-                    int bg_idx = strcmp(g_app.background_mode, "none") == 0 ? 1 : 0;
-                    ImGui::SetNextItemWidth(160.0f);
-                    if (ImGui::Combo("Background", &bg_idx, bg_items, 2)) {
-                        snprintf(g_app.background_mode, sizeof(g_app.background_mode), "%s",
-                            bg_idx == 1 ? "none" : "mountain");
+                    // The built-in choices, then the pictures the user added --
+                    // each with a button that deletes it -- then the entry that
+                    // opens the system's file picker to add another.
+                    const ImGuiStyle& bg_style = ImGui::GetStyle();
+                    const bool bg_custom = background_custom_active();
+                    const bool bg_none = !bg_custom && strcmp(g_app.background_mode, "none") == 0;
+                    const std::string bg_preview = bg_custom ? g_app.background_image
+                        : bg_none ? "None" : "Mountain";
+                    const auto bg_choose = [](const char* mode, const std::string& image) {
+                        snprintf(g_app.background_mode, sizeof(g_app.background_mode), "%s", mode);
+                        g_app.background_image = image;
+                        s_background_note.clear();
                         save_config();
+                    };
+                    const float bg_delete_w = ImGui::CalcTextSize("X").x + bg_style.FramePadding.x * 2.0f;
+                    float bg_list_w = 160.0f;
+                    for (const std::string& name : g_app.background_images)
+                        bg_list_w = std::max(bg_list_w, ImGui::CalcTextSize(name.c_str()).x + bg_delete_w
+                            + bg_style.ItemSpacing.x * 2.0f + bg_style.WindowPadding.x * 2.0f);
+                    bg_list_w = std::min(bg_list_w, std::max(160.0f, ImGui::GetIO().DisplaySize.x * 0.9f));
+                    int bg_delete = -1;
+                    ImGui::SetNextWindowSizeConstraints(ImVec2(bg_list_w, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
+                    ImGui::SetNextItemWidth(std::clamp(ImGui::CalcTextSize(bg_preview.c_str()).x
+                        + ImGui::GetFrameHeight() + bg_style.FramePadding.x * 2.0f, 160.0f, 360.0f));
+                    if (ImGui::BeginCombo("Background", bg_preview.c_str())) {
+                        if (ImGui::Selectable("Mountain", !bg_custom && !bg_none)) bg_choose("mountain", {});
+                        if (ImGui::Selectable("None", bg_none)) bg_choose("none", {});
+                        for (size_t i = 0; i < g_app.background_images.size(); ++i) {
+                            const std::string name = g_app.background_images[i];
+                            ImGui::PushID((int)i);
+                            const float row_w = ImGui::GetContentRegionAvail().x;
+                            if (ImGui::Selectable(name.c_str(), bg_custom && name == g_app.background_image,
+                                    ImGuiSelectableFlags_None,
+                                    ImVec2(std::max(1.0f, row_w - bg_delete_w - bg_style.ItemSpacing.x), 0.0f)))
+                                bg_choose("image", name);
+                            ImGui::SameLine();
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.16f, 0.16f, 1.0f));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.82f, 0.22f, 0.22f, 1.0f));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.92f, 0.28f, 0.28f, 1.0f));
+                            if (ImGui::SmallButton("X")) bg_delete = (int)i;
+                            ImGui::PopStyleColor(3);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete this picture");
+                            ImGui::PopID();
+                        }
+                        if (background_picker_exists()) {
+                            ImGui::Separator();
+                            if (ImGui::Selectable("+ Add image...")) {
+                                s_background_note.clear();
+                                background_pick_request();
+                            }
+                        }
+                        ImGui::EndCombo();
                     }
+                    if (bg_delete >= 0) background_remove_image((size_t)bg_delete);
+                    if (!s_background_note.empty())
+                        UiText::TextColoredWrapped(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s", s_background_note.c_str());
                 }
                 ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
                 if (ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases)) {
@@ -7695,6 +8104,14 @@ void render_ui() {
                 + 2.0f * ImGui::GetStyle().WindowPadding.y + 4.0f;
             const float log_height = std::max(1.0f, ImGui::GetContentRegionAvail().y
                 - log_footer_h - ImGui::GetStyle().ItemSpacing.y);
+            // The log is text straight on the picture otherwise. It sits on
+            // the panel the Home page's rows sit on.
+            {
+                const ImVec2 log_min = ImGui::GetCursorScreenPos();
+                home_panel_background(log_min,
+                    ImVec2(log_min.x + std::max(1.0f, ImGui::GetContentRegionAvail().x), log_min.y + log_height),
+                    ImGui::GetStyle().ChildRounding);
+            }
             ImGui::BeginChild("##log", ImVec2(0, log_height), ImGuiChildFlags_Borders,
                               ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
 

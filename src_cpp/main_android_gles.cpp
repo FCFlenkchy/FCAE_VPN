@@ -566,6 +566,12 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeVisibility(JNIEnv*, jclass, jboolean visib
         android_ui_flush_settings();
     }
 }
+// The image the system's picker returned for "+ Add image...", already copied
+// to a file this side can read.
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_ImGuiBridge_nativeBackgroundImage(JNIEnv* env, jclass, jstring path) {
+    ui_background_image_picked(native_string(env, path).c_str());
+}
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeError(JNIEnv* env, jclass, jstring value) {
     last_error = native_string(env, value);

@@ -141,4 +141,5 @@ object ImGuiBridge {
     @JvmStatic external fun nativeVisibility(visible: Boolean)
     @JvmStatic external fun nativeBack()
     @JvmStatic external fun nativeError(message: String)
+    @JvmStatic external fun nativeBackgroundImage(path: String)
 }

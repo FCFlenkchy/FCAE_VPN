@@ -5,8 +5,12 @@
 //! This module owns the portable profile model, common URI syntax, listener
 //! planning and the one in-process lifecycle used by all three engines.
 mod driver;
+pub mod mihomo;
 mod planning;
 pub(crate) mod profile;
+#[path = "sing-box.rs"]
+pub mod singbox;
+pub mod xray;
 
 pub use driver::{
     forward_log, halt, halt_all, live_instances, live_listeners, retire_all, start, CoreFfi,

@@ -92,6 +92,30 @@ struct MetalTextureSlot {
 static MetalTextureSlot g_slots[4];
 static id<MTLDevice> g_device = nil;
 
+// "+ Add image..." in the Background setting: the system's open panel, for one
+// image. It is opened from the main queue, not from inside the frame that asked
+// for it, and answers once the user has chosen.
+void mac_pick_background_image() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        panel.canChooseFiles = YES;
+        panel.canChooseDirectories = NO;
+        panel.allowsMultipleSelection = NO;
+        panel.message = @"Choose a background image";
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        // Content types replace this from macOS 11 on; the extensions work on both.
+        panel.allowedFileTypes = @[@"png", @"jpg", @"jpeg", @"webp", @"gif", @"bmp"];
+#pragma clang diagnostic pop
+        [panel beginWithCompletionHandler:^(NSModalResponse result) {
+            if (result != NSModalResponseOK) return;
+            NSURL* url = panel.URL;
+            const char* path = url ? url.fileSystemRepresentation : nullptr;
+            if (path && path[0]) ui_background_image_picked(path);
+        }];
+    });
+}
+
 #include <unordered_map>
 static std::unordered_map<std::string,id<MTLTexture>> app_icon_textures;
 static void release_app_icons(){for(auto& entry:app_icon_textures)[entry.second release];app_icon_textures.clear();}

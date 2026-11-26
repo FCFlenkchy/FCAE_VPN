@@ -942,7 +942,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     # pthread MUST come after libfcae_ffi.a (BoringSSL thread_pthread needs it).
     target_link_libraries(fcaevpn PRIVATE
         d3d11 dxgi d3dcompiler dwmapi ntdll
-        ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
+        ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt comdlg32
         iphlpapi advapi32 psapi mswsock user32 dnsapi wintrust version
         netapi32 wtsapi32 setupapi cfgmgr32 oleaut32 pdh
         # fwpuclnt: the statically linked zeptun engine drives the Windows

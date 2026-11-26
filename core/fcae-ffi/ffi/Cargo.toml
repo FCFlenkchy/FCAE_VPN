@@ -60,7 +60,7 @@ cores = ["xray", "singbox", "mihomo"]
 tor = ["aether", "fcae-bridge-aether/tor"]
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 fcae-abi.workspace = true
 fcae-runtime.workspace = true
 fcae-sponsor.workspace = true

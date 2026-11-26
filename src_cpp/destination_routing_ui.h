@@ -10,8 +10,9 @@ inline void destination_routing_ui() {
     ImGui::SetNextWindowPos(viewport->GetWorkCenter(),ImGuiCond_Always,ImVec2(0.5f,0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(640.0f,room.x),std::min(620.0f,room.y)),ImGuiCond_Always);
     ImGui::SetNextWindowSizeConstraints(ImVec2(1,1),room);
-    bool opened=true;
-    if(!ImGui::BeginPopupModal(title,&opened,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize))return;
+    // No close box in the title bar: like every other dialog, this one is
+    // left by its Close button.
+    if(!ImGui::BeginPopupModal(title,nullptr,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize))return;
     static char target[1025]={},ports[1025]={},error[1024]={};
     static int kind=0,protocol=0,editing=-1;
     static std::string editing_row;
