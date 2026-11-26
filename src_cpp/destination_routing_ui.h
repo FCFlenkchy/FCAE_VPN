@@ -37,7 +37,7 @@ inline void destination_routing_ui() {
     ImGui::Separator();
     ImGui::BeginDisabled(!available);
     ImGui::Combo("Rule type",&kind,kinds,3);
-    if(kind!=2)UiText::InputTextWithHint("Target",kind==0?"192.0.2.1 or 192.0.2.0/24":"example.com or *.example.com",target,sizeof(target));
+    if(kind!=2)UiText::InputTextWithHint("Target",kind==0?"192.0.2.1 or 192.0.2.0/24":"example.com (with its subdomains) or *.example.com",target,sizeof(target));
     UiText::InputTextWithHint("Ports","Empty = all ports; e.g. 443,8000-8080",ports,sizeof(ports));
     ImGui::Combo("Protocol",&protocol,protocols,3);
     if(ImGui::Button(editing<0?"Add rule":"Save rule")) {

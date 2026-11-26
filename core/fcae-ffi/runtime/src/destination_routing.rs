@@ -147,7 +147,17 @@ impl Rule {
             "ip" => rule["ip_cidr"] = json!(prefixes(&self.target)?),
             "domain" => {
                 let (value, regex) = domain(&self.target)?;
-                rule[if regex { "domain_regex" } else { "domain" }] = json!([value]);
+                if regex {
+                    rule["domain_regex"] = json!([value]);
+                } else {
+                    // A name stands for the site: itself and every name under
+                    // it. Matched exactly, "example.com" left "www.example.com"
+                    // -- where the browser ends up -- to the other side of the
+                    // policy. The leading dot keeps the suffix on a label
+                    // boundary, so it never takes "notexample.com" with it.
+                    rule["domain_suffix"] = json!([format!(".{value}")]);
+                    rule["domain"] = json!([value]);
+                }
             }
             "port" => {
                 if !self.target.trim().is_empty() {
@@ -543,6 +553,19 @@ mod tests {
 
     fn socks() -> SocketAddr {
         "127.0.0.1:1080".parse().unwrap()
+    }
+
+    #[test]
+    fn a_domain_rule_covers_the_name_and_every_name_under_it() {
+        let compiled = rule("domain", "Example.com.", "").compile("fcae-exit").unwrap();
+        assert_eq!(compiled["domain"], json!(["example.com"]));
+        // With its dot: "www.example.com" yes, "notexample.com" no.
+        assert_eq!(compiled["domain_suffix"], json!([".example.com"]));
+        assert!(compiled.get("domain_regex").is_none());
+        // A wildcard says what it covers itself and stays as written.
+        let wildcard = rule("domain", "*.example.com", "").compile("fcae-exit").unwrap();
+        assert!(wildcard["domain_regex"].is_array());
+        assert!(wildcard.get("domain").is_none() && wildcard.get("domain_suffix").is_none());
     }
 
     #[test]
