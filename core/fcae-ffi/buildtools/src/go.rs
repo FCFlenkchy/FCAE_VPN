@@ -894,6 +894,12 @@ fn stage_windows_adapter_guids(go: &str, module: &Path) -> Result<(), GoError> {
         permissions.set_readonly(false);
         std::fs::set_permissions(&output, permissions).map_err(fail)?;
         std::fs::write(output, patched).map_err(fail)?;
+        if label != "xray" {
+            let loader = crate::repo_root()
+                .join("core/fcae-ffi/bridges/sing-tun/windows/dll_windows.go");
+            crate::rerun_if_changed(&loader);
+            share_wintun_image(&destination, &loader, name)?;
+        }
         let replacement = format!(
             "{name}={}",
             destination.to_string_lossy().replace('\\', "/")
@@ -915,6 +921,29 @@ fn stage_windows_adapter_guids(go: &str, module: &Path) -> Result<(), GoError> {
         )?;
     }
     Ok(())
+}
+/// sing-tun carries a wintun.dll of its own and maps it from memory, which puts
+/// a second Wintun image into a process whose other engines use the host's.
+/// Each image opens Wintun's private namespace for itself, and Windows refuses
+/// the second open in one process with ERROR_DUP_NAME. So once one kind of
+/// engine had made an adapter, the other kind failed until the app restarted:
+/// "configure tun interface: You were not connected because a duplicate name
+/// exists on the network". Give the copy the loader that returns the host's
+/// image, as the staged MetaCubeX copy already has.
+fn share_wintun_image(module: &Path, loader: &Path, name: &str) -> Result<(), GoError> {
+    let fail = |error: std::io::Error| GoError::Build(error.to_string());
+    let target = module.join("internal/wintun/dll_windows.go");
+    let upstream = std::fs::read_to_string(&target).map_err(fail)?;
+    // The replacement stands in for this memory loader and no other.
+    if upstream.matches("memmod.LoadLibrary(dllContent)").count() != 1
+        || upstream.matches("func newLazyDLL(name string) *lazyDLL").count() != 1
+    {
+        return Err(GoError::Build(format!(
+            "{name} Wintun loader changed; review the shared image integration"
+        )));
+    }
+    let replacement = std::fs::read(loader).map_err(fail)?;
+    std::fs::write(target, replacement).map_err(fail)
 }
 fn copy_windows_module(source: &Path, destination: &Path) -> Result<(), GoError> {
     let fail = |error: std::io::Error| GoError::Build(error.to_string());
@@ -943,4 +972,52 @@ fn copy_windows_module(source: &Path, destination: &Path) -> Result<(), GoError>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn staged_module(name: &str, loader: &str) -> PathBuf {
+        let module = std::env::temp_dir().join(format!(
+            "fcae-wintun-image-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&module);
+        std::fs::create_dir_all(module.join("internal/wintun")).unwrap();
+        std::fs::write(module.join("internal/wintun/dll_windows.go"), loader).unwrap();
+        module
+    }
+
+    fn host_loader() -> PathBuf {
+        crate::repo_root().join("core/fcae-ffi/bridges/sing-tun/windows/dll_windows.go")
+    }
+
+    #[test]
+    fn a_sing_tun_copy_loads_the_hosts_wintun_image() {
+        let module = staged_module(
+            "memory",
+            "package wintun\nfunc newLazyDLL(name string) *lazyDLL { return &lazyDLL{Name: name} }\n\
+             func (d *lazyDLL) Load() error { module, err := memmod.LoadLibrary(dllContent); _ = module; return err }\n",
+        );
+        share_wintun_image(&module, &host_loader(), "github.com/sagernet/sing-tun").unwrap();
+        let staged = std::fs::read_to_string(module.join("internal/wintun/dll_windows.go")).unwrap();
+        assert_eq!(staged, std::fs::read_to_string(host_loader()).unwrap());
+        // One image for the process: no second copy mapped from memory.
+        assert!(staged.contains("fcae_wintun_load_library") && !staged.contains("memmod"));
+        std::fs::remove_dir_all(module).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_wintun_loader_stops_the_build() {
+        let other = "package wintun\nfunc newLazyDLL(name string, onLoad func(d *lazyDLL)) *lazyDLL { return nil }\n";
+        let module = staged_module("other", other);
+        let error = share_wintun_image(&module, &host_loader(), "github.com/sagernet/sing-tun")
+            .err()
+            .expect("an unreviewed loader must not be replaced");
+        assert!(error.to_string().contains("Wintun loader changed"));
+        let kept = std::fs::read_to_string(module.join("internal/wintun/dll_windows.go")).unwrap();
+        assert_eq!(kept, other);
+        std::fs::remove_dir_all(module).unwrap();
+    }
 }
