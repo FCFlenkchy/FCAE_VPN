@@ -622,13 +622,29 @@ static bool s_error_detail_visible = false;
 
 
 
+// Until this time the telemetry is read at the short pace below: a command was
+// just given, and the state that answers it is what the user is looking for.
+static double s_telemetry_soon_until = 0.0;
+
 /// Pull telemetry from the FFI when due: once per second, matching the
 /// engine's 1 s rate window — the published rates are bytes-per-second
 /// measured over exactly that window, so faster polling would only repaint
 /// the same numbers. Throttled by g_app.last_telem_t, so the in-frame poll
 /// and this one never double-poll.
+///
+/// The state is not a rate. While a session is coming up, right after a
+/// command, and for the first seconds of a session whose round trip is not
+/// measured yet, it is read ten times a second: at one read a second
+/// "connected" reached the screen up to a second after the engine had said so,
+/// by which time the round trip was usually there as well.
 static void ui_poll_telemetry(double now) {
-    const double interval = 1.0;
+    const FcaeState shown = g_app.telem.state;
+    const bool arriving = shown == FCAE_STATE_PROVISIONING || shown == FCAE_STATE_SCANNING
+                       || shown == FCAE_STATE_CONNECTING || shown == FCAE_STATE_RECONNECTING;
+    const bool measuring = shown == FCAE_STATE_CONNECTED && g_app.telem.rtt_ms == 0
+                        && g_app.telem.uptime_secs < 10;
+    const bool commanded = now < s_telemetry_soon_until || g_app.start_busy.load();
+    const double interval = (arriving || measuring || commanded) ? 0.1 : 1.0;
     const bool stop_refresh = g_app.ffi_state.load() == FCAE_STATE_DISCONNECTED
                             && g_app.telem.state != FCAE_STATE_DISCONNECTED;
     if (!stop_refresh && now - g_app.last_telem_t < interval) return;
@@ -6484,6 +6500,7 @@ void render_ui() {
         const bool tray_toggle = false;
 #endif
         if (clicked_connect || tray_toggle) {
+            s_telemetry_soon_until = now + 3.0;
 #if defined(ANDROID)
             if (connected || busy || errored || tun_paused) {
                 android_ui_command("disconnect");

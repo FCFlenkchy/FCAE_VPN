@@ -246,6 +246,7 @@ public class ProxyNotification extends Service {
                         && android.os.SystemClock.elapsedRealtime() < engineStartDeadline) {
                     updateNotification();
                     publishState();
+                    watchPhase();
                     handler.postDelayed(this, 1000);
                     return;
                 }
@@ -260,9 +261,51 @@ public class ProxyNotification extends Service {
             if (!stopping && !externalPsiphon) PsiphonTunnelService.pollChainedRequest(ProxyNotification.this);
             updateNotification();
             publishState();
+            watchPhase();
             handler.postDelayed(this, 1000);
         }
     };
+
+    /** How often a session that is still coming up is asked for its phase. */
+    private static final long PHASE_WATCH_MS = 150L;
+
+    /** The phase publishState() published last: what phaseWatch compares with. */
+    private SessionState.Phase publishedPhase;
+
+    /**
+     * Between the ticks, a session that is still coming up is asked for its
+     * phase more often: the next one is what the user is waiting for. The
+     * first tick of a session is two seconds after its start and the others a
+     * second apart, so "connected" reached every surface that much after the
+     * engine had said so -- by which time the latency was usually there too,
+     * as if the one had waited for the other. Only the phase is read here; the
+     * notification and the published state are refreshed once, when it has
+     * changed.
+     */
+    private final Runnable phaseWatch = new Runnable() {
+        @Override
+        public void run() {
+            if (stopping || !sessionRequested) return;
+            // The phase is the engine's to tell, and the first question would
+            // load the engine on this thread: that is left to the session's
+            // own start.
+            if (NativeEngine.Loaded.value && phase() != publishedPhase) {
+                updateNotification();
+                publishState();
+            }
+            if (arriving(publishedPhase)) handler.postDelayed(this, PHASE_WATCH_MS);
+        }
+    };
+
+    private static boolean arriving(SessionState.Phase phase) {
+        return phase == SessionState.Phase.CONNECTING || phase == SessionState.Phase.RECONNECTING;
+    }
+
+    /** Runs phaseWatch for as long as the published phase is one a session passes through. */
+    private void watchPhase() {
+        handler.removeCallbacks(phaseWatch);
+        if (arriving(publishedPhase)) handler.postDelayed(phaseWatch, PHASE_WATCH_MS);
+    }
 
     @Override
     public void onCreate() {
@@ -489,6 +532,9 @@ public class ProxyNotification extends Service {
         if (replayToken != 0) FCAEVpnService.finishProxyReplay(replayToken, promoted);
         if (!promoted) { sessionRequested = false; stopSelf(startId); return START_NOT_STICKY; }
         handler.postDelayed(statsRunnable, 2000L);
+        // The session's phase is watched from here, not from that first tick.
+        publishedPhase = SessionState.Phase.CONNECTING;
+        watchPhase();
 
         if (described && session.getIntExtra("backend", 0) == 1) {
             // A pure Psiphon session is entirely service-owned. With downstream
@@ -606,7 +652,9 @@ public class ProxyNotification extends Service {
         // as well, and its numbers are one session's worth of telemetry. Both
         // are decided per session, not per tick.
         final long[] stats = SessionState.stats(psiTelemetry ? lastPsiphonStats : null, psiTelemetry);
-        SessionState.publish(this, phase(), 0,
+        final SessionState.Phase phase = phase();
+        publishedPhase = phase;
+        SessionState.publish(this, phase, 0,
                 stats[0], stats[1], stats[2], stats[3], (int) stats[4],
                 psiTelemetry ? SessionState.SOURCE_PSIPHON : SessionState.SOURCE_ENGINE);
     }

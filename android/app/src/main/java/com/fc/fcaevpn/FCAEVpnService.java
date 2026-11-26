@@ -207,11 +207,49 @@ public class FCAEVpnService extends VpnService {
             if (running && !shuttingDown && !vpnPaused) PsiphonTunnelService.pollChainedRequest(FCAEVpnService.this);
             updateNotification();
             notifyUi();
+            watchPhase();
             // Keep ticking while paused: Stop only turns the TUN off, so
             // the notification flows on like a live session's.
             if (running || vpnPaused) handler.postDelayed(this, 1000);
         }
     };
+
+    /** How often a session that is still coming up is asked for its phase. */
+    private static final long PHASE_WATCH_MS = 150L;
+
+    /** The phase notifyUi() published last: what phaseWatch compares with. */
+    private SessionState.Phase publishedPhase;
+
+    /**
+     * Between the one-second ticks, a session that is still coming up is asked
+     * for its phase more often: the next one is what the user is waiting for,
+     * and the tick alone put "connected" on every surface up to a second after
+     * the engine had said so -- by which time the latency was usually there
+     * too, as if the one had waited for the other. Only the phase is read
+     * here; the notification and the published state are refreshed once, when
+     * it has changed.
+     */
+    private final Runnable phaseWatch = new Runnable() {
+        @Override
+        public void run() {
+            if (!running || shuttingDown || vpnPaused) return;
+            if (phase() != publishedPhase) {
+                updateNotification();
+                notifyUi();
+            }
+            if (arriving(publishedPhase)) handler.postDelayed(this, PHASE_WATCH_MS);
+        }
+    };
+
+    private static boolean arriving(SessionState.Phase phase) {
+        return phase == SessionState.Phase.CONNECTING || phase == SessionState.Phase.RECONNECTING;
+    }
+
+    /** Runs phaseWatch for as long as the published phase is one a session passes through. */
+    private void watchPhase() {
+        handler.removeCallbacks(phaseWatch);
+        if (arriving(publishedPhase)) handler.postDelayed(phaseWatch, PHASE_WATCH_MS);
+    }
 
     // Psiphon network state from JNI.
     //
@@ -1980,7 +2018,9 @@ public class FCAEVpnService extends VpnService {
         // freshness test on the last sample. See SessionState.stats().
         final boolean psiTelemetry = sessionPsiphonExit;
         final long[] stats = SessionState.stats(lastPsiphonStats, psiTelemetry);
-        SessionState.publish(this, phase(), 1,
+        final SessionState.Phase phase = phase();
+        publishedPhase = phase;
+        SessionState.publish(this, phase, 1,
                 stats[0], stats[1], stats[2], stats[3], (int) stats[4],
                 psiTelemetry ? SessionState.SOURCE_PSIPHON : SessionState.SOURCE_ENGINE);
     }

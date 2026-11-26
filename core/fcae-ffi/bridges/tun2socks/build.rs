@@ -440,6 +440,27 @@ fn assemble(
                 "missing {directory} submodule"
             );
             fcae_build::go::track_sources(&source);
+            let source = if directory == "xray"
+                && matches!(
+                    std::env::var("CARGO_CFG_TARGET_OS").as_deref(),
+                    Ok("windows" | "linux")
+                )
+            {
+                // Xray's TUN splits traffic per app on Windows and Linux, and a
+                // flow sent around the VPN has to be refused, not accepted and
+                // reset, when it cannot leave: the copy answers a connection
+                // once its outbound is open. The submodule stays pristine.
+                let staged = module.join("xtls-xray-core");
+                if staged.exists() {
+                    std::fs::remove_dir_all(&staged).expect("clear staged Xray");
+                }
+                copy_source_tree(&source, &staged);
+                fcae_build::go::defer_xray_tcp_accept(&staged)
+                    .unwrap_or_else(|error| panic!("{error}"));
+                staged
+            } else {
+                source
+            };
             manifest.push_str(&format!(
                 "\nrequire {module_name} v0.0.0\nreplace {module_name} => {}\n",
                 local(&source)
@@ -534,6 +555,25 @@ fn assemble(
             1,
             "Mihomo's early-data peek changed; review the deferred TCP accept"
         );
+        let source = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            // With the deferred accept Mihomo looks for the owner of a flow
+            // while the application is still connecting, and its Windows lookup
+            // only reads established connections: no rule for a selected
+            // application matched a TCP flow. The copy reads both states.
+            let staged = module.join("metacubex-mihomo");
+            if staged.exists() {
+                std::fs::remove_dir_all(&staged).expect("clear staged Mihomo");
+            }
+            copy_source_tree(&source, &staged);
+            fcae_build::go::find_owners_while_connecting(
+                &staged.join("component/process/process_windows.go"),
+                "Mihomo",
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            staged
+        } else {
+            source
+        };
         manifest.push_str(&format!("\nrequire github.com/metacubex/mihomo v0.0.0\nreplace github.com/metacubex/mihomo => {}\n",local(&source)));
     }
     if cfg!(feature = "urnetwork") {

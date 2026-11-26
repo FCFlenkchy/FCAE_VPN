@@ -984,6 +984,114 @@ fn install_deferred_accept(module: &Path, replacement: &Path) -> Result<(), GoEr
     std::fs::write(&target, kept).map_err(fail)?;
     std::fs::write(module.join("fcae_tcp_accept.go"), source).map_err(fail)
 }
+/// Let a copy of Xray answer a TCP connection on its TUN only once its handler
+/// is ready for it. The pinned stack answers the SYN at once and starts the
+/// handler when the application has acknowledged that, so a flow whose
+/// outbound cannot be opened reaches the application as a connection that was
+/// established and then reset, and the application does not go on to its next
+/// address. The copy starts the handler with the SYN and gets
+/// `bridges/xray/stack/tcp_accept.go`, which explains the rest.
+///
+/// A handler that starts with the SYN looks for the owner of a flow while the
+/// application is still connecting, so the Windows lookup is told to read
+/// that state as well.
+pub fn defer_xray_tcp_accept(module: &Path) -> Result<(), GoError> {
+    let addition = crate::repo_root().join("core/fcae-ffi/bridges/xray/stack/tcp_accept.go");
+    crate::rerun_if_changed(&addition);
+    install_xray_deferred_accept(module, &addition)?;
+    find_owners_while_connecting(&module.join("common/net/find_process_windows.go"), "Xray")
+}
+fn install_xray_deferred_accept(module: &Path, addition: &Path) -> Result<(), GoError> {
+    let fail = |error: std::io::Error| GoError::Build(error.to_string());
+    let stack_path = module.join("proxy/tun/stack.go");
+    let tcp_path = module.join("proxy/tun/tcp_lightweight.go");
+    let mut stack = std::fs::read_to_string(&stack_path).map_err(fail)?;
+    let mut tcp = std::fs::read_to_string(&tcp_path).map_err(fail)?;
+    // What the pinned stack does, and what the copy does in its place. Each is
+    // changed where it stands and nowhere else.
+    let edits = [
+        // A SYN: the handler gets the connection, and nothing is answered yet.
+        (
+            true,
+            "\ts.opening.Add(1)\n\tc.mu.Lock()\n\tc.sendSyn()\n\tc.arm(tcpTick)\n\tc.mu.Unlock()\n}\n",
+            "\ts.opening.Add(1)\n\tc.fcaeHold()\n}\n",
+        ),
+        (
+            false,
+            "\testablished bool\n",
+            "\testablished bool\n\t// fcaeHeld is set while the SYN waits for the handler to read or write, fcaeHandled once the\n\t// handler has the connection\n\tfcaeHeld, fcaeHandled bool\n",
+        ),
+        // The same SYN again, while the first one is held, is not answered either.
+        (
+            false,
+            "\t\tcase !c.established && s.seq+1 == c.rcvNxt:\n",
+            "\t\tcase c.fcaeHeld && s.seq+1 == c.rcvNxt:\n\t\t\t// the same SYN again: it is still held\n\t\tcase !c.established && s.seq+1 == c.rcvNxt:\n",
+        ),
+        // The answer is acknowledged: the handler is running already.
+        (
+            false,
+            "\t\tc.stack.opening.Add(-1)\n\t\tgo c.stack.handle(c, c.dst)\n",
+            "\t\tc.stack.opening.Add(-1)\n\t\tc.fcaeEstablished()\n",
+        ),
+        // The handler's first read or write is what answers the SYN.
+        (
+            false,
+            "func (c *tcpConn) wait() error {\n",
+            "func (c *tcpConn) wait() error {\n\tc.fcaeAnswer()\n",
+        ),
+        (
+            false,
+            "\tmb = mb[:n]\n\tif c.err != nil || c.closed {\n",
+            "\tmb = mb[:n]\n\tc.fcaeWritable()\n\tif c.err != nil || c.closed {\n",
+        ),
+        // A handler that closes before that refuses the connection.
+        (
+            false,
+            "\tif unread || c.writing != 0 {\n",
+            "\tif unread || c.writing != 0 || !c.established {\n",
+        ),
+    ];
+    for (in_stack, pinned, deferred) in edits {
+        let text = if in_stack { &mut stack } else { &mut tcp };
+        if text.matches(pinned).count() != 1 {
+            return Err(GoError::Build(
+                "Xray TUN TCP stack changed; review the deferred accept".into(),
+            ));
+        }
+        *text = text.replace(pinned, deferred);
+    }
+    let source = std::fs::read(addition).map_err(fail)?;
+    std::fs::write(stack_path, stack).map_err(fail)?;
+    std::fs::write(tcp_path, tcp).map_err(fail)?;
+    std::fs::write(module.join("proxy/tun/fcae_tcp_accept.go"), source).map_err(fail)
+}
+/// Mihomo and Xray find the owner of a TCP flow on Windows with the lookup
+/// both took from Clash, which only reads established connections. With the
+/// deferred accept the handler asks while the application is still connecting,
+/// so that lookup found nobody, no rule for a selected application matched,
+/// and every TCP flow went the way of an unknown owner. A connection that is
+/// being opened has its owner as well: read that state too.
+pub fn find_owners_while_connecting(lookup: &Path, engine: &str) -> Result<(), GoError> {
+    let fail = |error: std::io::Error| GoError::Build(error.to_string());
+    let pinned = std::fs::read_to_string(lookup).map_err(fail)?;
+    let established = "if tcpState != 5 {";
+    let connections = "class = tcpTablePidConn\n";
+    if pinned.matches(established).count() != 1
+        || pinned.matches(connections).count() != 1
+        || !pinned.contains("MIB_TCP_STATE_ESTAB")
+    {
+        return Err(GoError::Build(format!(
+            "{engine} Windows process lookup changed; review the connection states it reads"
+        )));
+    }
+    // MIB_TCP_STATE_SYN_SENT is 3. The rows are read from the table of every
+    // TCP endpoint (TCP_TABLE_OWNER_PID_ALL, 5), which is what netstat lists a
+    // connection that is being opened from; the state keeps listeners out.
+    let both = pinned
+        .replace(established, "if tcpState != 5 && tcpState != 3 {")
+        .replace(connections, "class = 5\n");
+    std::fs::write(lookup, both).map_err(fail)
+}
 /// sing-tun carries a wintun.dll of its own and maps it from memory, which puts
 /// a second Wintun image into a process whose other engines use the host's.
 /// Each image opens Wintun's private namespace for itself, and Windows refuses
@@ -1134,6 +1242,92 @@ mod tests {
         assert_eq!(std::fs::read_to_string(module.join("stack_gvisor_tcp.go")).unwrap(), other);
         assert!(!module.join("fcae_tcp_accept.go").exists());
         std::fs::remove_dir_all(module).unwrap();
+    }
+
+    /// The lines of the pinned Xray TUN stack that the deferred accept changes.
+    const PINNED_XRAY_STACK: &str = "func (s *stack) handleTCP(p packet) {\n\
+        \ts.opening.Add(1)\n\tc.mu.Lock()\n\tc.sendSyn()\n\tc.arm(tcpTick)\n\tc.mu.Unlock()\n}\n";
+    const PINNED_XRAY_TCP: &str = "type tcpConn struct {\n\testablished bool\n}\n\
+        func (c *tcpConn) input(s segment) bool {\n\
+        \t\tcase !c.established && s.seq+1 == c.rcvNxt:\n\t\t\tc.sendSyn()\n\
+        \t\tc.stack.opening.Add(-1)\n\t\tgo c.stack.handle(c, c.dst)\n}\n\
+        func (c *tcpConn) wait() error {\n\treturn nil\n}\n\
+        func (c *tcpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {\n\
+        \tmb = mb[:n]\n\tif c.err != nil || c.closed {\n\t}\n}\n\
+        func (c *tcpConn) Close() error {\n\tif unread || c.writing != 0 {\n\t}\n}\n";
+
+    fn staged_xray(name: &str, stack: &str, tcp: &str) -> PathBuf {
+        let module = std::env::temp_dir().join(format!(
+            "fcae-xray-accept-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&module);
+        std::fs::create_dir_all(module.join("proxy/tun")).unwrap();
+        std::fs::write(module.join("proxy/tun/stack.go"), stack).unwrap();
+        std::fs::write(module.join("proxy/tun/tcp_lightweight.go"), tcp).unwrap();
+        module
+    }
+
+    fn xray_deferred_accept() -> PathBuf {
+        crate::repo_root().join("core/fcae-ffi/bridges/xray/stack/tcp_accept.go")
+    }
+
+    #[test]
+    fn an_xray_copy_answers_tcp_when_its_handler_is_ready() {
+        let module = staged_xray("pinned", PINNED_XRAY_STACK, PINNED_XRAY_TCP);
+        install_xray_deferred_accept(&module, &xray_deferred_accept()).unwrap();
+        let stack = std::fs::read_to_string(module.join("proxy/tun/stack.go")).unwrap();
+        let tcp = std::fs::read_to_string(module.join("proxy/tun/tcp_lightweight.go")).unwrap();
+        // A SYN is no longer answered where it arrives: the handler is started there.
+        assert!(stack.contains("\ts.opening.Add(1)\n\tc.fcaeHold()\n}\n") && !stack.contains("c.sendSyn()"));
+        // And not started a second time when the answer is acknowledged.
+        assert!(tcp.contains("c.fcaeEstablished()") && !tcp.contains("go c.stack.handle(c, c.dst)"));
+        // Reading and writing answer it, and a close before that refuses it.
+        assert!(tcp.contains("func (c *tcpConn) wait() error {\n\tc.fcaeAnswer()\n"));
+        assert!(tcp.contains("\tc.fcaeWritable()\n\tif c.err != nil || c.closed {\n"));
+        assert!(tcp.contains("if unread || c.writing != 0 || !c.established {"));
+        assert!(tcp.contains("\t\tcase c.fcaeHeld && s.seq+1 == c.rcvNxt:\n"));
+        // Every name the copy now calls is defined by the file that comes with it.
+        let added = std::fs::read_to_string(module.join("proxy/tun/fcae_tcp_accept.go")).unwrap();
+        assert_eq!(added, std::fs::read_to_string(xray_deferred_accept()).unwrap());
+        for name in ["fcaeHold", "fcaeAnswer", "fcaeWritable", "fcaeEstablished"] {
+            assert!(added.contains(&format!("func (c *tcpConn) {name}() {{")), "{name}");
+        }
+        assert!(tcp.contains("\tfcaeHeld, fcaeHandled bool\n"));
+        std::fs::remove_dir_all(module).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_xray_tcp_stack_stops_the_build() {
+        let other = PINNED_XRAY_TCP.replace("go c.stack.handle(c, c.dst)", "go c.stack.accept(c)");
+        let module = staged_xray("other", PINNED_XRAY_STACK, &other);
+        let error = install_xray_deferred_accept(&module, &xray_deferred_accept())
+            .err()
+            .expect("an unreviewed stack must not be changed");
+        assert!(error.to_string().contains("Xray TUN TCP stack changed"));
+        // Nothing is half applied.
+        assert_eq!(std::fs::read_to_string(module.join("proxy/tun/stack.go")).unwrap(), PINNED_XRAY_STACK);
+        assert_eq!(std::fs::read_to_string(module.join("proxy/tun/tcp_lightweight.go")).unwrap(), other);
+        assert!(!module.join("proxy/tun/fcae_tcp_accept.go").exists());
+        std::fs::remove_dir_all(module).unwrap();
+    }
+
+    #[test]
+    fn a_windows_lookup_finds_the_owner_of_a_connection_that_is_being_opened() {
+        let lookup = std::env::temp_dir().join(format!("fcae-owner-lookup-test-{}.go", std::process::id()));
+        let pinned = "\tcase TCP:\n\t\tfn = procGetExtendedTcpTable.Addr()\n\t\tclass = tcpTablePidConn\n\
+            \t\t\t// MIB_TCP_STATE_ESTAB, only check established connections for TCP\n\
+            \t\t\tif tcpState != 5 {\n\t\t\t\tcontinue\n\t\t\t}\n";
+        std::fs::write(&lookup, pinned).unwrap();
+        find_owners_while_connecting(&lookup, "Mihomo").unwrap();
+        let both = std::fs::read_to_string(&lookup).unwrap();
+        assert!(both.contains("if tcpState != 5 && tcpState != 3 {\n\t\t\t\tcontinue"));
+        // From the table that has every endpoint, not only the connected ones.
+        assert!(both.contains("\t\tclass = 5\n") && !both.contains("class = tcpTablePidConn"));
+        // A lookup that is no longer the pinned one stops the build.
+        let error = find_owners_while_connecting(&lookup, "Mihomo").err().unwrap();
+        assert!(error.to_string().contains("Mihomo Windows process lookup changed"));
+        std::fs::remove_file(lookup).unwrap();
     }
 
     #[test]
