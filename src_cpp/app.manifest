@@ -5,7 +5,7 @@
     processorArchitecture="amd64"
     name="FCAE VPN"
     type="win32"/>
-  <description>FCAE VPN - Secure Tunnel Client</description>
+  <description>FCAE VPN</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
