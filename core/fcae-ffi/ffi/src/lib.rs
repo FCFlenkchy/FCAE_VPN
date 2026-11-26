@@ -911,7 +911,9 @@ pub unsafe extern "C" fn fcae_start_with_app_routing(cfg:*const FcaeConfig,routi
             fcae_runtime::desktop_flow_routing::parse(&value)?
         };
         if policy.is_some(){
-            if policy.as_ref().is_some_and(|policy|policy.provider!="macos_ne") && !matches!(parsed.tun.engine,config::TunEngine::SingBox|config::TunEngine::Mihomo|config::TunEngine::MetaSingTun){return Err(CoreError::InvalidConfig("Select sing-box, Mihomo or sing-tun for per-app split tunneling".into()));}
+            // Xray finds the owner of a flow on Windows and Linux.
+            let splits=matches!(parsed.tun.engine,config::TunEngine::SingBox|config::TunEngine::Mihomo|config::TunEngine::MetaSingTun)||(cfg!(any(windows,target_os="linux"))&&parsed.tun.engine==config::TunEngine::Xray);
+            if policy.as_ref().is_some_and(|policy|policy.provider!="macos_ne") && !splits{return Err(CoreError::InvalidConfig(if cfg!(any(windows,target_os="linux")){"Select sing-box, Mihomo, sing-tun or Xray for per-app split tunneling"}else{"Select sing-box, Mihomo or sing-tun for per-app split tunneling"}.into()));}
 
             let provider_available=if policy.as_ref().is_some_and(|policy|policy.provider=="macos_ne"){fcae_app_routing_macos_ne_available()}else{fcae_app_routing_flow_available()};
             if !provider_available{return Err(CoreError::BackendUnavailable("requested desktop application routing provider"));}

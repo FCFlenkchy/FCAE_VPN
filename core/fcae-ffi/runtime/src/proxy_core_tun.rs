@@ -372,14 +372,11 @@ fn configuration(
         }
 
         TunEngine::Xray => {
-            if policy.is_some() {
-                return Err(CoreError::InvalidConfig(
-                    "Select sing-box or Mihomo TUN for per-app splitting".into(),
-                ));
+            let mut value = json!({"log":{"loglevel":cfg.tun.xray_tun_log_level()},"inbounds":[{"tag":"fcae-native-tun","protocol":"tun","settings":{"name":device,"mtu":cfg.tun.mtu,"gateway":addresses,"dns":[],"autoSystemRoutingTable":[],"autoOutboundsInterface":""}}],"routing":{"rules":[{"type":"field","inboundTag":["fcae-native-tun"],"outboundTag":"fcae-native-exit"}]},"outbounds":[{"tag":"fcae-native-exit","protocol":"socks","settings":{"servers":[{"address":socks.ip().to_string(),"port":socks.port()}]}}]});
+            if let Some(policy) = policy {
+                xray_app_flows(&mut value, policy, device)?;
             }
-            Ok(
-                json!({"log":{"loglevel":cfg.tun.xray_tun_log_level()},"inbounds":[{"tag":"fcae-native-tun","protocol":"tun","settings":{"name":device,"mtu":cfg.tun.mtu,"gateway":addresses,"dns":[],"autoSystemRoutingTable":[],"autoOutboundsInterface":""}}],"routing":{"rules":[{"type":"field","inboundTag":["fcae-native-tun"],"outboundTag":"fcae-native-exit"}]},"outbounds":[{"tag":"fcae-native-exit","protocol":"socks","settings":{"servers":[{"address":socks.ip().to_string(),"port":socks.port()}]}}]}),
-            )
+            Ok(value)
         }
         TunEngine::Mihomo => {
             let mut rules = Vec::new();
@@ -488,6 +485,119 @@ fn configuration(
     }
 }
 
+/// Per-app splitting with Xray's own `process` rule, which finds the owner of
+/// a flow on Windows and Linux. The order is the other engines': DNS ports
+/// stay on the exit, this process leaves directly, then the selected
+/// applications. Where no rule matches Xray takes its first outbound, which
+/// is the exit, so a flow whose owner it cannot find is never sent around the
+/// VPN. UDP the exit cannot carry is refused by the exit, as before.
+fn xray_app_flows(
+    value: &mut serde_json::Value,
+    policy: &desktop_flow_routing::FlowPolicy,
+    device: &str,
+) -> Result<()> {
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (value, policy, device);
+        Err(CoreError::InvalidConfig(
+            "Select sing-box or Mihomo TUN for per-app splitting".into(),
+        ))
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        use serde_json::json;
+        let rule = |condition: serde_json::Value, outbound: &str| {
+            let mut rule = json!({"type":"field","inboundTag":["fcae-native-tun"],"outboundTag":outbound});
+            if let (Some(rule), Some(condition)) = (rule.as_object_mut(), condition.as_object()) {
+                rule.extend(condition.clone());
+            }
+            rule
+        };
+        let selected: Vec<&str> = policy.paths.iter().map(String::as_str).collect();
+        let mut rules = vec![
+            rule(json!({"port":"53,853"}), "fcae-native-exit"),
+            // Xray runs inside this process: `self/` is the app itself.
+            rule(json!({"process":["self/"]}), "fcae-native-direct"),
+        ];
+        match policy.mode {
+            1 => {
+                rules.push(rule(json!({"process":selected}), "fcae-native-exit"));
+                rules.push(rule(json!({"process":xray_any_owner()}), "fcae-native-direct"));
+            }
+            2 => rules.push(rule(json!({"process":selected}), "fcae-native-direct")),
+            _ => {
+                return Err(CoreError::InvalidConfig(
+                    "invalid application routing mode".into(),
+                ))
+            }
+        }
+        rules.push(rule(json!({}), "fcae-native-exit"));
+        // Only the direct outbound is bound, and by name: `autoOutboundsInterface`
+        // would bind every Xray connection of the process, the session core's
+        // included, and stays registered after this device is gone.
+        #[cfg(windows)]
+        let interface = crate::windows_tun::physical_egress_interface(device)?;
+        #[cfg(target_os = "linux")]
+        let interface = linux_egress_interface(
+            &std::fs::read_to_string("/proc/net/route").map_err(|e| {
+                CoreError::Internal(format!("cannot read the routing table: {e}"))
+            })?,
+            device,
+        )?;
+        value["routing"]["rules"] = json!(rules);
+        let direct = json!({"tag":"fcae-native-direct","protocol":"freedom","streamSettings":{"sockopt":{"interface":interface}}});
+        match value["outbounds"].as_array_mut() {
+            Some(outbounds) => outbounds.push(direct),
+            None => return Err(CoreError::Internal("Xray TUN has no outbounds".into())),
+        }
+        Ok(())
+    }
+}
+
+/// Every owner Xray can name. Its `process` rule takes a folder as a prefix of
+/// the executable's path, written with forward slashes on Windows too.
+#[cfg(any(windows, target_os = "linux"))]
+fn xray_any_owner() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        ('A'..='Z')
+            .flat_map(|drive| [format!("{drive}:/"), format!("{}:/", drive.to_ascii_lowercase())])
+            .chain(["//", ":System", ":System Idle Process"].map(String::from))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec!["/".into()]
+    }
+}
+
+/// The interface the IPv4 default route leaves through, from `/proc/net/route`:
+/// where a connection that goes around the device is bound. The capture
+/// routes are two halves, never a default, so they are not candidates.
+#[cfg(target_os = "linux")]
+fn linux_egress_interface(table: &str, device: &str) -> Result<String> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [name, destination, _gateway, flags, _references, _uses, metric, mask, ..] = fields[..] else {
+                return None;
+            };
+            let up = u32::from_str_radix(flags, 16).ok()? & 1 != 0;
+            let metric: u32 = metric.parse().ok()?;
+            (up && destination == "00000000" && mask == "00000000" && name != device)
+                .then(|| (metric, name.to_owned()))
+        })
+        .min()
+        .map(|(_, name)| name)
+        .ok_or_else(|| {
+            CoreError::InvalidConfig(
+                "no default route to send bypassed applications through; select sing-box or Mihomo TUN".into(),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +613,96 @@ mod tests {
             mode: 2,
             paths: BTreeSet::from([SELECTED_PATH.into()]),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xray_keeps_dns_on_the_exit_and_sends_a_bypassed_app_direct() {
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = crate::config::TunEngine::Xray;
+        let value = configuration(
+            &cfg,
+            "127.0.0.1:1080".parse().unwrap(),
+            "fcae0",
+            true,
+            Some(&bypass_policy()),
+        )
+        .unwrap();
+        let rules = value["routing"]["rules"].as_array().unwrap();
+        let outbounds: Vec<&str> = rules
+            .iter()
+            .map(|rule| rule["outboundTag"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            outbounds,
+            ["fcae-native-exit", "fcae-native-direct", "fcae-native-direct", "fcae-native-exit"]
+        );
+        assert_eq!(rules[0]["port"], "53,853");
+        assert_eq!(rules[1]["process"], serde_json::json!(["self/"]));
+        assert_eq!(rules[2]["process"], serde_json::json!([SELECTED_PATH]));
+        // Every rule is the device's own, and the last one takes what is left.
+        assert!(rules
+            .iter()
+            .all(|rule| rule["inboundTag"] == serde_json::json!(["fcae-native-tun"])));
+        assert!(rules[3].get("process").is_none() && rules[3].get("port").is_none());
+        // The exit stays first: it is what Xray takes when nothing matches.
+        assert_eq!(value["outbounds"][0]["tag"], "fcae-native-exit");
+        assert_eq!(value["outbounds"][1]["protocol"], "freedom");
+        let bound = value["outbounds"][1]["streamSettings"]["sockopt"]["interface"]
+            .as_str()
+            .unwrap();
+        assert!(!bound.is_empty() && bound != "fcae0");
+        // Nothing of the process is bound but that outbound.
+        assert_eq!(value["inbounds"][0]["settings"]["autoOutboundsInterface"], "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xray_include_mode_sends_every_other_known_owner_direct() {
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = crate::config::TunEngine::Xray;
+        let mut policy = bypass_policy();
+        policy.mode = 1;
+        let value = configuration(&cfg, "127.0.0.1:1080".parse().unwrap(), "fcae0", false, Some(&policy)).unwrap();
+        let rules = value["routing"]["rules"].as_array().unwrap();
+        let routed: Vec<(serde_json::Value, &str)> = rules
+            .iter()
+            .map(|rule| (rule["process"].clone(), rule["outboundTag"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            routed[1..],
+            [
+                (serde_json::json!(["self/"]), "fcae-native-direct"),
+                (serde_json::json!([SELECTED_PATH]), "fcae-native-exit"),
+                // Any absolute path; an owner Xray cannot name stays on the exit.
+                (serde_json::json!(["/"]), "fcae-native-direct"),
+                (serde_json::Value::Null, "fcae-native-exit"),
+            ]
+        );
+    }
+
+    #[test]
+    fn xray_without_a_policy_is_unchanged() {
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = crate::config::TunEngine::Xray;
+        let value = configuration(&cfg, "127.0.0.1:1080".parse().unwrap(), "fcae0", true, None).unwrap();
+        assert_eq!(value["routing"]["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(value["outbounds"].as_array().unwrap().len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_lowest_metric_default_route_names_the_egress_interface() {
+        let table = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+            fcae0\t00000000\t00000000\t0001\t0\t0\t0\t00000080\t0\t0\t0\n\
+            wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n\
+            eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+            eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n";
+        assert_eq!(linux_egress_interface(table, "fcae0").unwrap(), "eth0");
+        // A default route on the device itself is never the way around it.
+        let captured = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+            fcae0\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0\n";
+        assert!(linux_egress_interface(captured, "fcae0").is_err());
     }
 
     #[test]

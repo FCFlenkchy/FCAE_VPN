@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	MB "github.com/metacubex/sing/common/buf"
@@ -14,6 +15,7 @@ import (
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/include"
+	sblog "github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	SB "github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/json"
@@ -33,12 +35,32 @@ func mtunNewAppRouter(ctx context.Context, config []byte) (mtunAppRouter, error)
 	if err != nil {
 		return nil, err
 	}
+	// The router is where a flow gets its process and its outbound. Without
+	// this its log goes nowhere, and a split that misbehaves shows nothing in
+	// the TUN engine log.
+	core.LogFactory().AttachPlatformWriter(mtunRouterLog{})
 	if err = core.Start(); err != nil {
 		_ = core.Close()
 		return nil, err
 	}
 	return &mtunBoxRouter{core}, nil
 }
+
+type mtunRouterLog struct{}
+
+func (mtunRouterLog) WriteMessage(level sblog.Level, message string) {
+	gate := 4
+	switch {
+	case level <= sblog.LevelError:
+		gate = 1
+	case level == sblog.LevelWarn:
+		gate = 2
+	case level == sblog.LevelInfo:
+		gate = 3
+	}
+	mtunLogf(gate, "router: %s", strings.TrimRight(message, "\n"))
+}
+
 func mtunInbound(m MM.Metadata, network string) adapter.InboundContext {
 	return adapter.InboundContext{Inbound: "fcae-sing-tun", InboundType: "tun", Network: network,
 		Source:      SM.Socksaddr{Addr: m.Source.Addr, Port: m.Source.Port, Fqdn: m.Source.Fqdn},

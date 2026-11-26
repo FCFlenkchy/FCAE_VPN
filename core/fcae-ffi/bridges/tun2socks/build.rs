@@ -461,6 +461,7 @@ fn assemble(
                 std::fs::remove_dir_all(&staged).expect("clear staged sing-tun");
             }
             copy_source_tree(&source, &staged);
+            fcae_build::go::defer_tcp_accept(&staged).unwrap_or_else(|error| panic!("{error}"));
             let loader = root.join("core/fcae-ffi/bridges/sing-tun/windows/dll_windows.go");
             fcae_build::rerun_if_changed(&loader);
             copy(&loader, &staged.join("internal/wintun/dll_windows.go"));
@@ -498,6 +499,21 @@ fn assemble(
                 "if err != nil {\n e.tun.fcaeReadError.Store(&err)\n break\n }"))
                 .expect("stage packet reader health");
             staged
+        } else if matches!(
+            std::env::var("CARGO_CFG_TARGET_OS").as_deref(),
+            Ok("linux" | "macos")
+        ) {
+            // The other desktops need no Windows override, but Mihomo's TUN and
+            // the sing-tun engine split traffic per app there as well, and a
+            // flow sent DIRECT has to be refused, not accepted and closed, when
+            // it cannot leave.
+            let staged = module.join("metacubex-sing-tun");
+            if staged.exists() {
+                std::fs::remove_dir_all(&staged).expect("clear staged sing-tun");
+            }
+            copy_source_tree(&source, &staged);
+            fcae_build::go::defer_tcp_accept(&staged).unwrap_or_else(|error| panic!("{error}"));
+            staged
         } else {
             source
         };
@@ -506,6 +522,18 @@ fn assemble(
     if mihomo {
         let source = root.join("core/mihomo");
         fcae_build::go::track_sources(&source);
+        // The deferred TCP accept (bridges/sing-tun/stack/tcp_accept.go) lets
+        // Mihomo's early-data peek pass without answering the application, and
+        // knows it by this deadline.
+        let tunnel = std::fs::read_to_string(source.join("tunnel/tunnel.go"))
+            .expect("read the pinned Mihomo tunnel");
+        assert_eq!(
+            tunnel
+                .matches("conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))")
+                .count(),
+            1,
+            "Mihomo's early-data peek changed; review the deferred TCP accept"
+        );
         manifest.push_str(&format!("\nrequire github.com/metacubex/mihomo v0.0.0\nreplace github.com/metacubex/mihomo => {}\n",local(&source)));
     }
     if cfg!(feature = "urnetwork") {

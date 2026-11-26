@@ -900,6 +900,12 @@ fn stage_windows_adapter_guids(go: &str, module: &Path) -> Result<(), GoError> {
             crate::rerun_if_changed(&loader);
             share_wintun_image(&destination, &loader, name)?;
         }
+        if label == "metacubex-sing-tun" {
+            defer_tcp_accept(&destination)?;
+        }
+        if label == "xray" {
+            match_process_paths_without_case(&destination)?;
+        }
         let replacement = format!(
             "{name}={}",
             destination.to_string_lossy().replace('\\', "/")
@@ -921,6 +927,62 @@ fn stage_windows_adapter_guids(go: &str, module: &Path) -> Result<(), GoError> {
         )?;
     }
     Ok(())
+}
+/// Xray's `process` rule compares the path of a flow's owner with the selected
+/// one byte for byte. Windows reports a running image with the spelling it was
+/// started with, which need not be the one on disk that a selected application
+/// is resolved to, so there the comparison ignores case, as the other engines'
+/// rules for selected applications do.
+fn match_process_paths_without_case(module: &Path) -> Result<(), GoError> {
+    let fail = |error: std::io::Error| GoError::Build(error.to_string());
+    let target = module.join("app/router/condition.go");
+    let pinned = std::fs::read_to_string(&target).map_err(fail)?;
+    let exact = "if slices.Contains(m.AbsPaths, absPath) {";
+    if pinned.matches(exact).count() != 1 {
+        return Err(GoError::Build(
+            "Xray process rule changed; review the Windows path comparison".into(),
+        ));
+    }
+    let relaxed = pinned.replace(
+        exact,
+        "if slices.ContainsFunc(m.AbsPaths, func(path string) bool { return strings.EqualFold(path, absPath) }) {",
+    );
+    std::fs::write(target, relaxed).map_err(fail)
+}
+/// Let a copy of MetaCubeX sing-tun answer a TCP connection only once its
+/// handler is ready for it: the pinned gVisor forwarder accepts first, so a
+/// flow whose outbound cannot be opened reaches the application as a
+/// connection that was established and then closed. The copy keeps the pinned
+/// forwarder under another name and gets `bridges/sing-tun/stack/tcp_accept.go`,
+/// which explains the rest, in its place.
+pub fn defer_tcp_accept(module: &Path) -> Result<(), GoError> {
+    let replacement =
+        crate::repo_root().join("core/fcae-ffi/bridges/sing-tun/stack/tcp_accept.go");
+    crate::rerun_if_changed(&replacement);
+    install_deferred_accept(module, &replacement)
+}
+fn install_deferred_accept(module: &Path, replacement: &Path) -> Result<(), GoError> {
+    let fail = |error: std::io::Error| GoError::Build(error.to_string());
+    let target = module.join("stack_gvisor_tcp.go");
+    let pinned = std::fs::read_to_string(&target).map_err(fail)?;
+    let forward = "func (f *TCPForwarder) Forward(r *tcp.ForwarderRequest) {";
+    // The replacement stands in for this forwarder and no other.
+    if pinned.matches(forward).count() != 1
+        || pinned.matches("tcp.NewForwarder(stack, 0, 1024, forwarder.Forward)").count() != 1
+        || pinned.matches("endpoint, err := r.CreateEndpoint(&wq)").count() != 1
+        || pinned.matches("f.handler.NewConnection(f.ctx, tcpConn, metadata)").count() != 1
+    {
+        return Err(GoError::Build(
+            "MetaCubeX sing-tun TCP forwarder changed; review the deferred accept".into(),
+        ));
+    }
+    let kept = pinned.replace(
+        forward,
+        "func (f *TCPForwarder) fcaeEagerForward(r *tcp.ForwarderRequest) {",
+    );
+    let source = std::fs::read(replacement).map_err(fail)?;
+    std::fs::write(&target, kept).map_err(fail)?;
+    std::fs::write(module.join("fcae_tcp_accept.go"), source).map_err(fail)
 }
 /// sing-tun carries a wintun.dll of its own and maps it from memory, which puts
 /// a second Wintun image into a process whose other engines use the host's.
@@ -1018,6 +1080,79 @@ mod tests {
         assert!(error.to_string().contains("Wintun loader changed"));
         let kept = std::fs::read_to_string(module.join("internal/wintun/dll_windows.go")).unwrap();
         assert_eq!(kept, other);
+        std::fs::remove_dir_all(module).unwrap();
+    }
+
+    const PINNED_FORWARDER: &str = "package tun\n\
+        func NewTCPForwarderWithLoopback() { forwarder.forwarder = tcp.NewForwarder(stack, 0, 1024, forwarder.Forward) }\n\
+        func (f *TCPForwarder) Forward(r *tcp.ForwarderRequest) {\n\
+        \tendpoint, err := r.CreateEndpoint(&wq)\n\
+        \thErr := f.handler.NewConnection(f.ctx, tcpConn, metadata)\n}\n";
+
+    fn staged_forwarder(name: &str, forwarder: &str) -> PathBuf {
+        let module = std::env::temp_dir().join(format!(
+            "fcae-tcp-accept-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&module);
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("stack_gvisor_tcp.go"), forwarder).unwrap();
+        module
+    }
+
+    fn deferred_accept() -> PathBuf {
+        crate::repo_root().join("core/fcae-ffi/bridges/sing-tun/stack/tcp_accept.go")
+    }
+
+    #[test]
+    fn a_sing_tun_copy_answers_tcp_when_its_handler_is_ready() {
+        let module = staged_forwarder("pinned", PINNED_FORWARDER);
+        install_deferred_accept(&module, &deferred_accept()).unwrap();
+        let pinned = std::fs::read_to_string(module.join("stack_gvisor_tcp.go")).unwrap();
+        let added = std::fs::read_to_string(module.join("fcae_tcp_accept.go")).unwrap();
+        // One Forward in the package, and it is the one that holds the SYN.
+        let forward = "func (f *TCPForwarder) Forward(r *tcp.ForwarderRequest) {";
+        assert_eq!(pinned.matches(forward).count(), 0);
+        assert_eq!(pinned.matches("func (f *TCPForwarder) fcaeEagerForward(").count(), 1);
+        assert_eq!(added.matches(forward).count(), 1);
+        // The forwarder is still built from the method of that name.
+        assert!(pinned.contains("tcp.NewForwarder(stack, 0, 1024, forwarder.Forward)"));
+        // Same build constraint as the file it extends.
+        assert!(added.starts_with("//go:build with_gvisor\n"));
+        assert_eq!(added, std::fs::read_to_string(deferred_accept()).unwrap());
+        std::fs::remove_dir_all(module).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_tcp_forwarder_stops_the_build() {
+        let other = PINNED_FORWARDER.replace("r.CreateEndpoint(&wq)", "r.CreateEndpointLazily(&wq)");
+        let module = staged_forwarder("other", &other);
+        let error = install_deferred_accept(&module, &deferred_accept())
+            .err()
+            .expect("an unreviewed forwarder must not be replaced");
+        assert!(error.to_string().contains("TCP forwarder changed"));
+        assert_eq!(std::fs::read_to_string(module.join("stack_gvisor_tcp.go")).unwrap(), other);
+        assert!(!module.join("fcae_tcp_accept.go").exists());
+        std::fs::remove_dir_all(module).unwrap();
+    }
+
+    #[test]
+    fn a_windows_xray_copy_matches_selected_paths_without_case() {
+        let module = std::env::temp_dir().join(format!("fcae-xray-process-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&module);
+        std::fs::create_dir_all(module.join("app/router")).unwrap();
+        let condition = module.join("app/router/condition.go");
+        let pinned = "\tif slices.Contains(m.ProcessNames, name) {\n\t\treturn true\n\t}\n\
+            \tif slices.Contains(m.AbsPaths, absPath) {\n\t\treturn true\n\t}\n";
+        std::fs::write(&condition, pinned).unwrap();
+        match_process_paths_without_case(&module).unwrap();
+        let relaxed = std::fs::read_to_string(&condition).unwrap();
+        assert!(relaxed.contains("strings.EqualFold(path, absPath)"));
+        // Names are left as Xray compares them.
+        assert!(relaxed.contains("if slices.Contains(m.ProcessNames, name) {"));
+        // A rule that is no longer the pinned one stops the build.
+        let error = match_process_paths_without_case(&module).err().unwrap();
+        assert!(error.to_string().contains("Xray process rule changed"));
         std::fs::remove_dir_all(module).unwrap();
     }
 }
