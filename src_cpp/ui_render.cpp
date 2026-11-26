@@ -2464,19 +2464,14 @@ static void background_pick_poll() {
         path.swap(s_background_picked);
     }
     if (path.empty()) {
-        background_note("No file dialog could be opened. On Linux, install zenity or kdialog.");
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(ANDROID)
+        background_note("No file dialog could be opened. Install zenity or kdialog.");
+#else
+        background_note("The picture could not be opened.");
+#endif
         return;
     }
     background_add_image(path);
-}
-
-/// Whether this build has a file picker to open.
-static bool background_picker_exists() {
-#if defined(FCAE_IOS)
-    return false;
-#else
-    return true;
-#endif
 }
 
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(ANDROID)
@@ -2524,11 +2519,13 @@ static int background_run_dialog(const char* const* argv, std::string& chosen) {
 }
 #endif
 
-/// Open the system's file picker for one image. It answers through
-/// ui_background_image_picked(); the UI keeps drawing meanwhile.
-static void background_pick_request() {
+/// Open the system's picker for one image. It answers through
+/// ui_background_image_picked(); the UI keeps drawing meanwhile. `from_files`
+/// matters on iOS alone, where Photos and Files are two pickers.
+static void background_pick_request(bool from_files = false) {
+    (void)from_files;
 #if defined(FCAE_IOS)
-    // No picker is wired up on iOS, and the setting does not offer one.
+    ios_pick_background_image(from_files);
 #elif defined(ANDROID)
     // The activity opens the system's document picker and copies the choice
     // somewhere this side can read: a picked document is a stream, not a path.
@@ -7610,13 +7607,24 @@ void render_ui() {
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete this picture");
                             ImGui::PopID();
                         }
-                        if (background_picker_exists()) {
-                            ImGui::Separator();
-                            if (ImGui::Selectable("+ Add image...")) {
-                                s_background_note.clear();
-                                background_pick_request();
-                            }
+                        ImGui::Separator();
+#if defined(FCAE_IOS)
+                        // Photos and Files are two pickers on iOS, and neither
+                        // shows the pictures the other holds.
+                        if (ImGui::Selectable("+ Add from Photos...")) {
+                            s_background_note.clear();
+                            background_pick_request(false);
                         }
+                        if (ImGui::Selectable("+ Add from Files...")) {
+                            s_background_note.clear();
+                            background_pick_request(true);
+                        }
+#else
+                        if (ImGui::Selectable("+ Add image...")) {
+                            s_background_note.clear();
+                            background_pick_request();
+                        }
+#endif
                         ImGui::EndCombo();
                     }
                     if (bg_delete >= 0) background_remove_image((size_t)bg_delete);

@@ -1,5 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <MetalKit/MetalKit.h>
+#import <PhotosUI/PhotosUI.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "Platform.h"
 #include "ui_render.h"
 #include "ui_style.h"
@@ -169,6 +171,68 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba,int width,int height,uint
 }
 - (void)dealloc {[NSNotificationCenter.defaultCenter removeObserver:self];}
 @end
+// "+ Add from Photos..." and "+ Add from Files..." in the Background setting.
+// Photos and Files are two system pickers on iOS and neither shows what the
+// other holds, so the setting offers both. What a picker hands over is only
+// promised until its callback returns, and the UI reads the file on its next
+// frame: the picture is copied into the temporary folder first.
+@interface FCAEBackgroundPicker : NSObject <PHPickerViewControllerDelegate,UIDocumentPickerDelegate>
+@end
+@implementation FCAEBackgroundPicker
+- (void)deliver:(NSURL*)source {
+    NSFileManager* files=NSFileManager.defaultManager;
+    NSString* folder=[NSTemporaryDirectory() stringByAppendingPathComponent:@"background"];
+    [files removeItemAtPath:folder error:nil];
+    [files createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString* name=source.lastPathComponent.length?source.lastPathComponent:@"image";
+    NSString* target=[folder stringByAppendingPathComponent:name];
+    const BOOL scoped=[source startAccessingSecurityScopedResource];
+    if (source.path && ![@[@"png",@"jpg",@"jpeg",@"webp",@"gif",@"bmp"] containsObject:name.pathExtension.lowercaseString]) {
+        // HEIC is what the camera saves, and the app's decoder does not read
+        // it. The system does: the picture is written out as a JPEG.
+        UIImage* image=[UIImage imageWithContentsOfFile:source.path];
+        target=[[folder stringByAppendingPathComponent:name.stringByDeletingPathExtension] stringByAppendingPathExtension:@"jpg"];
+        if (image) [UIImageJPEGRepresentation(image,0.92) writeToFile:target atomically:YES];
+    } else if (source.path) {
+        [files copyItemAtPath:source.path toPath:target error:nil];
+    }
+    if (scoped) [source stopAccessingSecurityScopedResource];
+    // A picture that could not be copied is reported by the setting itself:
+    // it finds no file at this path.
+    ui_background_image_picked(target.fileSystemRepresentation);
+}
+- (void)picker:(PHPickerViewController*)picker didFinishPicking:(NSArray<PHPickerResult*>*)results {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    NSItemProvider* provider=results.firstObject.itemProvider;
+    if (!provider) return;
+    [provider loadFileRepresentationForTypeIdentifier:UTTypeImage.identifier completionHandler:^(NSURL* url,NSError* error) {
+        [self deliver:url];
+    }];
+}
+- (void)documentPicker:(UIDocumentPickerViewController*)controller didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
+    if (urls.firstObject) [self deliver:urls.firstObject];
+}
+@end
+static FCAEBackgroundPicker* background_picker;
+void ios_pick_background_image(bool from_files) {
+    // From the main queue, and not from inside the frame that asked for it.
+    dispatch_async(dispatch_get_main_queue(),^{
+        UIViewController* host=UIApplication.sharedApplication.delegate.window.rootViewController;
+        if (!host || host.presentedViewController) return;
+        if (!background_picker) background_picker=[FCAEBackgroundPicker new];
+        if (from_files) {
+            UIDocumentPickerViewController* picker=[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeImage] asCopy:YES];
+            picker.delegate=background_picker;
+            [host presentViewController:picker animated:YES completion:nil];
+        } else {
+            PHPickerConfiguration* configuration=[[PHPickerConfiguration alloc] init];
+            configuration.filter=PHPickerFilter.imagesFilter;
+            PHPickerViewController* picker=[[PHPickerViewController alloc] initWithConfiguration:configuration];
+            picker.delegate=background_picker;
+            [host presentViewController:picker animated:YES completion:nil];
+        }
+    });
+}
 @interface FCAEApp : UIResponder <UIApplicationDelegate>
 @property(nonatomic,strong) UIWindow* window;
 @end

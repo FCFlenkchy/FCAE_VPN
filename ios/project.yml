@@ -81,6 +81,9 @@ targets:
       - target: PacketTunnel
         embed: true
       - sdk: UIKit.framework
+      # The background setting's pickers: the photo library and Files.
+      - sdk: PhotosUI.framework
+      - sdk: UniformTypeIdentifiers.framework
       - sdk: Metal.framework
       - sdk: MetalKit.framework
       - sdk: QuartzCore.framework
