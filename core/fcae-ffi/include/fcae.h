@@ -633,16 +633,20 @@ bool fcae_core_check_profile(const char *config, int32_t backend, char *out, uin
  * true and writes the response body to `out`; on failure, writes an error. */
 bool fcae_fetch_subscription(const char *url, char *out, uint32_t cap);
 
-/* fcae_fetch_subscription(), which also writes the name the server gives the
- * feed (its `profile-title` response header, decoded) into `title`: "" when it
- * sent none or the fetch failed. `title` may be NULL. */
+/* fcae_fetch_subscription(), which also writes the names the server gives the
+ * feed: its `profile-title` response header, decoded, into `title`, and the
+ * file name it sends the document under (`Content-Disposition`, without
+ * directory and extension) into `file_name`. Each receives "" when the server
+ * sent none or the fetch failed, and each may be NULL. */
 bool fcae_fetch_subscription_titled(const char *url, char *out, uint32_t cap,
-                                    char *title, uint32_t title_cap);
+                                    char *title, uint32_t title_cap,
+                                    char *file_name, uint32_t file_name_cap);
 
-/* The name a saved core config gives itself: a share link's #fragment (VMess:
- * the `ps` of its payload) or the label a native config carries. Returns true
- * and writes it into `out`, or returns false and writes "" when the config
- * names nothing. Does not validate the config. */
+/* The name a saved core config gives itself: a share link's #fragment, or the
+ * name in its payload where it has no fragment (VMess `ps`, SSR `remarks`), or
+ * the label a native config carries. Returns true and writes it into `out`, or
+ * returns false and writes "" when the config names nothing. Does not validate
+ * the config. */
 bool fcae_core_profile_name(const char *config, int32_t backend, char *out, uint32_t cap);
 
 /* What a saved core config lets a session serve, bitwise (FCAE_CORE_LISTENER_*),

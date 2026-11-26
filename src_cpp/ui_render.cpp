@@ -785,6 +785,7 @@ static void firefox_poll_captcha();
 static void firefox_poll_job();
 static void firefox_poll_background();
 static void firefox_expire_status(double now);
+static void expire_core_import_status(double now);
 static bool firefox_requests_working();
 static void firefox_refresh_usage(double now);
 
@@ -810,6 +811,7 @@ bool ui_should_render(bool interacting) {
     ui_poll_telemetry(now);
     update_error_detail(now);
     expire_save_status(now);
+    expire_core_import_status(now);
     poll_sponsor();
     firefox_poll_captcha();
     firefox_poll_job();
@@ -3646,6 +3648,9 @@ static int s_core_import_backend = 0;
 static char s_core_import_status[512] = {};
 static bool s_core_import_status_error = false;
 static bool s_core_import_status_warning = false;
+/// Counts the messages written to it, so the one that is timed out is the one
+/// that was timed: the same words said again are news again.
+static uint64_t s_core_import_status_revision = 0;
 /// The group the subscription dialog manages, or -1 while it imports a new one.
 static int s_core_import_group = -1;
 /// Set when an import succeeded: the dialog closes itself and the list shows
@@ -3680,16 +3685,19 @@ static bool s_core_import_result_ready = false;
 static bool s_core_import_result_ok = false;
 static std::string s_core_import_result;
 static std::string s_core_import_result_title;
+static std::string s_core_import_result_file_name;
 
 static void ui_core_subscription_fetch_complete(uint64_t request_id, bool success,
                                                 const std::string& response_or_error,
-                                                const std::string& title) {
+                                                const std::string& title,
+                                                const std::string& file_name) {
     {
         std::lock_guard<std::mutex> lock(s_core_import_mutex);
         if (!s_core_import_awaiting || request_id != s_core_import_request_id) return;
         s_core_import_result_ok = success;
         s_core_import_result = response_or_error;
         s_core_import_result_title = title;
+        s_core_import_result_file_name = file_name;
         s_core_import_result_ready = true;
     }
     ui_request_redraw();
@@ -3828,7 +3836,20 @@ static bool subscription_uri_line(const std::string& line) {
     return true;
 }
 
+/// Whether `line` opens with `key`, which is given in lower case.
+static bool subscription_line_opens_with(const std::string& line, const char* key) {
+    const size_t length = strlen(key);
+    if (line.size() < length) return false;
+    for (size_t i = 0; i < length; ++i)
+        if (std::tolower((unsigned char)line[i]) != key[i]) return false;
+    return true;
+}
+
 static bool subscription_metadata_line(const std::string& line) {
+    // The two lines a Shadowrocket-style feed opens with: how much of the plan
+    // is used, and what the feed is called.
+    if (subscription_line_opens_with(line, "status=") || subscription_line_opens_with(line, "remarks="))
+        return true;
     const size_t colon = line.find(':');
     if (colon == std::string::npos) return false;
     std::string key = line.substr(0, colon);
@@ -4095,25 +4116,28 @@ static std::string core_group_auto_name(const std::string& typed, const std::str
     return numbered_core_name("gp", url, taken);
 }
 
-/// `profile-title`, where a feed carries it in its body rather than as a
-/// response header: on a line of its own, usually commented out so that link
-/// parsers skip it, and often base64-encoded.
+/// The name a feed gives itself in its body rather than in a response header.
+/// That is `profile-title` on a line of its own, usually commented out so that
+/// link parsers skip it, and often base64-encoded; or, where the feed has no
+/// such line, the `REMARKS=` line a Shadowrocket-style feed opens with.
 static std::string subscription_body_title(const std::string& text) {
     static const char kKey[] = "profile-title:";
+    static const char kRemarks[] = "remarks=";
+    std::string remarks;
     size_t start = 0;
     for (int line_number = 0; start < text.size() && line_number < 64; ++line_number) {
         const size_t end = text.find('\n', start);
         std::string line = trim_subscription_text(text.substr(start,
             end == std::string::npos ? std::string::npos : end - start));
         start = end == std::string::npos ? text.size() : end + 1;
+        if (remarks.empty() && subscription_line_opens_with(line, kRemarks)) {
+            remarks = clean_core_name(trim_subscription_text(line.substr(sizeof(kRemarks) - 1)));
+            continue;
+        }
         size_t skip = 0;
         while (skip < line.size() && (line[skip] == '#' || line[skip] == '/' || line[skip] == ' ')) ++skip;
         line.erase(0, skip);
-        if (line.size() <= sizeof(kKey) - 1) continue;
-        bool match = true;
-        for (size_t i = 0; i + 1 < sizeof(kKey); ++i)
-            if (std::tolower((unsigned char)line[i]) != kKey[i]) { match = false; break; }
-        if (!match) continue;
+        if (line.size() <= sizeof(kKey) - 1 || !subscription_line_opens_with(line, kKey)) continue;
         std::string value = trim_subscription_text(line.substr(sizeof(kKey) - 1));
         if (value.rfind("base64:", 0) == 0) {
             std::string decoded;
@@ -4122,7 +4146,7 @@ static std::string subscription_body_title(const std::string& text) {
         }
         return clean_core_name(value);
     }
-    return {};
+    return remarks;
 }
 
 struct SubscriptionProfile {
@@ -4442,6 +4466,30 @@ static void set_core_import_status(bool error, bool warning, const char* format,
     va_end(args);
     s_core_import_status_error = error;
     s_core_import_status_warning = warning;
+    ++s_core_import_status_revision;
+}
+
+/// How a download, a save or a removal ended is news for a moment and after
+/// that only in the way, so the line takes itself down: after five seconds, or
+/// after the time a longer one takes to read. What a download is doing stays
+/// up for as long as it runs.
+static void expire_core_import_status(double now) {
+    static uint64_t timed_revision = 0;
+    static double deadline = 0.0;
+    if (!s_core_import_status[0] || s_core_import_in_progress) {
+        deadline = 0.0;
+        return;
+    }
+    if (!deadline || timed_revision != s_core_import_status_revision) {
+        timed_revision = s_core_import_status_revision;
+        deadline = now + std::clamp(2.0 + (double)strlen(s_core_import_status) / 20.0, 5.0, 12.0);
+        return;
+    }
+    if (now >= deadline) {
+        s_core_import_status[0] = 0;
+        deadline = 0.0;
+        ui_request_redraw();
+    }
 }
 
 /// `text` as the end of a status sentence: with a full stop, but only one.
@@ -4452,7 +4500,8 @@ static std::string sentence_end(std::string text) {
 }
 
 /// A download finished: fill the group it was for, creating it for an import.
-static void finish_core_subscription_fetch(const std::string& body, const std::string& header_title) {
+static void finish_core_subscription_fetch(const std::string& body, const std::string& header_title,
+                                           const std::string& file_name) {
     SubscriptionParse parsed = parse_core_subscription(body, s_core_fetch_backend);
     int group = s_core_fetch_group;
     const bool creating = group < 0;
@@ -4465,8 +4514,10 @@ static void finish_core_subscription_fetch(const std::string& body, const std::s
         return;
     }
     // The response header is the feed speaking for itself; a title line in the
-    // body is the same statement by other means.
-    const std::string title = header_title.empty() ? parsed.title : header_title;
+    // body is the same statement by other means. The name of the file it is
+    // sent as is all a Clash-style feed says, and says less: it comes last.
+    const std::string title = !header_title.empty() ? header_title
+        : !parsed.title.empty() ? parsed.title : file_name;
     std::string name;
     if (creating) {
         name = core_group_auto_name(s_core_fetch_name, title, s_core_fetch_url, -1);
@@ -4546,9 +4597,9 @@ static void begin_core_subscription_fetch(int group, const std::string& url_text
     s_core_fetch_backend = std::clamp(backend, 0, 2);
     s_core_fetch_origin = origin;
     if (group >= 0 && group < (int)g_app.core_groups.size())
-        set_core_import_status(false, false, "Refreshing \"%s\"…", g_app.core_groups[(size_t)group].name.c_str());
+        set_core_import_status(false, false, "Refreshing \"%s\"...", g_app.core_groups[(size_t)group].name.c_str());
     else
-        set_core_import_status(false, false, "Downloading subscription…");
+        set_core_import_status(false, false, "Downloading subscription...");
     uint64_t request_id;
     {
         std::lock_guard<std::mutex> lock(s_core_import_mutex);
@@ -4557,6 +4608,7 @@ static void begin_core_subscription_fetch(int group, const std::string& url_text
         s_core_import_result_ready = false;
         s_core_import_result.clear();
         s_core_import_result_title.clear();
+        s_core_import_result_file_name.clear();
     }
     s_core_import_in_progress = true;
     try {
@@ -4564,17 +4616,19 @@ static void begin_core_subscription_fetch(int group, const std::string& url_text
             try {
                 std::vector<char> response((size_t)FCAE_SUBSCRIPTION_MAX_BODY + 1, '\0');
                 char title[256] = {};
+                char file_name[256] = {};
                 const bool success = fcae_fetch_subscription_titled(
-                    url.c_str(), response.data(), (uint32_t)response.size(), title, sizeof(title));
-                ui_core_subscription_fetch_complete(request_id, success, response.data(), title);
+                    url.c_str(), response.data(), (uint32_t)response.size(), title, sizeof(title),
+                    file_name, sizeof(file_name));
+                ui_core_subscription_fetch_complete(request_id, success, response.data(), title, file_name);
             } catch (...) {
                 ui_core_subscription_fetch_complete(request_id, false,
-                    "Could not start the subscription download.", {});
+                    "Could not start the subscription download.", {}, {});
             }
         }).detach();
     } catch (...) {
         ui_core_subscription_fetch_complete(request_id, false,
-            "Could not start the subscription download.", {});
+            "Could not start the subscription download.", {}, {});
     }
 }
 
@@ -4586,6 +4640,7 @@ static void cancel_core_subscription_fetch() {
         s_core_import_result_ready = false;
         s_core_import_result.clear();
         s_core_import_result_title.clear();
+        s_core_import_result_file_name.clear();
     }
     s_core_import_in_progress = false;
     set_core_import_status(false, false, "Download cancelled.");
@@ -4594,7 +4649,7 @@ static void cancel_core_subscription_fetch() {
 static void poll_core_subscription_fetch() {
     bool ready = false;
     bool success = false;
-    std::string result, title;
+    std::string result, title, file_name;
     {
         std::lock_guard<std::mutex> lock(s_core_import_mutex);
         if (s_core_import_result_ready) {
@@ -4602,8 +4657,10 @@ static void poll_core_subscription_fetch() {
             success = s_core_import_result_ok;
             result = std::move(s_core_import_result);
             title = std::move(s_core_import_result_title);
+            file_name = std::move(s_core_import_result_file_name);
             s_core_import_result.clear();
             s_core_import_result_title.clear();
+            s_core_import_result_file_name.clear();
             s_core_import_result_ready = false;
             s_core_import_awaiting = false;
         }
@@ -4615,7 +4672,7 @@ static void poll_core_subscription_fetch() {
         if (!result.empty()) result[0] = (char)std::toupper((unsigned char)result[0]);
         set_core_import_status(true, false, "%s", sentence_end(result).c_str());
     } else {
-        finish_core_subscription_fetch(result, title);
+        finish_core_subscription_fetch(result, title, file_name);
     }
 }
 
@@ -5148,19 +5205,38 @@ static void render_core_library() {
     const ImGuiStyle& style = ImGui::GetStyle();
     if (s_core_group_open.size() != g_app.core_groups.size())
         s_core_group_open.resize(g_app.core_groups.size(), 0);
+    // The list takes what the buttons under it and Close leave.
+    const float list_height = (std::max)(146.0f,
+        ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f);
     // What a subscription download is doing, or how the last one ended, is said
-    // under the list: up to three lines of it.
-    const float status_height = s_core_import_status[0] && !s_core_import_visible
-        ? std::min(ImGui::CalcTextSize(s_core_import_status, nullptr, false,
-                                       std::max(1.0f, ImGui::GetContentRegionAvail().x)).y,
+    // on a strip along the bottom of the list's own frame, up to three lines of
+    // it. The message takes itself down again (expire_core_import_status), and
+    // inside the frame its coming and going moves no button: the ones under
+    // the list stay where they are, and the rows lend it the room.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.ChildBorderSize, style.ChildBorderSize));
+    ImGui::BeginChild("##core_list_frame", ImVec2(0, list_height), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    const bool status_shown = s_core_import_status[0] && !s_core_import_visible;
+    const float status_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - style.WindowPadding.x * 2.0f);
+    const float status_height = status_shown
+        ? std::min(ImGui::CalcTextSize(s_core_import_status, nullptr, false, status_width).y,
                    ImGui::GetTextLineHeight() * 3.0f)
         : 0.0f;
-    // The list takes what the buttons under it, the status and Close leave.
-    const float list_reserve = ImGui::GetFrameHeightWithSpacing() * 2.0f
-        + (status_height > 0.0f ? status_height + style.ItemSpacing.y : 0.0f);
-    const float list_height = (std::max)(146.0f, ImGui::GetContentRegionAvail().y - list_reserve);
-    ImGui::BeginChild("##core_list", ImVec2(0, list_height), ImGuiChildFlags_Borders,
+    // A rule, and the same space above the words as under them.
+    const float strip_height = status_shown ? status_height + style.ItemSpacing.y * 2.0f + 1.0f : 0.0f;
+    ImGui::BeginChild("##core_list", ImVec2(0, -strip_height), ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_HorizontalScrollbar);
+    {
+        // A list that was scrolled to its end keeps its end in view: the rows
+        // a refresh just changed are not what its message should cover.
+        static float shown_strip_height = 0.0f;
+        const float grown = strip_height - shown_strip_height;
+        if (grown > 0.0f && ImGui::GetScrollY() > 0.0f
+            && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - grown - 1.0f)
+            ImGui::SetScrollY(ImGui::GetScrollMaxY());
+        shown_strip_height = strip_height;
+    }
     int edit_row = -1;
     int remove_row = -1;
     int refresh_group = -1;
@@ -5190,6 +5266,21 @@ static void render_core_library() {
         ImGui::PopTextWrapPos();
     }
     ImGui::EndChild();
+    if (status_shown) {
+        const ImVec2 frame_min = ImGui::GetWindowPos();
+        const ImVec2 frame_size = ImGui::GetWindowSize();
+        const float strip_y = frame_min.y + frame_size.y - style.ChildBorderSize - strip_height;
+        ImGui::GetWindowDrawList()->AddLine(
+            ImVec2(frame_min.x + style.ChildBorderSize, strip_y),
+            ImVec2(frame_min.x + frame_size.x - style.ChildBorderSize, strip_y),
+            ImGui::GetColorU32(ImGuiCol_Separator));
+        ImGui::SetCursorScreenPos(ImVec2(frame_min.x + style.ChildBorderSize + style.WindowPadding.x,
+                                         strip_y + 1.0f + style.ItemSpacing.y));
+        ImGui::BeginChild("##core_import_status", ImVec2(status_width, status_height));
+        UiText::TextColoredWrapped(core_import_status_color(), "%s", s_core_import_status);
+        ImGui::EndChild();
+    }
+    ImGui::EndChild();
 
     // Nothing is stored until Save: a config the engine cannot parse is one
     // library that does not start, and a draft is not a config yet. The count
@@ -5203,11 +5294,6 @@ static void render_core_library() {
     if (ImGui::Button("+ Import URL")) open_core_subscription_import(-1);
     if (ImGui::GetContentRegionAvail().x >= 44.0f) ImGui::SameLine();
     ImGui::TextDisabled("%d/%d", (int)g_app.core_configs.size(), kMaxCoreConfigs);
-    if (status_height > 0.0f) {
-        ImGui::BeginChild("##core_import_status", ImVec2(0, status_height));
-        UiText::TextColoredWrapped(core_import_status_color(), "%s", s_core_import_status);
-        ImGui::EndChild();
-    }
 
     // After the loops, so nothing reads a vector whose size changed under it.
     if (edit_row >= 0) open_core_editor(edit_row);
@@ -5597,12 +5683,29 @@ bool ui_tray_action_pending() {
 }
 #endif
 
+/// What the Home page's panels are drawn on. Straight on the background
+/// picture, text is only as readable as the part of the picture behind it, and
+/// the sky is the brightest part.
+static void home_panel_background(const ImVec2& min, const ImVec2& max) {
+    ImGui::GetWindowDrawList()->AddRectFilled(min, max,
+        ImGui::GetColorU32(ImVec4(0.17f, 0.18f, 0.21f, 0.82f)), 10.0f);
+}
+/// The room a Home panel leaves around what it holds.
+static float home_panel_padding() {
+    return std::floor(ImGui::GetTextLineHeight() * 0.5f);
+}
+
 static void render_home_summary() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
     {
-        const float card_w = std::floor(std::max(1.0f, ImGui::GetContentRegionAvail().x));
+        // The sponsor row sits on a panel like the numbers above it, directly
+        // under the mode: its heading and its link are text on the picture
+        // otherwise.
+        const float panel_pad = home_panel_padding();
+        const float panel_w = std::floor(std::max(1.0f, ImGui::GetContentRegionAvail().x));
+        const float card_w = std::max(1.0f, panel_w - panel_pad * 2.0f);
         const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
         const bool sponsor_has_content = s_sponsor.available;
         const char* sponsor_destination = sponsor_has_content ? s_sponsor.destination_url : sponsor_policy;
@@ -5623,15 +5726,14 @@ static void render_home_summary() {
             + kSponsorTextInset * 3.0f + 8.0f);
 
         const float sponsor_total_h = kHeaderHeight + 8.0f + sponsor_card_height;
-        const float avail_y = ImGui::GetContentRegionAvail().y;
-        if (avail_y > sponsor_total_h + 4.0f) {
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + std::floor(avail_y - sponsor_total_h - 4.0f));
-        }
+        const ImVec2 panel_cursor = ImGui::GetCursorScreenPos();
+        const ImVec2 panel_min(std::floor(panel_cursor.x), std::floor(panel_cursor.y));
+        const ImVec2 panel_max(panel_min.x + panel_w, panel_min.y + sponsor_total_h + panel_pad * 2.0f);
+        home_panel_background(panel_min, panel_max);
 
         ImGui::BeginGroup();
         {
-            const ImVec2 cursor = ImGui::GetCursorScreenPos();
-            const ImVec2 header_min(std::floor(cursor.x), std::floor(cursor.y));
+            const ImVec2 header_min(panel_min.x + panel_pad, panel_min.y + panel_pad);
             const ImVec2 header_max(header_min.x + card_w, header_min.y + kHeaderHeight);
             ImDrawList* const header_draw = ImGui::GetWindowDrawList();
             const float header_icon = icon_button_size();
@@ -5782,6 +5884,10 @@ static void render_home_summary() {
             ImGui::PopStyleColor(2);
         }
         ImGui::EndGroup();
+        // The panel's own bottom edge, so the page ends under it and not under
+        // the card inside it.
+        ImGui::SetCursorScreenPos(ImVec2(panel_min.x, panel_max.y));
+        ImGui::Dummy(ImVec2(panel_w, 0.0f));
     }
 
 }
@@ -6942,11 +7048,18 @@ void render_ui() {
             ImGui::BeginChild("##home_scroll", ImVec2(0, 0), ImGuiChildFlags_None);
             ImGui::Spacing();
             {
-                char dl_rate[32], dl_total[32], ul_rate[32], ul_total[32];
+                char dl_rate[32], dl_total[32], ul_rate[32], ul_total[32], rtt_buf[24];
                 fmt_rate(dl_rate, sizeof(dl_rate), telem.rx_bytes_sec);
                 fmt_bytes(dl_total, sizeof(dl_total), telem.total_rx);
                 fmt_rate(ul_rate, sizeof(ul_rate), telem.tx_bytes_sec);
                 fmt_bytes(ul_total, sizeof(ul_total), telem.total_tx);
+                // The round trip keeps its place between the two rates. It has
+                // no caption: "ms" already says what the number is.
+                const bool rtt_live = (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0);
+                if (rtt_live)
+                    snprintf(rtt_buf, sizeof(rtt_buf), "%ums", telem.rtt_ms);
+                else
+                    snprintf(rtt_buf, sizeof(rtt_buf), "--");
 
                 char dl_total_line[48], ul_total_line[48];
                 snprintf(dl_total_line, sizeof(dl_total_line), "Total %s", dl_total);
@@ -6963,24 +7076,22 @@ void render_ui() {
                     + style.FramePadding.x * 2.0f + 8.0f;
                 const float info_btn_h = ImGui::GetFrameHeight();
 
-                // The numbers sit on a card of their own. Drawn straight onto
-                // the background picture they were only as readable as the part
-                // of it behind them, and the sky is the brightest part.
-                const float card_pad = std::floor(line_h * 0.5f);
-                const float text_h = line_h * 3.0f + row_gap * 2.0f;
-                const float card_h = std::max(text_h, info_btn_h) + card_pad * 2.0f;
+                // The numbers sit on a panel of their own: captions, rates,
+                // and a last row as tall as the button in the middle of it.
+                const float card_pad = home_panel_padding();
+                const float card_h = line_h * 2.0f + row_gap * 2.0f + info_btn_h + card_pad * 2.0f;
                 const ImVec2 card_min = ImGui::GetCursorScreenPos();
-                ImGui::GetWindowDrawList()->AddRectFilled(card_min,
-                    ImVec2(card_min.x + avail_w, card_min.y + card_h),
-                    ImGui::GetColorU32(ImVec4(0.17f, 0.18f, 0.21f, 0.82f)), 10.0f);
-                const float base_y = card_y + std::floor((card_h - text_h) * 0.5f);
+                home_panel_background(card_min, ImVec2(card_min.x + avail_w, card_min.y + card_h));
+                const float base_y = card_y + card_pad;
 
+                // Centred in its third of the panel. What is wider than that
+                // stays on the panel and takes the room from the middle.
                 auto col_text_x = [&](int col, const char* text) -> float {
                     const float w = ImGui::CalcTextSize(text).x;
-                    const float col_min = base_x + col_w * (float)col;
-                    const float col_max = col_min + col_w;
-                    const float cx = col_min + (col_w - w) * 0.5f;
-                    return std::floor(std::clamp(cx, col_min, std::max(col_min, col_max - w)));
+                    const float cx = base_x + col_w * (float)col + (col_w - w) * 0.5f;
+                    const float inner_min = base_x + card_pad;
+                    return std::floor(std::clamp(cx, inner_min,
+                        std::max(inner_min, base_x + avail_w - card_pad - w)));
                 };
 
                 ImGui::SetCursorPos(ImVec2(col_text_x(0, "DOWNLOAD"), base_y));
@@ -6993,25 +7104,37 @@ void render_ui() {
                 ImGui::SetCursorPos(ImVec2(col_text_x(0, dl_rate), y2));
                 ImGui::TextUnformatted(dl_rate);
 
+                ImGui::SetCursorPos(ImVec2(col_text_x(1, rtt_buf), y2));
+                ImGui::TextColored(rtt_live ? ImVec4(0.45f, 0.92f, 0.55f, 1.0f)
+                                            : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
+                                   "%s", rtt_buf);
+
                 ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_rate), y2));
                 ImGui::TextUnformatted(ul_rate);
 
                 const float y3 = y2 + line_h + row_gap;
-                ImGui::SetCursorPos(ImVec2(col_text_x(0, dl_total_line), y3));
-                ImGui::TextDisabled("%s", dl_total_line);
+                const float total_text_y = y3 + std::floor((info_btn_h - line_h) * 0.5f);
+                // The totals share the last row with the button. A panel too
+                // narrow for the longest of them beside it shows the numbers
+                // alone: by its width, so the row does not change as they grow.
+                const float total_room = (avail_w - info_btn_w) * 0.5f - card_pad - style.ItemSpacing.x;
+                const bool total_word = ImGui::CalcTextSize("Total 1023.99 MB").x <= total_room;
+                const char* const dl_total_text = total_word ? dl_total_line : dl_total;
+                const char* const ul_total_text = total_word ? ul_total_line : ul_total;
 
-                ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_total_line), y3));
-                ImGui::TextDisabled("%s", ul_total_line);
+                ImGui::SetCursorPos(ImVec2(col_text_x(0, dl_total_text), total_text_y));
+                ImGui::TextDisabled("%s", dl_total_text);
 
-                // Between the two columns, in the middle of the card.
                 const float info_x = std::floor(base_x + (avail_w - info_btn_w) * 0.5f);
-                ImGui::SetCursorPos(ImVec2(std::max(base_x, info_x),
-                                           card_y + std::floor((card_h - info_btn_h) * 0.5f)));
+                ImGui::SetCursorPos(ImVec2(std::max(base_x, info_x), y3));
                 if (ImGui::Button("INFO", ImVec2(info_btn_w, info_btn_h))) {
                     s_connection_info_popup_open = true;
                     ui_request_redraw();
                 }
                 if (ImGui::IsItemHovered()) UiText::Tooltip("Show connection details");
+
+                ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_total_text), total_text_y));
+                ImGui::TextDisabled("%s", ul_total_text);
 
                 ImGui::SetCursorPos(ImVec2(base_x, card_y + card_h + row_gap));
                 ImGui::Dummy(ImVec2(0.0f, 0.0f));

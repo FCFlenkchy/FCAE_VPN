@@ -227,11 +227,14 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
 
 /// The name a config gives itself, for an entry the user left unnamed.
 ///
-/// A share link names itself in its `#fragment` (VMess: the `ps` field of its
-/// payload). A native config has no single convention, so only the labels the
-/// common exporters write are read: a top-level `remarks`, or the name of the
-/// document's only proxy (Mihomo `name`, sing-box `tag`). Everything else
-/// answers `None`, and the caller makes a name up.
+/// A share link names itself in its `#fragment`. The schemes that have none
+/// keep the name in their payload (VMess `ps`, SSR `remarks`, mieru
+/// `profile`), and a link a core takes as its own native proxy (TrustTunnel,
+/// AnyConnect) names that proxy. A native config has no single convention, so
+/// only the labels the common exporters write are read: a top-level `remarks`
+/// (also spelled `remark` or `name`), or the name of the document's only server
+/// (Mihomo `name`; sing-box and Xray `tag`, unless the tag only says what it is
+/// on). Everything else answers `None`, and the caller makes a name up.
 ///
 /// This never validates: a link the selected core cannot run still says what it
 /// is called, and the editor reports why it cannot be saved separately.
@@ -252,75 +255,194 @@ pub fn suggested_name(backend: FcaeBackend, text: &str) -> Option<String> {
         Some(first) if link => first.trim_end(),
         _ => text,
     };
-    let name = match CoreProfile::parse_for_backend(text, backend) {
-        Ok(CoreProfile::Link(outbound)) => outbound.remark.filter(|name| !name.trim().is_empty()),
-        // A link one core turns into its own native proxy keeps its name in the
-        // fragment; the proxy it becomes is named by the bridge, not the user.
-        Ok(CoreProfile::Native(_)) if link => None,
-        Ok(CoreProfile::Native(value)) => native_name(&value, backend),
-        Err(_) => None,
-    };
-    let name = match name {
-        Some(name) => Some(name),
-        None if link => text
-            .split_once('#')
-            .map(|(_, fragment)| crate::proxy_cores::profile::percent_decode(fragment))
-            .filter(|name| !name.trim().is_empty())
-            .or_else(|| vmess_payload_name(text)),
+    let named = |name: &String| !name.trim().is_empty();
+    let profile = CoreProfile::parse_for_backend(text, backend).ok();
+    let name = match &profile {
+        Some(CoreProfile::Link(outbound)) => outbound.remark.clone().filter(named),
+        // A link one core turns into its own native proxy is asked as a link
+        // first: what the conversion calls the proxy is the last resort.
+        Some(CoreProfile::Native(_)) if link => None,
+        Some(CoreProfile::Native(value)) => native_name(value, backend),
         None => None,
     };
+    let name = name
+        .or_else(|| link.then(|| link_name(text)).flatten())
+        .or_else(|| match &profile {
+            Some(CoreProfile::Native(value)) if link => native_name(value, backend),
+            _ => None,
+        });
     name.as_deref().and_then(clean_name)
 }
 
-/// The `ps` of a `vmess://<base64 JSON>` link: the one share-link shape that
-/// carries its name inside the payload rather than after it.
-fn vmess_payload_name(text: &str) -> Option<String> {
+/// What a share link calls itself, read from the link alone: its `#fragment`,
+/// or else the field of the payload that the schemes without one keep a name
+/// in. A `remarks` among the parameters of any other link is not read: the
+/// link parser refuses a parameter it does not know, so that link is never
+/// saved.
+fn link_name(text: &str) -> Option<String> {
+    use crate::proxy_cores::profile::{b64_decode, percent_decode, Query};
     let (scheme, rest) = text.split_once("://")?;
-    if !scheme.eq_ignore_ascii_case("vmess") {
-        return None;
+    let named = |name: &String| !name.trim().is_empty();
+    let (body, fragment) = match rest.split_once('#') {
+        Some((body, fragment)) => (body, Some(fragment)),
+        None => (rest, None),
+    };
+    if let Some(name) = fragment.map(percent_decode).filter(named) {
+        return Some(name);
     }
-    let payload = rest.split_once('#').map_or(rest, |(payload, _)| payload);
-    let decoded = crate::proxy_cores::profile::b64_decode(payload.trim())?;
-    let json: Value = serde_json::from_str(&decoded).ok()?;
-    json.get("ps")?.as_str().map(str::to_owned)
+    let (payload, params) = body.split_once('?').unwrap_or((body, ""));
+    let name = match scheme.to_ascii_lowercase().as_str() {
+        // vmess://<base64 JSON>: `ps` is the name every client writes there.
+        "vmess" => {
+            let json: Value = serde_json::from_str(&b64_decode(payload)?).ok()?;
+            json.get("ps")?.as_str()?.to_owned()
+        }
+        // ssr://<base64 of server:port:…:password/?…&remarks=<base64 name>>
+        "ssr" => {
+            let decoded = b64_decode(payload.trim_end_matches('/'))?;
+            let (_, inner) = decoded.split_once("/?")?;
+            b64_decode(Query::parse(inner).get("remarks")?)?
+        }
+        // mierus://…?profile=<name>: what the mieru client lists the server
+        // as. Its own default for that is no name.
+        "mierus" => {
+            let params = Query::parse(params);
+            let profile = params.get("profile")?;
+            if generic_label(profile) {
+                return None;
+            }
+            profile.to_owned()
+        }
+        _ => return None,
+    };
+    Some(name).filter(named)
+}
+
+/// Whether `label` says what kind of thing it is on rather than which one:
+/// `proxy`, `out`, `vless-out`, `proxy-1`. The cores route by these tags, so
+/// exporters and hand-written configs spell them like that, and one of them
+/// tells two saved configs apart no better than no name at all.
+fn generic_label(label: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "proxy",
+        "proxies",
+        "out",
+        "outbound",
+        "outbounds",
+        "default",
+        // The protocols, as the cores and their share links spell them.
+        "vless",
+        "vmess",
+        "trojan",
+        "shadowsocks",
+        "ss",
+        "ssr",
+        "socks",
+        "http",
+        "https",
+        "hysteria",
+        "hy",
+        "tuic",
+        "wireguard",
+        "wg",
+        "anytls",
+        "naive",
+        "ssh",
+        "shadowtls",
+        "snell",
+        "mieru",
+        "tor",
+    ];
+    // Only ASCII punctuation separates words here: a flag or any other
+    // character outside ASCII is part of a name, never of a label like these.
+    label
+        .split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric())
+        // A counter does not make it a name: `proxy-2`, `out2`, `socks5`.
+        .map(|word| word.trim_end_matches(|c: char| c.is_ascii_digit()))
+        .filter(|word| !word.is_empty())
+        .all(|word| WORDS.contains(&word.to_ascii_lowercase().as_str()))
 }
 
 /// The label a native config carries for itself, when it carries exactly one.
 fn native_name(value: &Value, backend: FcaeBackend) -> Option<String> {
-    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
-    if let Some(remarks) = text(value.get("remarks")) {
-        return Some(remarks);
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+    };
+    // A label for the whole document. `remarks` is what the v2rayN family
+    // writes and reads back; the other spellings are accepted for a label
+    // written by hand. No core has a setting of its own under any of them.
+    for key in ["remarks", "remark", "name"] {
+        if let Some(label) = text(value.get(key)) {
+            return Some(label);
+        }
     }
-    // Names this module's own conversions give a proxy are not the user's.
+    // Otherwise the document's only server names it. Names this module's own
+    // conversions give a proxy are not the user's.
     let own = |name: &String| !name.starts_with("FCAE-");
+    // A tag is what the routing refers to, and often nothing more than that.
+    let tag = |server: &Value| {
+        text(server.get("tag"))
+            .filter(own)
+            .filter(|tag| !generic_label(tag))
+    };
+    // The entries of `section` that are servers: `utility` lists the kinds,
+    // read from the field `kind`, that only route traffic.
+    fn servers<'a>(
+        value: &'a Value,
+        section: &str,
+        kind: &str,
+        utility: &[&str],
+    ) -> Vec<&'a Value> {
+        value
+            .get(section)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|entry| {
+                !entry
+                    .get(kind)
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| utility.contains(&kind))
+            })
+            .collect()
+    }
     match backend {
         FcaeBackend::Mihomo => {
             let proxies = value.get("proxies")?.as_array()?;
             match proxies.as_slice() {
+                // Mihomo's `name` is what its own interfaces show: a name
+                // whatever it says.
                 [only] => text(only.get("name")).filter(own),
                 _ => None,
             }
         }
         FcaeBackend::SingBox => {
-            // Utility outbounds route traffic; they are not the server.
-            let utility = |outbound: &&Value| {
-                matches!(
-                    outbound.get("type").and_then(Value::as_str),
-                    Some("direct" | "block" | "dns" | "selector" | "urltest")
-                )
-            };
-            let outbounds = value.get("outbounds").and_then(Value::as_array);
-            let endpoints = value.get("endpoints").and_then(Value::as_array);
-            let mut servers = outbounds
-                .into_iter()
-                .flatten()
-                .filter(|outbound| !utility(outbound))
-                .chain(endpoints.into_iter().flatten());
-            let only = servers.next()?;
-            if servers.next().is_some() {
-                return None;
+            let mut all = servers(
+                value,
+                "outbounds",
+                "type",
+                &["direct", "block", "dns", "selector", "urltest"],
+            );
+            all.extend(servers(value, "endpoints", "type", &[]));
+            match all.as_slice() {
+                [only] => tag(only),
+                _ => None,
             }
-            text(only.get("tag")).filter(own)
+        }
+        FcaeBackend::Xray => {
+            let all = servers(
+                value,
+                "outbounds",
+                "protocol",
+                &["freedom", "blackhole", "dns", "loopback"],
+            );
+            match all.as_slice() {
+                [only] => tag(only),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -729,6 +851,184 @@ mod tests {
             suggested_name(FcaeBackend::SingBox, sing_box).as_deref(),
             Some("Paris")
         );
+    }
+
+    #[test]
+    fn a_link_without_a_fragment_is_named_by_its_payload() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        // ShadowsocksR keeps the name inside the payload, base64 once more.
+        let ssr = |params: &str| {
+            format!(
+                "ssr://{}",
+                URL_SAFE_NO_PAD.encode(format!(
+                    "example.com:8388:origin:aes-256-cfb:plain:{}/?{params}",
+                    URL_SAFE_NO_PAD.encode("secret")
+                ))
+            )
+        };
+        let named = ssr(&format!(
+            "remarks={}&group={}",
+            URL_SAFE_NO_PAD.encode("Tokyo \u{1f1ef}\u{1f1f5} 02"),
+            URL_SAFE_NO_PAD.encode("Blue Cloud")
+        ));
+        assert_eq!(
+            suggested_name(FcaeBackend::Mihomo, &named).as_deref(),
+            Some("Tokyo \u{1f1ef}\u{1f1f5} 02")
+        );
+        // It says the same to a core that cannot run it.
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, &named),
+            suggested_name(FcaeBackend::Mihomo, &named)
+        );
+        assert_eq!(suggested_name(FcaeBackend::Mihomo, &ssr("obfsparam=")), None);
+
+        let mieru = |profile: &str| {
+            format!("mierus://user:secret@example.com?port=6666&protocol=TCP&profile={profile}")
+        };
+        assert_eq!(
+            suggested_name(FcaeBackend::Mihomo, &mieru("Home%20line")).as_deref(),
+            Some("Home line")
+        );
+        // The client's own word for "nothing was typed here".
+        assert_eq!(suggested_name(FcaeBackend::Mihomo, &mieru("default")), None);
+        // A fragment is the link's name wherever else one is written.
+        assert_eq!(
+            suggested_name(FcaeBackend::Mihomo, &format!("{}#Garden", mieru("Home%20line")))
+                .as_deref(),
+            Some("Garden")
+        );
+    }
+
+    #[test]
+    fn a_link_a_core_takes_natively_is_named_by_the_proxy_it_becomes() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::SingBox,
+                "anyconnect://connect?host=vpn.example.com&name=Office"
+            )
+            .as_deref(),
+            Some("Office")
+        );
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::SingBox,
+                "anyconnect://connect?host=vpn.example.com"
+            ),
+            None
+        );
+        // A TrustTunnel deep link is a list of tag, length, value fields.
+        let trusttunnel = |name: Option<&str>| {
+            let mut fields: Vec<(u8, &str)> = vec![
+                (1, "vpn.example.com"),
+                (2, "203.0.113.5:443"),
+                (5, "user"),
+                (6, "secret"),
+            ];
+            if let Some(name) = name {
+                fields.push((12, name));
+            }
+            let mut bytes = Vec::new();
+            for (tag, value) in fields {
+                bytes.push(tag);
+                bytes.push(value.len() as u8);
+                bytes.extend_from_slice(value.as_bytes());
+            }
+            format!("tt://?{}", URL_SAFE_NO_PAD.encode(bytes))
+        };
+        assert_eq!(
+            suggested_name(FcaeBackend::Mihomo, &trusttunnel(Some("Home tunnel"))).as_deref(),
+            Some("Home tunnel")
+        );
+        // Unnamed, the proxy it becomes carries the bridge's name, not a user's.
+        assert_eq!(suggested_name(FcaeBackend::Mihomo, &trusttunnel(None)), None);
+    }
+
+    #[test]
+    fn a_tag_that_only_says_what_it_is_on_is_not_a_name() {
+        for tag in [
+            "proxy", "Proxy-1", "out", "vless-out", "socks5", "hy2_out", "ss", "default", "2",
+        ] {
+            assert!(generic_label(tag), "{tag}");
+        }
+        for tag in [
+            "Paris",
+            "my-proxy",
+            "office vless",
+            "\u{1f1e9}\u{1f1ea} proxy 1",
+            "\u{6771}\u{4eac}",
+        ] {
+            assert!(!generic_label(tag), "{tag}");
+        }
+        let sing_box = |tag: &str| {
+            format!(
+                r#"{{"outbounds":[{{"type":"direct","tag":"direct"}},{{"type":"socks","tag":"{tag}","server":"example.com","server_port":1080}}]}}"#
+            )
+        };
+        assert_eq!(suggested_name(FcaeBackend::SingBox, &sing_box("proxy")), None);
+        assert_eq!(
+            suggested_name(FcaeBackend::SingBox, &sing_box("socks-out")),
+            None
+        );
+        assert_eq!(
+            suggested_name(FcaeBackend::SingBox, &sing_box("Lisbon 3")).as_deref(),
+            Some("Lisbon 3")
+        );
+        // Mihomo shows a proxy's `name` to its user: it is one whatever it says.
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::Mihomo,
+                "proxies:\n  - {name: proxy, type: socks5, server: example.com, port: 1080}\n"
+            )
+            .as_deref(),
+            Some("proxy")
+        );
+    }
+
+    #[test]
+    fn an_xray_config_is_named_by_its_label_or_its_only_server() {
+        let xray = |label: &str, tag: &str| {
+            format!(
+                r#"{{{label}"outbounds":[{{"protocol":"socks","tag":"{tag}","settings":{{"servers":[{{"address":"example.com","port":1080}}]}}}},{{"protocol":"freedom","tag":"direct"}}]}}"#
+            )
+        };
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, &xray("", "Berlin")).as_deref(),
+            Some("Berlin")
+        );
+        assert_eq!(suggested_name(FcaeBackend::Xray, &xray("", "proxy")), None);
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, &xray(r#""remark":"Work","#, "proxy")).as_deref(),
+            Some("Work")
+        );
+        // The document's own label outranks its server's, and `remarks` the
+        // other spellings.
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::Xray,
+                &xray(r#""name":"Home","remarks":"Office","#, "Berlin")
+            )
+            .as_deref(),
+            Some("Office")
+        );
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, &xray(r#""name":"Home","#, "Berlin")).as_deref(),
+            Some("Home")
+        );
+        // One outbound on its own is a config of one server.
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::Xray,
+                r#"{"protocol":"socks","tag":"Lisbon","settings":{"servers":[{"address":"example.com","port":1080}]}}"#
+            )
+            .as_deref(),
+            Some("Lisbon")
+        );
+        // Two servers are not one name.
+        let two = r#"{"outbounds":[{"protocol":"socks","tag":"Berlin"},{"protocol":"socks","tag":"Paris"}]}"#;
+        assert_eq!(suggested_name(FcaeBackend::Xray, two), None);
     }
 
     #[test]

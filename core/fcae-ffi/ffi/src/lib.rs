@@ -1540,16 +1540,18 @@ pub unsafe extern "C" fn fcae_fetch_subscription(
     out: *mut c_char,
     cap: u32,
 ) -> bool {
-    fetch_subscription(url, out, cap, std::ptr::null_mut(), 0)
+    fetch_subscription(url, out, cap, (std::ptr::null_mut(), 0), (std::ptr::null_mut(), 0))
 }
 
-/// [`fcae_fetch_subscription`], which also writes the name the server gives the
-/// feed (its `profile-title` response header, decoded) into `title`: "" when it
-/// sent none or the fetch failed. The UI names an imported group after it.
+/// [`fcae_fetch_subscription`], which also writes the names the server gives
+/// the feed: its `profile-title` response header, decoded, into `title`, and
+/// the file name it sends the document under (`Content-Disposition`, without
+/// directory and extension) into `file_name`. Each receives "" when the server
+/// sent none or the fetch failed. The UI names an imported group after them.
 ///
 /// # Safety
 /// As [`fcae_fetch_subscription`]; `title` must be NULL or point to `title_cap`
-/// writable bytes.
+/// writable bytes, and `file_name` must be NULL or point to `file_name_cap`.
 #[no_mangle]
 pub unsafe extern "C" fn fcae_fetch_subscription_titled(
     url: *const c_char,
@@ -1557,17 +1559,20 @@ pub unsafe extern "C" fn fcae_fetch_subscription_titled(
     cap: u32,
     title: *mut c_char,
     title_cap: u32,
+    file_name: *mut c_char,
+    file_name_cap: u32,
 ) -> bool {
-    fetch_subscription(url, out, cap, title, title_cap)
+    fetch_subscription(url, out, cap, (title, title_cap), (file_name, file_name_cap))
 }
 
 /// The one fetch both exports share, so they cannot disagree about limits.
+/// `title` and `file_name` are each a buffer and its capacity.
 unsafe fn fetch_subscription(
     url: *const c_char,
     out: *mut c_char,
     cap: u32,
-    title: *mut c_char,
-    title_cap: u32,
+    title: (*mut c_char, u32),
+    file_name: (*mut c_char, u32),
 ) -> bool {
     let result = guard_value(
         "fcae_fetch_subscription",
@@ -1594,15 +1599,17 @@ unsafe fn fetch_subscription(
         };
         fill(std::slice::from_raw_parts_mut(out, cap as usize), text);
     }
-    if !title.is_null() && title_cap > 0 {
-        let text = match &result {
-            Ok(subscription) if fits => subscription.title.as_str(),
-            _ => "",
-        };
-        fill(
-            std::slice::from_raw_parts_mut(title, title_cap as usize),
-            text,
-        );
+    let names = match &result {
+        Ok(subscription) if fits => (subscription.title.as_str(), subscription.file_name.as_str()),
+        _ => ("", ""),
+    };
+    for ((buffer, buffer_cap), text) in [(title, names.0), (file_name, names.1)] {
+        if !buffer.is_null() && buffer_cap > 0 {
+            fill(
+                std::slice::from_raw_parts_mut(buffer, buffer_cap as usize),
+                text,
+            );
+        }
     }
     fits
 }
@@ -1654,8 +1661,9 @@ pub unsafe extern "C" fn fcae_core_check_profile(
     checked.is_ok()
 }
 
-/// The name a saved core config gives itself: a share link's `#fragment`
-/// (VMess: the `ps` of its payload), or the label a native config carries.
+/// The name a saved core config gives itself: a share link's `#fragment`, or
+/// the name in its payload where it has no fragment (VMess `ps`, SSR
+/// `remarks`), or the label a native config carries.
 /// Returns true and writes it into `out`; returns false and writes "" when the
 /// config names nothing, so the editor can make a name up for an entry the user
 /// left unnamed. The config is not validated here.
