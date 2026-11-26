@@ -111,8 +111,23 @@ struct AppState {
         // none. A config that pins a port is not overruled by the app default.
         uint16_t pinned_socks_port = 0;
         uint16_t pinned_http_port = 0;
+        // Position in core_groups of the subscription this config was imported
+        // from, or -1 for one the user added by hand. The engine never sees it:
+        // a group only decides what a refresh replaces and how the lists read.
+        int group = -1;
     };
     std::vector<CoreConfigEntry> core_configs;
+    // A subscription: the URL a set of saved configs came from, kept so the set
+    // can be refreshed from it or removed as one.
+    struct CoreGroupEntry {
+        std::string name;
+        std::string url;
+        // The core its configs are stored under: 0 = Xray, 1 = sing-box, 2 = Mihomo.
+        int backend = 0;
+        // When its configs were last fetched, in seconds since the epoch.
+        int64_t updated = 0;
+    };
+    std::vector<CoreGroupEntry> core_groups;
     // Position in core_configs the main protocol runs; -1 when it runs none.
     int core_selected = -1;
     // Built by to_config(): the library document, the main entry's reference,

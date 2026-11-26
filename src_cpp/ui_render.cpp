@@ -37,6 +37,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <cstdlib>
+#include <ctime>
 #include <cwchar>
 #include <utility>
 #if defined(_WIN32)
@@ -478,6 +479,14 @@ static uint64_t fnv_core_configs(uint64_t h) {
         h = fnv_cstr(h, entry.name.c_str());
         h = fnv_value(h, entry.backend);
         h = fnv_cstr(h, entry.text.c_str());
+        h = fnv_value(h, entry.group);
+    }
+    h = fnv_value(h, (int)g_app.core_groups.size());
+    for (const AppState::CoreGroupEntry& group : g_app.core_groups) {
+        h = fnv_cstr(h, group.name.c_str());
+        h = fnv_cstr(h, group.url.c_str());
+        h = fnv_value(h, group.backend);
+        h = fnv_value(h, group.updated);
     }
     return h;
 }
@@ -1133,6 +1142,9 @@ static constexpr int kMaxCoreConfigs = 1000;
 static constexpr size_t kMaxCoreConfigText = 128 * 1024;
 /// Longest saved-config name in bytes, mirroring fcae-runtime's library limit.
 static constexpr size_t kMaxCoreConfigName = 48;
+/// Upper bound on subscription groups, for the same reason as kMaxCoreConfigs:
+/// a corrupt file cannot ask for an unbounded resize.
+static constexpr int kMaxCoreGroups = 64;
 
 static bool transport_is_core(int transport);
 static int current_transport();
@@ -1408,9 +1420,27 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         // file, not a config to keep in memory.
         if (strcmp(end, "_name") == 0 && val.size() <= kMaxCoreConfigName) entry.name = val;
         else if (strcmp(end, "_backend") == 0) entry.backend = std::clamp(atoi(val.c_str()), 0, 2);
+        else if (strcmp(end, "_group") == 0) entry.group = atoi(val.c_str());
         else if (strcmp(end, "_text") == 0) {
             std::string text = core_text_decode(val);
             if (text.size() <= kMaxCoreConfigText) entry.text = std::move(text);
+        }
+    }
+    else if (key.rfind("core_group", 0) == 0) {
+        // core_group<index>_<field>, read the way core_config<index>_<field> is.
+        const char* cursor = key.c_str() + strlen("core_group");
+        char* end = nullptr;
+        const long index = strtol(cursor, &end, 10);
+        if (!end || end == cursor || index < 0 || index >= kMaxCoreGroups) return;
+        if (g_app.core_groups.size() < (size_t)index + 1)
+            g_app.core_groups.resize((size_t)index + 1);
+        AppState::CoreGroupEntry& group = g_app.core_groups[(size_t)index];
+        if (strcmp(end, "_name") == 0 && val.size() <= kMaxCoreConfigName) group.name = val;
+        else if (strcmp(end, "_backend") == 0) group.backend = std::clamp(atoi(val.c_str()), 0, 2);
+        else if (strcmp(end, "_updated") == 0) group.updated = (int64_t)strtoll(val.c_str(), nullptr, 10);
+        else if (strcmp(end, "_url") == 0) {
+            std::string url = core_text_decode(val);
+            if (url.size() <= 4096) group.url = std::move(url);
         }
     }
 }
@@ -1441,6 +1471,14 @@ static bool save_config(bool quiet = false) {
         fprintf(f, "core_config%zu_name=%s\n", i, entry.name.c_str());
         fprintf(f, "core_config%zu_backend=%d\n", i, entry.backend);
         fprintf(f, "core_config%zu_text=%s\n", i, core_text_encode(entry.text).c_str());
+        if (entry.group >= 0) fprintf(f, "core_config%zu_group=%d\n", i, entry.group);
+    }
+    for (size_t i = 0; i < g_app.core_groups.size(); ++i) {
+        const AppState::CoreGroupEntry& group = g_app.core_groups[i];
+        fprintf(f, "core_group%zu_name=%s\n", i, group.name.c_str());
+        fprintf(f, "core_group%zu_url=%s\n", i, core_text_encode(group.url).c_str());
+        fprintf(f, "core_group%zu_backend=%d\n", i, group.backend);
+        fprintf(f, "core_group%zu_updated=%lld\n", i, (long long)group.updated);
     }
     fprintf(f, "firefox_account_id=%s\n", g_app.firefox_account_id);
     fprintf(f, "firefox_location=%s\n", g_app.firefox_location);
@@ -1649,6 +1687,7 @@ static bool load_config_from(const std::string& path) {
     // The file is the source of truth for the saved core configs, exactly as it
     // is for every other setting.
     g_app.core_configs.clear();
+    g_app.core_groups.clear();
     g_app.destination_mode=2;
     g_app.destination_rows[0]=0;
     g_app.ios_app_draft_ids.clear();
@@ -1776,6 +1815,10 @@ static bool load_config_from(const std::string& path) {
     // Saved config references are persistent positions. Keep incomplete slots
     // and dangling selections intact so a damaged file cannot shift a choice
     // onto a different config or silently replace a route with Aether.
+    // A group reference is a position too; one that names no group is dropped,
+    // which leaves a plain saved config rather than one tied to the wrong feed.
+    for (AppState::CoreConfigEntry& entry : g_app.core_configs)
+        if (entry.group < 0 || entry.group >= (int)g_app.core_groups.size()) entry.group = -1;
     g_app.refresh_core_listeners();
     g_app.add_log(4, ("[ui] config loaded (" + std::to_string(applied) + " keys): " + path).c_str());
     return true;
@@ -1924,9 +1967,24 @@ static ImVec4 state_color(FcaeState s) {
     return ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
 }
 
+/// Whether a session is running, starting or paused: anything but idle.
+static bool session_live() {
+    const FcaeState state = (FcaeState)g_app.telem.state;
+    return s_tun_paused || (state != FCAE_STATE_DISCONNECTED && state != FCAE_STATE_ERROR);
+}
+
+/// Whether the session that is running routes through the TUN device.
+/// `g_app.mode` is the mode the next connection starts in and may be changed
+/// while this one runs; what this one does was fixed when it started, and the
+/// engine reports it. With no session it is the mode the next one would use.
+static bool session_is_tun() {
+    if (s_tun_paused) return true;
+    return session_live() ? g_app.telem.active_mode == FCAE_MODE_TUN : g_app.mode == 1;
+}
+
 static const char* state_label(FcaeState s) {
     if (s == FCAE_STATE_CONNECTED)
-        return g_app.mode == 1 ? "CONNECTED - TUN" : "CONNECTED - PROXY";
+        return session_is_tun() ? "CONNECTED - TUN" : "CONNECTED - PROXY";
     switch (s) {
         case FCAE_STATE_DISCONNECTED: return "DISCONNECTED";
         case FCAE_STATE_PROVISIONING:
@@ -2602,6 +2660,8 @@ static std::string psiphon_region_label(const std::string& code) {
 }
 
 static const char* const kLinkUrSignup = "https://ur.io/c?bonus=HZ0G13";
+// Where a signed-in URnetwork account creates a one-time authorization code.
+static const char* const kLinkUrAuthCode = "https://ur.io/app/account/settings";
 
 // https only, host-allowlisted, exec'd as one argv entry (never shell text).
 static bool open_external_url(const char* url) {
@@ -2619,6 +2679,7 @@ static bool open_external_url(const char* url) {
     }
     if (!host_ok && strcmp(url, "https://accounts.firefox.com/signup") == 0) host_ok = true;
     if (!host_ok && strcmp(url, kLinkUrSignup) == 0) host_ok = true;
+    if (!host_ok && strcmp(url, kLinkUrAuthCode) == 0) host_ok = true;
     if (!host_ok) return false;
 
     for (const char* c = url; *c; ++c) {
@@ -3435,6 +3496,13 @@ static const char* transport_tag(int transport) {
     return entry->backend == 2 ? "Mihomo" : entry->backend == 1 ? "sing-box" : "xray";
 }
 
+/// The subscription group a saved config is listed under, or -1: one added by
+/// hand, or one whose group is not there, which is then listed with those
+/// rather than nowhere.
+static int core_config_group(const AppState::CoreConfigEntry& entry) {
+    return entry.group >= 0 && entry.group < (int)g_app.core_groups.size() ? entry.group : -1;
+}
+
 /// The colour the tag is drawn in: distinct from the row's white name, and the
 /// same across all three cores so the list stays quiet.
 static const ImVec4 kCoreTagColor(0.55f, 0.72f, 0.98f, 1.0f);
@@ -3567,46 +3635,88 @@ static int s_core_backend_buf = 0;
 static std::vector<char> s_core_text_buf;
 static char s_core_status[256] = {};
 static bool s_core_status_error = false;
+/// The name the editor's config is saved under while its Name field is empty.
+static std::string s_core_auto_name;
 
 static bool s_core_import_popup_open = false;
 static bool s_core_import_in_progress = false;
 static char s_core_import_url[4097] = {};
-static char s_core_import_prefix[kMaxCoreConfigName + 1] = {};
+static char s_core_import_name[kMaxCoreConfigName + 1] = {};
 static int s_core_import_backend = 0;
 static char s_core_import_status[512] = {};
 static bool s_core_import_status_error = false;
 static bool s_core_import_status_warning = false;
+/// The group the subscription dialog manages, or -1 while it imports a new one.
+static int s_core_import_group = -1;
+/// Set when an import succeeded: the dialog closes itself and the list shows
+/// the new group, which is the answer the user was waiting for.
+static bool s_core_import_should_close = false;
+/// What the download in flight is for. Captured when it starts, so nothing
+/// typed into the dialog meanwhile can redirect its result.
+static int s_core_fetch_group = -1;
+static std::string s_core_fetch_url;
+static std::string s_core_fetch_name;
+static int s_core_fetch_backend = 0;
+/// Where the download in flight was asked for. The list's Refresh fetches what
+/// the group already says; the dialog fetches what its fields say, and those
+/// become the group's only once the download has succeeded.
+enum CoreFetchOrigin { kCoreFetchList, kCoreFetchManage, kCoreFetchImport };
+static CoreFetchOrigin s_core_fetch_origin = kCoreFetchList;
+/// Which groups the saved-configs list shows opened, by position.
+static std::vector<char> s_core_group_open;
+/// A group the list scrolls to the next time it is drawn, or -1: the one an
+/// import just made, which may be below everything that was already there.
+static int s_core_group_reveal = -1;
+/// Whether the subscription dialog is on screen. It says how a download is
+/// going itself, so the list behind it does not say it a second time.
+static bool s_core_import_visible = false;
+/// The group whose removal is waiting for the user's confirmation, or -1.
+static int s_core_group_remove = -1;
+static bool s_core_group_remove_open = false;
 static std::mutex s_core_import_mutex;
 static uint64_t s_core_import_request_id = 0;
 static bool s_core_import_awaiting = false;
 static bool s_core_import_result_ready = false;
 static bool s_core_import_result_ok = false;
 static std::string s_core_import_result;
+static std::string s_core_import_result_title;
 
 static void ui_core_subscription_fetch_complete(uint64_t request_id, bool success,
-                                                const std::string& response_or_error) {
+                                                const std::string& response_or_error,
+                                                const std::string& title) {
     {
         std::lock_guard<std::mutex> lock(s_core_import_mutex);
         if (!s_core_import_awaiting || request_id != s_core_import_request_id) return;
         s_core_import_result_ok = success;
         s_core_import_result = response_or_error;
+        s_core_import_result_title = title;
         s_core_import_result_ready = true;
     }
     ui_request_redraw();
 }
 
-static void open_core_subscription_import() {
+/// Open the subscription dialog on `group`, or on a new import (`-1`).
+static void open_core_subscription_import(int group = -1) {
+    const AppState::CoreGroupEntry* entry =
+        (group >= 0 && group < (int)g_app.core_groups.size()) ? &g_app.core_groups[(size_t)group] : nullptr;
+    s_core_import_group = entry ? group : -1;
     s_core_import_popup_open = true;
-    s_core_import_in_progress = false;
-    s_core_import_url[0] = 0;
-    s_core_import_prefix[0] = 0;
-    const int listener_core = g_app.final_listener_core();
-    s_core_import_backend = (listener_core >= 3 && listener_core <= 5)
-        ? listener_core - 3
-        : ((g_app.backend >= 3 && g_app.backend <= 5) ? g_app.backend - 3 : 0);
-    s_core_import_status[0] = 0;
-    s_core_import_status_error = false;
-    s_core_import_status_warning = false;
+    s_core_import_should_close = false;
+    snprintf(s_core_import_url, sizeof(s_core_import_url), "%s", entry ? entry->url.c_str() : "");
+    snprintf(s_core_import_name, sizeof(s_core_import_name), "%s", entry ? entry->name.c_str() : "");
+    if (entry) {
+        s_core_import_backend = entry->backend;
+    } else {
+        const int listener_core = g_app.final_listener_core();
+        s_core_import_backend = (listener_core >= 3 && listener_core <= 5)
+            ? listener_core - 3
+            : ((g_app.backend >= 3 && g_app.backend <= 5) ? g_app.backend - 3 : 0);
+    }
+    if (!s_core_import_in_progress) {
+        s_core_import_status[0] = 0;
+        s_core_import_status_error = false;
+        s_core_import_status_warning = false;
+    }
 }
 
 static void open_core_configs() {
@@ -3614,6 +3724,9 @@ static void open_core_configs() {
     s_core_editor_open = false;
     s_core_editor_row = -1;
     s_core_status[0] = 0;
+    // How a subscription download ended last time is not news any more.
+    if (!s_core_import_in_progress) s_core_import_status[0] = 0;
+    s_core_import_visible = false;
 }
 
 /// Open the editor on `row`, or on a config that does not exist yet (`-1`).
@@ -3801,35 +3914,6 @@ static std::vector<std::string> subscription_links(const std::string& text,
     return links;
 }
 
-static std::string subscription_fragment_name(const std::string& link) {
-    const size_t marker = link.rfind('#');
-    if (marker == std::string::npos || marker + 1 >= link.size()) return {};
-    std::string decoded;
-    decoded.reserve(link.size() - marker - 1);
-    for (size_t i = marker + 1; i < link.size(); ++i) {
-        if (link[i] == '%' && i + 2 < link.size()) {
-            const auto hex = [](unsigned char c) -> int {
-                if (c >= '0' && c <= '9') return c - '0';
-                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-                return -1;
-            };
-            const int hi = hex((unsigned char)link[i + 1]);
-            const int lo = hex((unsigned char)link[i + 2]);
-            if (hi >= 0 && lo >= 0) {
-                const unsigned char c = (unsigned char)((hi << 4) | lo);
-                if (c >= 0x20 && c != 0x7f) decoded.push_back((char)c);
-                else decoded.push_back(' ');
-                i += 2;
-                continue;
-            }
-        }
-        const unsigned char c = (unsigned char)link[i];
-        decoded.push_back(std::iscntrl(c) ? ' ' : (char)c);
-    }
-    return trim_subscription_text(std::move(decoded));
-}
-
 static std::string valid_subscription_utf8(const std::string& text) {
     std::string valid;
     valid.reserve(text.size());
@@ -3873,24 +3957,187 @@ static std::string utf8_prefix(std::string text, size_t max_bytes) {
     return text;
 }
 
-static std::string unique_subscription_name(std::string name) {
-    name = trim_subscription_text(std::move(name));
-    std::replace_if(name.begin(), name.end(), [](unsigned char c) { return std::iscntrl(c) != 0; }, ' ');
-    if (name.empty()) name = "Imported profile";
-    name = utf8_prefix(std::move(name), kMaxCoreConfigName);
-    if (core_config_name_free(name.c_str(), -1)) return name;
-    for (unsigned suffix = 2; suffix < 10000; ++suffix) {
-        const std::string tail = " (" + std::to_string(suffix) + ")";
-        const std::string candidate = utf8_prefix(name, kMaxCoreConfigName - tail.size()) + tail;
-        if (core_config_name_free(candidate.c_str(), -1)) return candidate;
-    }
-    return utf8_prefix(name, kMaxCoreConfigName - 5) + " (new)";
+// ---- Names --------------------------------------------------------------------
+//
+// A saved config is referenced by name in the library the engine parses, so a
+// name is always present and always unique. The user may leave it out: the
+// config then goes by the name it gives itself, or by one made up for it.
+
+static bool core_names_equal(const std::string& a, const std::string& b) {
+    return a.size() == b.size()
+        && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower((unsigned char)x) == std::tolower((unsigned char)y);
+           });
 }
 
-struct CoreSubscriptionImportSummary {
-    int added = 0;
+/// `name` as a list row can show it and the library accepts it: one line, no
+/// surrounding space, whole UTF-8 characters, within the byte limit.
+static std::string clean_core_name(std::string name) {
+    std::replace_if(name.begin(), name.end(), [](unsigned char c) { return std::iscntrl(c) != 0; }, ' ');
+    name = utf8_prefix(trim_subscription_text(std::move(name)), kMaxCoreConfigName);
+    return trim_subscription_text(std::move(name));
+}
+
+/// `wanted`, or `wanted (2)`, `wanted (3)`, ... : the first that `taken` does
+/// not already claim.
+template <typename Taken>
+static std::string unique_core_name(const std::string& wanted, const Taken& taken) {
+    if (!taken(wanted)) return wanted;
+    for (unsigned suffix = 2; suffix < 100000; ++suffix) {
+        const std::string tail = " (" + std::to_string(suffix) + ")";
+        // Cut to make room for the number, a name does not end in a space.
+        const std::string candidate =
+            trim_subscription_text(utf8_prefix(wanted, kMaxCoreConfigName - tail.size())) + tail;
+        if (!taken(candidate)) return candidate;
+    }
+    return wanted;
+}
+
+static uint32_t core_text_hash(const std::string& text) {
+    uint32_t hash = 2166136261u;
+    for (unsigned char c : text) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    return hash ^ (hash >> 15);
+}
+
+/// `<prefix>-<4 digits>`, for something that names itself nothing. The digits
+/// are drawn from `seed`, not from a clock: the same config gets the same name
+/// when its subscription is refreshed, so a selection that points at it holds.
+template <typename Taken>
+static std::string numbered_core_name(const char* prefix, const std::string& seed, const Taken& taken) {
+    const uint32_t start = core_text_hash(seed);
+    char name[40];
+    for (uint32_t step = 0; step < 10000u; ++step) {
+        snprintf(name, sizeof(name), "%s-%04u", prefix, (unsigned)((start + step) % 10000u));
+        if (!taken(name)) break;
+    }
+    return name;
+}
+
+/// The name a config gives itself -- a share link's #fragment, a VMess `ps`, a
+/// native config's own label -- or "" when it gives none.
+static std::string core_profile_own_name(const std::string& text, int backend) {
+    char name[4 * kMaxCoreConfigName + 1] = {};
+    if (!fcae_core_profile_name(text.c_str(), AppState::core_backend_id(backend), name, sizeof(name)))
+        return {};
+    return clean_core_name(name);
+}
+
+/// `<core>-<digits>` for a config of `backend` that names itself nothing.
+template <typename Taken>
+static std::string numbered_config_name(const std::string& text, int backend, const Taken& taken) {
+    return numbered_core_name(backend == 2 ? "mihomo" : backend == 1 ? "sing-box" : "xray", text, taken);
+}
+
+/// The name an unnamed config is saved under: its own, else `<core>-<digits>`.
+template <typename Taken>
+static std::string core_auto_name(const std::string& text, int backend, const Taken& taken) {
+    const std::string own = core_profile_own_name(text, backend);
+    if (!own.empty()) return unique_core_name(own, taken);
+    return numbered_config_name(text, backend, taken);
+}
+
+// ---- Subscription groups --------------------------------------------------------
+//
+// An imported subscription is a group: the URL it came from and the configs it
+// produced. The configs are ordinary saved configs -- pickable as the protocol
+// and as chain exits like any other -- and the group is what lets them be
+// refreshed from the URL, or removed, as one.
+
+static int core_group_size(int group) {
+    int count = 0;
+    for (const AppState::CoreConfigEntry& entry : g_app.core_configs)
+        if (entry.group == group) ++count;
+    return count;
+}
+
+static bool core_group_name_taken(const std::string& name, int except_group) {
+    for (int i = 0; i < (int)g_app.core_groups.size(); ++i)
+        if (i != except_group && core_names_equal(g_app.core_groups[(size_t)i].name, name)) return true;
+    return false;
+}
+
+/// The site a subscription URL belongs to, when its host is a name: what a
+/// group is called if neither the user nor the feed names it. An address is not
+/// a name, and neither is a bare label such as `localhost`.
+static std::string subscription_site_name(const std::string& url) {
+    const size_t scheme = url.find("://");
+    if (scheme == std::string::npos) return {};
+    const size_t begin = scheme + 3;
+    const size_t end = url.find_first_of("/?#", begin);
+    std::string host = url.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+    const size_t at = host.rfind('@');
+    if (at != std::string::npos) host.erase(0, at + 1);
+    if (host.empty() || host[0] == '[') return {};
+    const size_t port = host.rfind(':');
+    if (port != std::string::npos) host.resize(port);
+    std::transform(host.begin(), host.end(), host.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    if (host.rfind("www.", 0) == 0) host.erase(0, 4);
+    bool letter = false, dot = false;
+    for (unsigned char c : host) {
+        if (std::isalpha(c) || c >= 0x80) letter = true;
+        else if (c == '.') dot = true;
+        else if (!std::isdigit(c) && c != '-') return {};
+    }
+    if (!letter || !dot || host.back() == '.') return {};
+    return clean_core_name(host);
+}
+
+/// What a group is called: the name the user typed, else the one the feed gives
+/// itself, else its site, else `gp-<digits>`. Unique among the groups.
+static std::string core_group_auto_name(const std::string& typed, const std::string& title,
+                                        const std::string& url, int except_group) {
+    const auto taken = [&](const std::string& name) { return core_group_name_taken(name, except_group); };
+    for (std::string wanted : {clean_core_name(typed), clean_core_name(title), subscription_site_name(url)})
+        if (!wanted.empty()) return unique_core_name(wanted, taken);
+    return numbered_core_name("gp", url, taken);
+}
+
+/// `profile-title`, where a feed carries it in its body rather than as a
+/// response header: on a line of its own, usually commented out so that link
+/// parsers skip it, and often base64-encoded.
+static std::string subscription_body_title(const std::string& text) {
+    static const char kKey[] = "profile-title:";
+    size_t start = 0;
+    for (int line_number = 0; start < text.size() && line_number < 64; ++line_number) {
+        const size_t end = text.find('\n', start);
+        std::string line = trim_subscription_text(text.substr(start,
+            end == std::string::npos ? std::string::npos : end - start));
+        start = end == std::string::npos ? text.size() : end + 1;
+        size_t skip = 0;
+        while (skip < line.size() && (line[skip] == '#' || line[skip] == '/' || line[skip] == ' ')) ++skip;
+        line.erase(0, skip);
+        if (line.size() <= sizeof(kKey) - 1) continue;
+        bool match = true;
+        for (size_t i = 0; i + 1 < sizeof(kKey); ++i)
+            if (std::tolower((unsigned char)line[i]) != kKey[i]) { match = false; break; }
+        if (!match) continue;
+        std::string value = trim_subscription_text(line.substr(sizeof(kKey) - 1));
+        if (value.rfind("base64:", 0) == 0) {
+            std::string decoded;
+            if (!decode_subscription_base64(value.substr(7), decoded)) return {};
+            value = decoded;
+        }
+        return clean_core_name(value);
+    }
+    return {};
+}
+
+struct SubscriptionProfile {
+    std::string text;
+    /// The name the profile gives itself, or "" when it gives none.
+    std::string name;
+};
+
+struct SubscriptionParse {
+    /// Every profile the selected core accepts, in feed order.
+    std::vector<SubscriptionProfile> profiles;
     int skipped = 0;
     std::string first_problem;
+    /// The feed's own name, when its body carries one.
+    std::string title;
 };
 
 static bool validate_subscription_profile(const std::string& text, int backend,
@@ -3912,135 +4159,396 @@ static bool validate_subscription_profile(const std::string& text, int backend,
     return true;
 }
 
-static void append_subscription_profile(const std::string& text,
-                                        const std::string& preferred_name,
-                                        int backend,
-                                        CoreSubscriptionImportSummary& summary) {
-    if (g_app.core_configs.size() >= (size_t)kMaxCoreConfigs) {
-        ++summary.skipped;
-        if (summary.first_problem.empty()) summary.first_problem = "the saved-config list reached its 1000-entry limit";
-        return;
-    }
-    std::string reason;
-    if (!validate_subscription_profile(text, backend, reason)) {
-        ++summary.skipped;
-        if (summary.first_problem.empty()) summary.first_problem = std::move(reason);
-        return;
-    }
-    AppState::CoreConfigEntry entry;
-    entry.name = unique_subscription_name(preferred_name);
-    entry.backend = backend;
-    entry.text = text;
-    g_app.core_configs.push_back(std::move(entry));
-    ++summary.added;
+/// Why configs past the end of the list were left out.
+static std::string core_list_limit_text() {
+    return "the saved-config list holds at most " + std::to_string(kMaxCoreConfigs) + " configs";
 }
 
-static void import_core_subscription_body(const std::string& raw_body) {
-    CoreSubscriptionImportSummary summary;
-    const int previous_count = (int)g_app.core_configs.size();
-    const std::string body = trim_subscription_text(raw_body);
-    const std::string prefix = trim_subscription_text(s_core_import_prefix);
-    const int backend = s_core_import_backend;
-    const std::string core = AppState::core_backend_name(backend);
-    std::string validation_error;
+/// Whether `text` opens with a share link: the first line of it that says
+/// anything is one. Comments and the feed's own header lines say nothing.
+static bool subscription_starts_with_link(const std::string& text) {
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find('\n', start);
+        const std::string line = trim_subscription_text(text.substr(start,
+            end == std::string::npos ? std::string::npos : end - start));
+        if (!line.empty() && line[0] != '#' && line.rfind("//", 0) != 0 && !subscription_metadata_line(line))
+            return subscription_uri_line(line);
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return false;
+}
 
-    // Native Xray/sing-box JSON, Mihomo YAML, and a single share link are all
-    // already accepted by the selected core's existing profile validator.
-    if (body.size() <= kMaxCoreConfigText
-        && validate_subscription_profile(body, backend, validation_error)) {
-        std::string name = subscription_uri_line(body)
-            ? subscription_fragment_name(body) : std::string();
-        if (!prefix.empty()) name = name.empty() ? prefix : prefix + " - " + name;
-        if (name.empty()) name = core + " subscription";
-        append_subscription_profile(body, name, backend, summary);
-    } else {
-        int ignored = 0, overflow = 0;
-        std::vector<std::string> links = subscription_links(body, ignored, overflow);
-        if (links.empty()) {
-            std::string decoded;
-            if (decode_subscription_base64(body, decoded) && decoded != body) {
-                ignored = 0;
-                overflow = 0;
-                std::string decoded_error;
-                if (decoded.size() <= kMaxCoreConfigText
-                    && validate_subscription_profile(decoded, backend, decoded_error)) {
-                    std::string name = prefix.empty() ? core + " subscription" : prefix;
-                    append_subscription_profile(decoded, name, backend, summary);
-                } else {
-                    int decoded_ignored = 0, decoded_overflow = 0;
-                    links = subscription_links(decoded, decoded_ignored, decoded_overflow);
-                    ignored = decoded_ignored;
-                    overflow = decoded_overflow;
-                    if (links.empty() && !decoded_error.empty()) validation_error = decoded_error;
-                }
+/// Read what a subscription offers `backend`: share links, one to a line, or
+/// one native config, either of them possibly base64-encoded. Nothing is
+/// stored here; the caller decides what the profiles replace.
+static SubscriptionParse parse_core_subscription(const std::string& raw_body, int backend) {
+    SubscriptionParse parsed;
+    const std::string body = trim_subscription_text(raw_body);
+    parsed.title = subscription_body_title(body);
+    std::string validation_error;
+    int ignored = 0, overflow = 0;
+    std::vector<std::string> links;
+    const auto read = [&](const std::string& text) {
+        links = subscription_links(text, ignored, overflow);
+        // Text that opens with a link is a list of links and is read line by
+        // line, never as one profile. The engine reads a link's name on to the
+        // end of the text, so a whole list checks out as its first link, named
+        // after all the others: asked first, it made one config of a feed.
+        if (!links.empty() && subscription_starts_with_link(text)) return true;
+        std::string reason;
+        if (validate_subscription_profile(text, backend, reason)) {
+            links.clear();
+            ignored = overflow = 0;
+            parsed.profiles.push_back({text, core_profile_own_name(text, backend)});
+            return true;
+        }
+        // Links under lines that are neither links nor a config.
+        if (!links.empty()) return true;
+        validation_error = std::move(reason);
+        return false;
+    };
+    if (!read(body)) {
+        std::string decoded;
+        if (decode_subscription_base64(body, decoded) && decoded != body) {
+            if (parsed.title.empty()) parsed.title = subscription_body_title(decoded);
+            read(decoded);
+        }
+    }
+    for (const std::string& link : links) {
+        std::string reason;
+        if (validate_subscription_profile(link, backend, reason)) {
+            parsed.profiles.push_back({link, core_profile_own_name(link, backend)});
+        } else {
+            ++parsed.skipped;
+            if (parsed.first_problem.empty()) parsed.first_problem = std::move(reason);
+        }
+    }
+    if (links.empty()) {
+        if (parsed.profiles.empty())
+            parsed.first_problem = "no share links were found, and the text is not a native "
+                + std::string(AppState::core_backend_name(backend)) + " config"
+                + (validation_error.empty() ? std::string() : " (" + validation_error + ")");
+        return parsed;
+    }
+    parsed.skipped += overflow + ignored;
+    if (parsed.first_problem.empty() && overflow) parsed.first_problem = core_list_limit_text();
+    if (parsed.first_problem.empty() && ignored)
+        parsed.first_problem = "some lines are not share links or recognized subscription headers";
+    return parsed;
+}
+
+/// Re-point everything that names a saved config by position after the list was
+/// rebuilt. `moved[i]` is where old row `i` went, or -1 when it is gone. A
+/// selection whose config is gone is given up rather than handed to whichever
+/// config now sits in its place, and one that already pointed past the list
+/// keeps pointing past it.
+static void core_configs_remap(const std::vector<int>& moved) {
+    const int old_count = (int)moved.size();
+    const int new_count = (int)g_app.core_configs.size();
+    const auto remap = [&](int index, bool& gone) {
+        gone = false;
+        if (index < 0) return index;
+        if (index >= old_count) return new_count + (index - old_count);
+        gone = moved[(size_t)index] < 0;
+        return moved[(size_t)index];
+    };
+    bool gone = false;
+    if (g_app.core_selected >= 0) {
+        const int to = remap(g_app.core_selected, gone);
+        if (gone) apply_transport(0);
+        else g_app.core_selected = to;
+    }
+    std::vector<int> rebuilt;
+    rebuilt.reserve(g_app.chain_transports.size());
+    for (int transport : g_app.chain_transports) {
+        if (!transport_is_core(transport)) {
+            rebuilt.push_back(transport);
+            continue;
+        }
+        const int to = remap(transport - kCoreTransportBase, gone);
+        if (!gone) rebuilt.push_back(kCoreTransportBase + to);
+    }
+    g_app.chain_transports.swap(rebuilt);
+    if (s_core_editor_row >= 0) {
+        const int to = remap(s_core_editor_row, gone);
+        if (gone) {
+            s_core_editor_row = -1;
+            s_core_editor_open = false;
+        } else {
+            s_core_editor_row = to;
+        }
+    }
+}
+
+struct CoreGroupChange {
+    int total = 0;
+    int added = 0;
+    int removed = 0;
+    /// The config the main protocol ran is no longer in the subscription.
+    bool lost_selection = false;
+};
+
+/// Put what a subscription now offers into `group`, in place of what it held.
+/// A config the feed still lists under the same name stays the same row as far
+/// as the protocol choice and the chain are concerned. Returns false and leaves
+/// the group alone when nothing usable came back: a feed that is down must not
+/// empty the list the user connects with.
+static bool core_group_apply(int group, int backend, const std::string& group_name,
+                             SubscriptionParse& parsed, CoreGroupChange& change) {
+    const int old_count = (int)g_app.core_configs.size();
+    int outside = 0;
+    for (const AppState::CoreConfigEntry& entry : g_app.core_configs)
+        if (entry.group != group) ++outside;
+
+    std::vector<AppState::CoreConfigEntry> fresh;
+    fresh.reserve(parsed.profiles.size());
+    const auto taken = [&](const std::string& name) {
+        for (const AppState::CoreConfigEntry& entry : g_app.core_configs)
+            if (entry.group != group && core_names_equal(entry.name, name)) return true;
+        for (const AppState::CoreConfigEntry& entry : fresh)
+            if (core_names_equal(entry.name, name)) return true;
+        return false;
+    };
+    const bool lone = parsed.profiles.size() == 1;
+    for (SubscriptionProfile& profile : parsed.profiles) {
+        if (outside + (int)fresh.size() >= kMaxCoreConfigs) {
+            ++parsed.skipped;
+            if (parsed.first_problem.empty()) parsed.first_problem = core_list_limit_text();
+            continue;
+        }
+        AppState::CoreConfigEntry entry;
+        entry.backend = backend;
+        entry.group = group;
+        // A feed that is one unnamed config is what the group is: it goes by
+        // the group's name instead of a made-up one.
+        if (!profile.name.empty()) entry.name = unique_core_name(profile.name, taken);
+        else if (lone && !group_name.empty()) entry.name = unique_core_name(group_name, taken);
+        else entry.name = numbered_config_name(profile.text, backend, taken);
+        entry.text = std::move(profile.text);
+        AppState::refresh_core_listeners(entry);
+        fresh.push_back(std::move(entry));
+    }
+    if (fresh.empty()) return false;
+
+    // The group keeps its place in the list: its new configs go where its first
+    // old one was, or at the end when it held none.
+    int insert_at = outside;
+    {
+        int before = 0;
+        for (const AppState::CoreConfigEntry& entry : g_app.core_configs) {
+            if (entry.group == group) {
+                insert_at = before;
+                break;
+            }
+            ++before;
+        }
+    }
+    std::vector<int> moved((size_t)old_count, -1);
+    std::vector<AppState::CoreConfigEntry> rebuilt;
+    rebuilt.reserve((size_t)outside + fresh.size());
+    const int fresh_count = (int)fresh.size();
+    int kept = 0;
+    for (int i = 0, others = 0; i < old_count; ++i) {
+        const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
+        if (entry.group != group) {
+            moved[(size_t)i] = others < insert_at ? others : others + fresh_count;
+            ++others;
+            continue;
+        }
+        for (int j = 0; j < fresh_count; ++j) {
+            if (core_names_equal(fresh[(size_t)j].name, entry.name)) {
+                moved[(size_t)i] = insert_at + j;
+                ++kept;
+                break;
             }
         }
-        size_t ordinal = 0;
-        for (const std::string& link : links) {
-            ++ordinal;
-            std::string name = subscription_fragment_name(link);
-            if (!prefix.empty()) name = name.empty()
-                ? prefix + " " + std::to_string(ordinal)
-                : prefix + " - " + name;
-            else if (name.empty()) name = core + " " + std::to_string(ordinal);
-            append_subscription_profile(link, name, backend, summary);
-        }
-        summary.skipped += overflow + ignored;
-        if (summary.first_problem.empty() && overflow)
-            summary.first_problem = "the subscription has more profiles than the importer can process";
-        if (summary.first_problem.empty() && ignored)
-            summary.first_problem = "some lines are not share links or recognized subscription headers";
-        if (summary.first_problem.empty() && links.empty())
-            summary.first_problem = validation_error.empty()
-                ? "no supported share links or native config were found"
-                : validation_error;
     }
+    change.total = fresh_count;
+    change.added = fresh_count - kept;
+    change.removed = (old_count - outside) - kept;
+    change.lost_selection = g_app.core_selected >= 0 && g_app.core_selected < old_count
+        && moved[(size_t)g_app.core_selected] < 0;
 
-    if (summary.added > 0) {
-        // Preserve dangling saved-config references: a newly appended row must
-        // not turn a broken selection into a different, silently chosen profile.
-        const int new_count = previous_count + summary.added;
-        if (g_app.core_selected >= previous_count && g_app.core_selected < new_count)
-            g_app.core_selected += summary.added;
-        for (int& transport : g_app.chain_transports) {
-            const int first_new = kCoreTransportBase + previous_count;
-            const int after_new = kCoreTransportBase + new_count;
-            if (transport >= first_new && transport < after_new) transport += summary.added;
-        }
-        g_app.refresh_core_listeners();
-        s_core_import_status_error = false;
-        s_core_import_status_warning = summary.skipped > 0;
-        if (summary.skipped > 0) {
-            snprintf(s_core_import_status, sizeof(s_core_import_status),
-                "Imported %d profile%s; skipped %d incompatible or extra line%s. %s",
-                summary.added, summary.added == 1 ? "" : "s", summary.skipped,
-                summary.skipped == 1 ? "" : "s",
-                summary.first_problem.empty() ? "" : summary.first_problem.c_str());
-        } else {
-            snprintf(s_core_import_status, sizeof(s_core_import_status),
-                "Imported %d profile%s.", summary.added, summary.added == 1 ? "" : "s");
-        }
-    } else {
-        s_core_import_status_error = true;
-        s_core_import_status_warning = false;
-        snprintf(s_core_import_status, sizeof(s_core_import_status), "No compatible profiles imported. %s",
-            summary.first_problem.empty() ? "Check the URL and selected core." : summary.first_problem.c_str());
+    bool inserted = false;
+    const auto insert_fresh = [&] {
+        for (AppState::CoreConfigEntry& entry : fresh) rebuilt.push_back(std::move(entry));
+        inserted = true;
+    };
+    for (int i = 0, others = 0; i < old_count; ++i) {
+        AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
+        if (entry.group == group) continue;
+        if (!inserted && others == insert_at) insert_fresh();
+        rebuilt.push_back(std::move(entry));
+        ++others;
     }
+    if (!inserted) insert_fresh();
+    g_app.core_configs.swap(rebuilt);
+    core_configs_remap(moved);
+    return true;
 }
 
-static void begin_core_subscription_fetch() {
-    std::string url = trim_subscription_text(s_core_import_url);
-    if (g_app.core_configs.size() >= (size_t)kMaxCoreConfigs) {
-        s_core_import_status_error = true;
-        s_core_import_status_warning = false;
-        snprintf(s_core_import_status, sizeof(s_core_import_status),
-            "The saved-config list is already at its %d-entry limit.", kMaxCoreConfigs);
+/// Remove a group and every config it holds.
+static void core_group_remove(int group) {
+    if (group < 0 || group >= (int)g_app.core_groups.size()) return;
+    const int old_count = (int)g_app.core_configs.size();
+    std::vector<int> moved((size_t)old_count, -1);
+    std::vector<AppState::CoreConfigEntry> rebuilt;
+    rebuilt.reserve(g_app.core_configs.size());
+    for (int i = 0; i < old_count; ++i) {
+        AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
+        if (entry.group == group) continue;
+        if (entry.group > group) --entry.group;
+        moved[(size_t)i] = (int)rebuilt.size();
+        rebuilt.push_back(std::move(entry));
+    }
+    g_app.core_configs.swap(rebuilt);
+    g_app.core_groups.erase(g_app.core_groups.begin() + group);
+    if ((size_t)group < s_core_group_open.size())
+        s_core_group_open.erase(s_core_group_open.begin() + group);
+    core_configs_remap(moved);
+    // The dialogs name groups by position as well, and so does a download that
+    // is still on its way: one for this group is left with a position no group
+    // has, so its result is dropped instead of filling another group.
+    if (s_core_import_group == group) s_core_import_group = -1;
+    else if (s_core_import_group > group) --s_core_import_group;
+    if (s_core_fetch_group == group) s_core_fetch_group = kMaxCoreGroups;
+    else if (s_core_fetch_group > group && s_core_fetch_group < kMaxCoreGroups) --s_core_fetch_group;
+}
+
+/// How long ago a group was filled, as its row says it: "5 min ago", or
+/// nothing for a group that never was.
+static std::string core_group_age(int64_t updated) {
+    if (updated <= 0) return {};
+    const int64_t age = (int64_t)std::time(nullptr) - updated;
+    char text[32];
+    if (age < 90) return "just now";
+    if (age < 5400) snprintf(text, sizeof(text), "%d min ago", (int)((age + 30) / 60));
+    else if (age < 2 * 86400) snprintf(text, sizeof(text), "%d h ago", (int)((age + 1800) / 3600));
+    else snprintf(text, sizeof(text), "%d d ago", (int)(age / 86400));
+    return text;
+}
+/// The same as a clause: "updated 5 min ago", or "never updated".
+static std::string core_group_updated(int64_t updated) {
+    const std::string age = core_group_age(updated);
+    return age.empty() ? "never updated" : "updated " + age;
+}
+
+static void set_core_import_status(bool error, bool warning, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(s_core_import_status, sizeof(s_core_import_status), format, args);
+    va_end(args);
+    s_core_import_status_error = error;
+    s_core_import_status_warning = warning;
+}
+
+/// `text` as the end of a status sentence: with a full stop, but only one.
+static std::string sentence_end(std::string text) {
+    while (!text.empty() && std::isspace((unsigned char)text.back())) text.pop_back();
+    if (!text.empty() && text.back() != '.' && text.back() != '!' && text.back() != '?') text.push_back('.');
+    return text;
+}
+
+/// A download finished: fill the group it was for, creating it for an import.
+static void finish_core_subscription_fetch(const std::string& body, const std::string& header_title) {
+    SubscriptionParse parsed = parse_core_subscription(body, s_core_fetch_backend);
+    int group = s_core_fetch_group;
+    const bool creating = group < 0;
+    if (!creating && group >= (int)g_app.core_groups.size()) {
+        set_core_import_status(true, false, "The group was removed before its subscription arrived.");
         return;
     }
-    snprintf(s_core_import_url, sizeof(s_core_import_url), "%s", url.c_str());
-    s_core_import_status_error = false;
-    s_core_import_status_warning = false;
-    snprintf(s_core_import_status, sizeof(s_core_import_status), "Downloading subscription…");
+    if (creating && g_app.core_groups.size() >= (size_t)kMaxCoreGroups) {
+        set_core_import_status(true, false, "There are already %d groups. Remove one first.", kMaxCoreGroups);
+        return;
+    }
+    // The response header is the feed speaking for itself; a title line in the
+    // body is the same statement by other means.
+    const std::string title = header_title.empty() ? parsed.title : header_title;
+    std::string name;
+    if (creating) {
+        name = core_group_auto_name(s_core_fetch_name, title, s_core_fetch_url, -1);
+    } else if (s_core_fetch_origin == kCoreFetchManage) {
+        // The dialog's name field decides, and emptied it asks for the feed's.
+        name = core_group_auto_name(s_core_fetch_name, title, s_core_fetch_url, group);
+    } else if (!clean_core_name(s_core_fetch_name).empty()) {
+        // A URL that is already a group, imported again under a name.
+        name = core_group_auto_name(s_core_fetch_name, {}, s_core_fetch_url, group);
+    } else {
+        name = g_app.core_groups[(size_t)group].name;
+    }
+    if (creating) {
+        g_app.core_groups.emplace_back();
+        group = (int)g_app.core_groups.size() - 1;
+    }
+    CoreGroupChange change;
+    if (!core_group_apply(group, s_core_fetch_backend, name, parsed, change)) {
+        if (creating) g_app.core_groups.pop_back();
+        const std::string problem = sentence_end(parsed.first_problem.empty()
+            ? "check the URL and the selected core" : parsed.first_problem);
+        set_core_import_status(true, false, "Nothing was imported: %s%s", problem.c_str(),
+            creating ? "" : " The group keeps the configs it had.");
+        return;
+    }
+    {
+        AppState::CoreGroupEntry& entry = g_app.core_groups[(size_t)group];
+        entry.name = name;
+        entry.url = s_core_fetch_url;
+        entry.backend = s_core_fetch_backend;
+        entry.updated = (int64_t)std::time(nullptr);
+    }
+    if (s_core_group_open.size() < g_app.core_groups.size())
+        s_core_group_open.resize(g_app.core_groups.size(), 0);
+    if (s_core_fetch_origin == kCoreFetchImport) {
+        // An import answers in the list: the dialog closes on the group it
+        // made, or found, opened and in view.
+        s_core_group_open[(size_t)group] = 1;
+        s_core_group_reveal = group;
+        s_core_import_should_close = true;
+    } else if (s_core_fetch_origin == kCoreFetchManage && s_core_import_group == group) {
+        snprintf(s_core_import_name, sizeof(s_core_import_name), "%s", name.c_str());
+        snprintf(s_core_import_url, sizeof(s_core_import_url), "%s", s_core_fetch_url.c_str());
+    }
+    std::string text;
+    char counts[192];
+    if (creating) {
+        snprintf(counts, sizeof(counts), "Imported %d config%s into \"%s\".",
+                 change.total, change.total == 1 ? "" : "s", name.c_str());
+    } else {
+        snprintf(counts, sizeof(counts), "\"%s\" now has %d config%s (%d new, %d removed).",
+                 name.c_str(), change.total, change.total == 1 ? "" : "s", change.added, change.removed);
+    }
+    text = counts;
+    if (parsed.skipped > 0) {
+        snprintf(counts, sizeof(counts), " Skipped %d line%s", parsed.skipped, parsed.skipped == 1 ? "" : "s");
+        text += counts;
+        text += parsed.first_problem.empty() ? "." : ": " + sentence_end(parsed.first_problem);
+    }
+    if (change.lost_selection)
+        text += " The config that was selected as the protocol is no longer in it, so the protocol was reset.";
+    set_core_import_status(false, parsed.skipped > 0 || change.lost_selection, "%s", text.c_str());
+}
+
+/// Download `url` for `group`, or for a group that does not exist yet (`-1`).
+/// `name` is what the user typed as the group's name, "" when nothing.
+static void begin_core_subscription_fetch(int group, const std::string& url_text, const std::string& name,
+                                          int backend, CoreFetchOrigin origin) {
+    const std::string url = trim_subscription_text(url_text);
+    if (url.empty()) {
+        set_core_import_status(true, false, "Enter the subscription URL.");
+        return;
+    }
+    s_core_fetch_group = group;
+    s_core_fetch_url = url;
+    s_core_fetch_name = name;
+    s_core_fetch_backend = std::clamp(backend, 0, 2);
+    s_core_fetch_origin = origin;
+    if (group >= 0 && group < (int)g_app.core_groups.size())
+        set_core_import_status(false, false, "Refreshing \"%s\"…", g_app.core_groups[(size_t)group].name.c_str());
+    else
+        set_core_import_status(false, false, "Downloading subscription…");
     uint64_t request_id;
     {
         std::lock_guard<std::mutex> lock(s_core_import_mutex);
@@ -4048,23 +4556,25 @@ static void begin_core_subscription_fetch() {
         s_core_import_awaiting = true;
         s_core_import_result_ready = false;
         s_core_import_result.clear();
+        s_core_import_result_title.clear();
     }
     s_core_import_in_progress = true;
     try {
         std::thread([request_id, url] {
             try {
                 std::vector<char> response((size_t)FCAE_SUBSCRIPTION_MAX_BODY + 1, '\0');
-                const bool success = fcae_fetch_subscription(
-                    url.c_str(), response.data(), (uint32_t)response.size());
-                ui_core_subscription_fetch_complete(request_id, success, response.data());
+                char title[256] = {};
+                const bool success = fcae_fetch_subscription_titled(
+                    url.c_str(), response.data(), (uint32_t)response.size(), title, sizeof(title));
+                ui_core_subscription_fetch_complete(request_id, success, response.data(), title);
             } catch (...) {
                 ui_core_subscription_fetch_complete(request_id, false,
-                    "Could not start the subscription download.");
+                    "Could not start the subscription download.", {});
             }
         }).detach();
     } catch (...) {
         ui_core_subscription_fetch_complete(request_id, false,
-            "Could not start the subscription download.");
+            "Could not start the subscription download.", {});
     }
 }
 
@@ -4075,24 +4585,25 @@ static void cancel_core_subscription_fetch() {
         s_core_import_awaiting = false;
         s_core_import_result_ready = false;
         s_core_import_result.clear();
+        s_core_import_result_title.clear();
     }
     s_core_import_in_progress = false;
-    s_core_import_status_error = false;
-    s_core_import_status_warning = false;
-    snprintf(s_core_import_status, sizeof(s_core_import_status), "Download cancelled.");
+    set_core_import_status(false, false, "Download cancelled.");
 }
 
 static void poll_core_subscription_fetch() {
     bool ready = false;
     bool success = false;
-    std::string result;
+    std::string result, title;
     {
         std::lock_guard<std::mutex> lock(s_core_import_mutex);
         if (s_core_import_result_ready) {
             ready = true;
             success = s_core_import_result_ok;
             result = std::move(s_core_import_result);
+            title = std::move(s_core_import_result_title);
             s_core_import_result.clear();
+            s_core_import_result_title.clear();
             s_core_import_result_ready = false;
             s_core_import_awaiting = false;
         }
@@ -4100,11 +4611,11 @@ static void poll_core_subscription_fetch() {
     if (!ready) return;
     s_core_import_in_progress = false;
     if (!success) {
-        s_core_import_status_error = true;
-        s_core_import_status_warning = false;
-        snprintf(s_core_import_status, sizeof(s_core_import_status), "%s", result.c_str());
+        // The engine's reasons start lower case; a status line is a sentence.
+        if (!result.empty()) result[0] = (char)std::toupper((unsigned char)result[0]);
+        set_core_import_status(true, false, "%s", sentence_end(result).c_str());
     } else {
-        import_core_subscription_body(result);
+        finish_core_subscription_fetch(result, title);
     }
 }
 
@@ -4116,7 +4627,8 @@ static void poll_core_subscription_fetch() {
 /// `row` is the entry being rewritten, or -1 for one that does not exist yet.
 static void core_config_check(int row) {
     s_core_status_error = true;
-    const std::string name = s_core_name_buf;
+    s_core_auto_name.clear();
+    const std::string name = trim_subscription_text(s_core_name_buf);
     const bool empty_text = s_core_text_buf.empty() || s_core_text_buf[0] == 0;
     if (name.empty() && empty_text) {
         // A form nobody has filled in yet is not a mistake to paint red: the
@@ -4124,10 +4636,8 @@ static void core_config_check(int row) {
         s_core_status[0] = 0;
         return;
     }
-    if (name.empty()) {
-        snprintf(s_core_status, sizeof(s_core_status), "Give the config a name.");
-        return;
-    }
+    // The name is optional: left empty, the config goes by the name it gives
+    // itself, or by one made up for it (below, once it is known to be valid).
     if (name.size() > kMaxCoreConfigName) {
         snprintf(s_core_status, sizeof(s_core_status), "Names are limited to %d bytes.",
                  (int)kMaxCoreConfigName);
@@ -4138,7 +4648,7 @@ static void core_config_check(int row) {
         snprintf(s_core_status, sizeof(s_core_status), "Names cannot contain control characters.");
         return;
     }
-    if (!core_config_name_free(name.c_str(), row)) {
+    if (!name.empty() && !core_config_name_free(name.c_str(), row)) {
         snprintf(s_core_status, sizeof(s_core_status),
                  "Another config is already called \"%s\".", name.c_str());
         return;
@@ -4168,28 +4678,41 @@ static void core_config_check(int row) {
     uint32_t http_port = 0;
     const uint32_t kinds = fcae_core_listeners(s_core_text_buf.data(), backend, &socks_port, &http_port);
     const char* core = AppState::core_backend_name(s_core_backend_buf);
+    // Said before Save, so the row that appears is the row that was promised.
+    std::string saved_as;
+    if (name.empty()) {
+        const auto taken = [&](const std::string& candidate) {
+            return !core_config_name_free(candidate.c_str(), row);
+        };
+        s_core_auto_name = core_auto_name(s_core_text_buf.data(), s_core_backend_buf, taken);
+        saved_as = " It will be saved as \"" + s_core_auto_name + "\".";
+    }
     if ((kinds & FCAE_CORE_LISTENER_SOCKS) == 0) {
         s_core_status_error = false;
         snprintf(s_core_status, sizeof(s_core_status),
                  "Valid %s config. It declares no SOCKS5 inbound, so TUN mode and a chained "
-                 "hop cannot run it.", core);
+                 "hop cannot run it.%s", core, saved_as.c_str());
         return;
     }
     s_core_status_error = false;
-    snprintf(s_core_status, sizeof(s_core_status), "Valid %s config.", core);
+    snprintf(s_core_status, sizeof(s_core_status), "Valid %s config.%s", core, saved_as.c_str());
 }
 
 /// Store the editor's buffers as the row it was opened on, or as a new one.
 /// Only called with a validated form, so the entry it writes always parses.
 static void apply_core_editor() {
     AppState::CoreConfigEntry entry;
-    entry.name = s_core_name_buf;
+    entry.name = trim_subscription_text(s_core_name_buf);
+    if (entry.name.empty()) entry.name = s_core_auto_name;
     entry.backend = s_core_backend_buf;
     entry.text = s_core_text_buf.data();
-    if (s_core_editor_row >= 0 && s_core_editor_row < (int)g_app.core_configs.size())
+    if (s_core_editor_row >= 0 && s_core_editor_row < (int)g_app.core_configs.size()) {
+        // An edited config stays in the subscription group it came from.
+        entry.group = g_app.core_configs[(size_t)s_core_editor_row].group;
         g_app.core_configs[(size_t)s_core_editor_row] = std::move(entry);
-    else
+    } else {
         g_app.core_configs.push_back(std::move(entry));
+    }
     // What a listener can answer on is a property of the config, so the cache
     // the settings and the protocol list read is rebuilt from what was stored.
     g_app.refresh_core_listeners();
@@ -4263,7 +4786,7 @@ static void render_core_editor() {
     ImGui::TextDisabled("Name");
     ImGui::PushItemWidth(-FLT_MIN);
     // The engine's limit plus the terminator: typing past it does nothing.
-    changed |= UiText::InputTextWithHint("##core_name", "a name for this config",
+    changed |= UiText::InputTextWithHint("##core_name", "optional: taken from the config when left empty",
                                         s_core_name_buf, kMaxCoreConfigName + 1);
     ImGui::PopItemWidth();
     // Three cores, so all stay on screen: radio circles like Outbound IP
@@ -4328,6 +4851,36 @@ static void render_core_editor() {
     ImGui::EndPopup();
 }
 
+static ImVec4 core_import_status_color() {
+    return s_core_import_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
+        : s_core_import_status_warning ? ImVec4(0.95f, 0.72f, 0.25f, 1.0f)
+        : ImVec4(0.3f, 0.9f, 0.4f, 1.0f);
+}
+
+/// The tooltip of the button just drawn. Pressing the button puts it away until
+/// the pointer has left: a tooltip opens just under the pointer, and that is
+/// where a press shows what it did -- the message under a dialog's buttons, the
+/// rows of the group a list button refreshed.
+static void core_button_tooltip(bool pressed, const char* text) {
+    static ImGuiID s_pressed = 0;
+    static int s_pressed_frame = 0;
+    const int frame = ImGui::GetFrameCount();
+    const ImGuiID id = ImGui::GetItemID();
+    // Disabled still counts as under the pointer: a button is disabled for as
+    // long as the download it started is running.
+    const bool over = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+    if (pressed) s_pressed = id;
+    else if (s_pressed == id && (!over || s_pressed_frame + 1 < frame)) s_pressed = 0;
+    if (s_pressed == id) {
+        s_pressed_frame = frame;
+        return;
+    }
+    if (over && ImGui::IsItemHovered()) UiText::Tooltip("%s", text);
+}
+
+/// The subscription dialog: a URL, the group it fills and the core its configs
+/// are stored under. It imports a new group, or manages one that exists:
+/// refresh it from its URL, rename or re-point it, remove it.
 static void render_core_subscription_import() {
     static const char* const kTitle = "##core-subscription-import";
     if (s_core_import_popup_open) {
@@ -4335,24 +4888,37 @@ static void render_core_subscription_import() {
         s_core_import_popup_open = false;
     }
     poll_core_subscription_fetch();
-    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(modal_size(620.0f, 470.0f), ImGuiCond_Always);
-    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
+    s_core_import_visible = false;
+    if (!begin_account_dialog(kTitle, 620.0f)) return;
+    if (s_core_import_group >= (int)g_app.core_groups.size()) s_core_import_group = -1;
+    const bool managing = s_core_import_group >= 0;
+    if (s_core_import_should_close) {
+        s_core_import_should_close = false;
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    s_core_import_visible = true;
+    // One download runs at a time, and it may have been started from the list
+    // behind this dialog: only the dialog's own download is its to cancel.
+    const bool busy = s_core_import_in_progress;
+    const bool busy_here = busy && s_core_fetch_origin != kCoreFetchList;
 
-    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Import a subscription URL");
+    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f),
+                       managing ? "Manage subscription group" : "Import a subscription URL");
     ImGui::Separator();
-    UiText::TextColoredWrapped(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
-        "HTTPS only. Imports plaintext or base64 feeds of share links, or one native config accepted by the selected core. "
-        "Entries are stored locally; remove old imported entries before importing again to refresh.");
-    ImGui::Spacing();
-    ImGui::BeginDisabled(s_core_import_in_progress);
+    ImGui::BeginDisabled(busy_here);
+    // Enter in either field is the dialog's primary button.
+    bool enter = false;
     ImGui::TextDisabled("Subscription URL");
     ImGui::PushItemWidth(-FLT_MIN);
-    UiText::InputTextWithHint("##core_subscription_url", "https://example.com/subscription",
-                              s_core_import_url, sizeof(s_core_import_url));
-    ImGui::TextDisabled("Name prefix (optional)");
-    UiText::InputTextWithHint("##core_subscription_prefix", "e.g. Work", s_core_import_prefix,
-                              sizeof(s_core_import_prefix));
+    enter |= UiText::InputTextWithHint("##core_subscription_url", "https://example.com/subscription",
+                                       s_core_import_url, sizeof(s_core_import_url),
+                                       ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::TextDisabled("Group name (optional)");
+    enter |= UiText::InputTextWithHint("##core_subscription_name", "named after the subscription when left empty",
+                                       s_core_import_name, sizeof(s_core_import_name),
+                                       ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
     ImGui::TextDisabled("Core");
     ImGui::PushStyleColor(ImGuiCol_CheckMark, kCoreTagColor);
@@ -4363,88 +4929,266 @@ static void render_core_subscription_import() {
     if (ImGui::RadioButton("Mihomo", s_core_import_backend == 2)) s_core_import_backend = 2;
     ImGui::PopStyleColor();
     ImGui::EndDisabled();
+    if (managing) {
+        const int count = core_group_size(s_core_import_group);
+        ImGui::TextDisabled("%d config%s, %s", count, count == 1 ? "" : "s",
+            core_group_updated(g_app.core_groups[(size_t)s_core_import_group].updated).c_str());
+    }
     ImGui::Spacing();
 
-    const ImVec4 status_color = s_core_import_status_error
-        ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
-        : s_core_import_status_warning ? ImVec4(0.95f, 0.72f, 0.25f, 1.0f)
-        : ImVec4(0.3f, 0.9f, 0.4f, 1.0f);
-    UiText::TextColoredWrapped(status_color, "%s", s_core_import_status);
-    ImGui::Spacing();
-    ImGui::BeginDisabled(s_core_import_in_progress);
-    if (ImGui::Button("Import")) begin_core_subscription_fetch();
+    const bool can_fetch = !busy && !trim_subscription_text(s_core_import_url).empty();
+    ImGui::BeginDisabled(!can_fetch);
+    if (!managing) {
+        if ((ImGui::Button("Import") || enter) && can_fetch) {
+            // The same URL for the same core is the group that already exists:
+            // importing it again refreshes that group instead of copying it.
+            const std::string url = trim_subscription_text(s_core_import_url);
+            int existing = -1;
+            for (int g = 0; g < (int)g_app.core_groups.size() && existing < 0; ++g)
+                if (g_app.core_groups[(size_t)g].url == url
+                    && g_app.core_groups[(size_t)g].backend == s_core_import_backend) existing = g;
+            begin_core_subscription_fetch(existing, url, s_core_import_name, s_core_import_backend, kCoreFetchImport);
+        }
+    } else {
+        const bool refresh = ImGui::Button("Refresh");
+        core_button_tooltip(refresh,
+            "Download the subscription again and replace this group's configs with what it lists now.");
+        if ((refresh || enter) && can_fetch)
+            begin_core_subscription_fetch(s_core_import_group, s_core_import_url, s_core_import_name,
+                                          s_core_import_backend, kCoreFetchManage);
+        // Refresh fetches what the fields say and keeps it when that worked;
+        // Save keeps it without asking the URL anything.
+        button_row_next("Save");
+        const bool save = secondary_button("Save");
+        core_button_tooltip(save, "Keep the name, URL and core as written here without downloading anything.");
+        if (save) {
+            AppState::CoreGroupEntry& group = g_app.core_groups[(size_t)s_core_import_group];
+            group.url = trim_subscription_text(s_core_import_url);
+            group.backend = std::clamp(s_core_import_backend, 0, 2);
+            group.name = core_group_auto_name(s_core_import_name, {}, group.url, s_core_import_group);
+            snprintf(s_core_import_name, sizeof(s_core_import_name), "%s", group.name.c_str());
+            snprintf(s_core_import_url, sizeof(s_core_import_url), "%s", group.url.c_str());
+            set_core_import_status(false, false, "Saved.");
+        }
+    }
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button(s_core_import_in_progress ? "Cancel" : "Close")) {
-        if (s_core_import_in_progress) cancel_core_subscription_fetch();
+    if (managing) {
+        button_row_next("Remove group");
+        ImGui::BeginDisabled(busy);
+        if (secondary_button("Remove group")) {
+            s_core_group_remove = s_core_import_group;
+            s_core_group_remove_open = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+    }
+    button_row_next("Cancel");
+    if (secondary_button(busy_here ? "Cancel" : "Close")) {
+        if (busy_here) cancel_core_subscription_fetch();
+        ImGui::CloseCurrentPopup();
+    }
+    // Under the buttons, where the account dialogs say theirs: a message that
+    // comes and goes makes the dialog longer or shorter and moves nothing in it.
+    if (s_core_import_status[0])
+        UiText::TextColoredWrapped(core_import_status_color(), "%s", s_core_import_status);
+    ImGui::EndPopup();
+}
+
+/// Removing a group takes every config in it and the URL they came from, so it
+/// asks first.
+static void render_core_group_remove() {
+    static const char* const kTitle = "Remove group?";
+    if (s_core_group_remove_open) {
+        ImGui::OpenPopup(kTitle);
+        s_core_group_remove_open = false;
+    }
+    if (!begin_account_dialog(kTitle, 480.0f)) return;
+    if (s_core_group_remove < 0 || s_core_group_remove >= (int)g_app.core_groups.size()) {
+        s_core_group_remove = -1;
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    const int count = core_group_size(s_core_group_remove);
+    ImGui::TextWrapped("Remove \"%s\" and the %d config%s imported from it?",
+        g_app.core_groups[(size_t)s_core_group_remove].name.c_str(), count, count == 1 ? "" : "s");
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.22f, 0.22f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.74f, 0.28f, 0.28f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.54f, 0.18f, 0.18f, 1.0f));
+    const bool remove = ImGui::Button("Remove");
+    ImGui::PopStyleColor(3);
+    if (remove) {
+        const std::string name = g_app.core_groups[(size_t)s_core_group_remove].name;
+        core_group_remove(s_core_group_remove);
+        set_core_import_status(false, false, "Removed \"%s\".", name.c_str());
+        s_core_group_remove = -1;
+        ImGui::CloseCurrentPopup();
+    }
+    button_row_next("Cancel");
+    if (secondary_button("Cancel")) {
+        s_core_group_remove = -1;
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
 }
 
-static void render_core_configs() {
-    static const char* const kTitle = "Xray / sing-box / Mihomo settings";
-    if (s_core_configs_popup_open) {
-        ImGui::OpenPopup(kTitle);
-        s_core_configs_popup_open = false;
+/// One saved config's row: the name the user gave the config, the core that
+/// runs it and the two things that can be done to it -- the same `name  core`
+/// row the Android dialog shows. Buttons are the only items in a row that take
+/// input, so nothing can swallow their clicks: a full-width Selectable claimed
+/// the whole row, which is why Remove never fired.
+static void core_config_row(int i, int& edit_row, int& remove_row) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float buttons_width = ImGui::CalcTextSize("Edit").x + ImGui::CalcTextSize("Remove").x
+        + 4.0f * style.FramePadding.x + style.ItemSpacing.x;
+    const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
+    const char* tag = transport_tag(kCoreTransportBase + i);
+    // Measured before the row draws anything: what the name may take is the
+    // row less the buttons and the tag beside it, so the tag and the buttons
+    // sit in the same place on every row and a long name cannot reach them.
+    const float row_x = ImGui::GetCursorPosX();
+    const float tag_width = tag ? ImGui::CalcTextSize(tag).x + kCoreTagGap : 0.0f;
+    const float row_avail = std::max(ImGui::GetContentRegionAvail().x,
+        buttons_width + tag_width + style.ItemSpacing.x * 2.0f + ImGui::CalcTextSize("...").x);
+    const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
+    const float name_width = std::max(0.0f, row_avail - buttons_width
+        - 2.0f * style.ItemSpacing.x - tag_width);
+    ImGui::PushID(i);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(fit_core_name(label, name_width).c_str());
+    if (tag) {
+        ImGui::SameLine(0.0f, kCoreTagGap);
+        ImGui::TextColored(kCoreTagColor, "%s", tag);
     }
-    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(modal_size(760.0f, 720.0f), ImGuiCond_Always);
-    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
+    ImGui::SameLine(row_x + row_avail - buttons_width);
+    if (ImGui::SmallButton("Edit")) edit_row = i;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Remove")) remove_row = i;
+    ImGui::PopID();
+}
 
-    // The library first: one list of configs, because that is what all three
-    // cores run. A row is the name the user gave the config, the core that runs it and
-    // the two things that can be done to it -- the same `name  core` row the
-    // Android dialog shows. Buttons are the only items in a row that take input,
-    // so nothing can swallow their clicks: a full-width Selectable claimed the
-    // whole row, which is why Remove never fired.
-    ImGui::TextColored(ImVec4(0.38f, 0.65f, 0.98f, 1.0f), "Saved configs");
-    // The list takes whatever the listeners, the log level and Close leave.
-    // The 340 px reserve was counted in the old font's rows; the footer it
-    // leaves room for is now built from frames and text lines, so the reserve
-    // is expressed the same way. Too small a reserve and the log-level row
-    // below the list is pushed off the bottom of a NoResize window, where it
-    // cannot be scrolled to.
-    const float list_reserve = ImGui::GetFrameHeightWithSpacing() * 6.0f
-                             + ImGui::GetTextLineHeightWithSpacing() * 2.0f
-                             + ImGui::GetStyle().ItemSpacing.y * 4.0f
-                             + 40.0f;
+/// A subscription group's header: its name, what it holds, and the two things
+/// that can be done to it. The whole bar opens and closes the group; the
+/// buttons sit on top of it and take their own clicks. Returns whether the
+/// group is open.
+static bool core_group_header(int g, int& refresh_group, int& manage_group) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const AppState::CoreGroupEntry& group = g_app.core_groups[(size_t)g];
+    const int count = core_group_size(g);
+    const std::string name = group.name.empty() ? "(unnamed group)" : group.name;
+    char count_text[32];
+    snprintf(count_text, sizeof(count_text), "%d config%s", count, count == 1 ? "" : "s");
+    const std::string age = core_group_age(group.updated);
+    const std::string count_and_age = age.empty() ? std::string(count_text) : std::string(count_text) + ", " + age;
+    const float buttons_width = ImGui::CalcTextSize("Refresh").x + ImGui::CalcTextSize("Manage").x
+        + 4.0f * style.FramePadding.x + style.ItemSpacing.x;
+    const float row_x = ImGui::GetCursorPosX();
+    const float row_avail = std::max(ImGui::GetContentRegionAvail().x,
+        buttons_width + ImGui::GetFrameHeight() + style.ItemSpacing.x * 3.0f + ImGui::CalcTextSize("...").x);
+    ImGui::PushID("group");
+    ImGui::PushID(g);
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.13f, 0.18f, 0.27f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.17f, 0.24f, 0.36f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.21f, 0.31f, 0.45f, 1.0f));
+    ImGui::SetNextItemOpen(s_core_group_open[(size_t)g] != 0, ImGuiCond_Always);
+    const bool open = ImGui::TreeNodeEx("##header", ImGuiTreeNodeFlags_Framed
+        | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_AllowOverlap);
+    ImGui::PopStyleColor(3);
+    const bool bar_hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
+    s_core_group_open[(size_t)g] = open ? 1 : 0;
+
+    ImGui::SameLine();
+    const float name_room = std::max(0.0f, row_x + row_avail - buttons_width - style.ItemSpacing.x - ImGui::GetCursorPosX());
+    // Beside the name, as far as the row has room: how many configs and how
+    // long since they were fetched, else how many, else the name alone. The
+    // age gives way before the name is cut at all; the count only once the
+    // name would be left too short to tell the groups apart.
+    const float name_width = ImGui::CalcTextSize(name.c_str()).x;
+    const char* detail = nullptr;
+    if (name_room - ImGui::CalcTextSize(count_and_age.c_str()).x - kCoreTagGap >= name_width)
+        detail = count_and_age.c_str();
+    else if (name_room - ImGui::CalcTextSize(count_text).x - kCoreTagGap >= std::min(name_width, 160.0f))
+        detail = count_text;
+    ImGui::TextUnformatted(fit_core_name(name,
+        name_room - (detail ? ImGui::CalcTextSize(detail).x + kCoreTagGap : 0.0f)).c_str());
+    if (detail) {
+        ImGui::SameLine(0.0f, kCoreTagGap);
+        ImGui::TextDisabled("%s", detail);
+    }
+    bool button_hovered = false;
+    ImGui::SameLine(row_x + row_avail - buttons_width);
+    ImGui::BeginDisabled(s_core_import_in_progress);
+    const bool refresh = ImGui::SmallButton("Refresh");
+    if (refresh) refresh_group = g;
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) button_hovered = true;
+    // Put away by the press: it would lie over the rows being refreshed.
+    core_button_tooltip(refresh,
+        "Download the subscription again and replace this group's configs with what it lists now.");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Manage")) manage_group = g;
+    if (ImGui::IsItemHovered()) {
+        button_hovered = true;
+        UiText::Tooltip("Rename the group, change its URL, or remove it with its configs.");
+    }
+    // Everything about the group in one place, for the rows too narrow to say
+    // it. The buttons lie on the bar, so over them it is theirs to explain.
+    if (bar_hovered && !button_hovered)
+        UiText::Tooltip("%s\n%s, %s, %s", name.c_str(), AppState::core_backend_name(group.backend),
+                        count_text, core_group_updated(group.updated).c_str());
+    ImGui::PopID();
+    ImGui::PopID();
+    return open;
+}
+
+/// The saved configs: the ones added by hand first, then each subscription
+/// group under a header that opens it, refreshes it and manages it.
+static void render_core_library() {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    if (s_core_group_open.size() != g_app.core_groups.size())
+        s_core_group_open.resize(g_app.core_groups.size(), 0);
+    // What a subscription download is doing, or how the last one ended, is said
+    // under the list: up to three lines of it.
+    const float status_height = s_core_import_status[0] && !s_core_import_visible
+        ? std::min(ImGui::CalcTextSize(s_core_import_status, nullptr, false,
+                                       std::max(1.0f, ImGui::GetContentRegionAvail().x)).y,
+                   ImGui::GetTextLineHeight() * 3.0f)
+        : 0.0f;
+    // The list takes what the buttons under it, the status and Close leave.
+    const float list_reserve = ImGui::GetFrameHeightWithSpacing() * 2.0f
+        + (status_height > 0.0f ? status_height + style.ItemSpacing.y : 0.0f);
     const float list_height = (std::max)(146.0f, ImGui::GetContentRegionAvail().y - list_reserve);
     ImGui::BeginChild("##core_list", ImVec2(0, list_height), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_HorizontalScrollbar);
     int edit_row = -1;
     int remove_row = -1;
-    // The same on every row, so it is measured once.
-    const ImGuiStyle& style = ImGui::GetStyle();
-    const float buttons_width = ImGui::CalcTextSize("Edit").x + ImGui::CalcTextSize("Remove").x
-        + 4.0f * style.FramePadding.x + style.ItemSpacing.x;
-    for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
-        const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)i];
-        const char* tag = transport_tag(kCoreTransportBase + i);
-        // Measured before the row draws anything: what the name may take is the
-        // row less the buttons and the tag beside it, so the tag and the buttons
-        // sit in the same place on every row and a long name cannot reach them.
-        const float row_x = ImGui::GetCursorPosX();
-        const float tag_width = tag ? ImGui::CalcTextSize(tag).x + kCoreTagGap : 0.0f;
-        const float row_avail = std::max(ImGui::GetContentRegionAvail().x,
-            buttons_width + tag_width + style.ItemSpacing.x * 2.0f + ImGui::CalcTextSize("...").x);
-        const std::string label = entry.name.empty() ? "(unnamed)" : entry.name;
-        const float name_width = std::max(0.0f, row_avail - buttons_width
-            - 2.0f * style.ItemSpacing.x - tag_width);
-        ImGui::PushID(i);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(fit_core_name(label, name_width).c_str());
-        if (tag) {
-            ImGui::SameLine(0.0f, kCoreTagGap);
-            ImGui::TextColored(kCoreTagColor, "%s", tag);
+    int refresh_group = -1;
+    int manage_group = -1;
+    for (int i = 0; i < (int)g_app.core_configs.size(); ++i)
+        if (core_config_group(g_app.core_configs[(size_t)i]) < 0) core_config_row(i, edit_row, remove_row);
+    for (int g = 0; g < (int)g_app.core_groups.size(); ++g) {
+        const bool open = core_group_header(g, refresh_group, manage_group);
+        if (g == s_core_group_reveal) ImGui::SetScrollHereY(0.0f);
+        if (!open) continue;
+        const float indent = ImGui::GetFontSize() + style.FramePadding.x;
+        ImGui::Indent(indent);
+        bool any = false;
+        for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
+            if (g_app.core_configs[(size_t)i].group != g) continue;
+            core_config_row(i, edit_row, remove_row);
+            any = true;
         }
-        ImGui::SameLine(row_x + row_avail - buttons_width);
-        if (ImGui::SmallButton("Edit")) edit_row = i;
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Remove")) remove_row = i;
-        ImGui::PopID();
+        if (!any) ImGui::TextDisabled("No configs. Refresh to fetch them.");
+        ImGui::Unindent(indent);
     }
-    if (g_app.core_configs.empty()) ImGui::TextDisabled("No saved configs.");
+    s_core_group_reveal = -1;
+    if (g_app.core_configs.empty() && g_app.core_groups.empty()) {
+        ImGui::TextDisabled("No saved configs.");
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("Add one from a share link or a native config, or import a subscription URL to get a group of them.");
+        ImGui::PopTextWrapPos();
+    }
     ImGui::EndChild();
 
     // Nothing is stored until Save: a config the engine cannot parse is one
@@ -4456,12 +5200,16 @@ static void render_core_configs() {
         + ImGui::GetStyle().FramePadding.x * 2.0f;
     if (ImGui::GetContentRegionAvail().x >= import_button_width + ImGui::GetStyle().ItemSpacing.x + 44.0f)
         ImGui::SameLine();
-    if (ImGui::Button("+ Import URL")) open_core_subscription_import();
+    if (ImGui::Button("+ Import URL")) open_core_subscription_import(-1);
     if (ImGui::GetContentRegionAvail().x >= 44.0f) ImGui::SameLine();
     ImGui::TextDisabled("%d/%d", (int)g_app.core_configs.size(), kMaxCoreConfigs);
-    ImGui::Separator();
+    if (status_height > 0.0f) {
+        ImGui::BeginChild("##core_import_status", ImVec2(0, status_height));
+        UiText::TextColoredWrapped(core_import_status_color(), "%s", s_core_import_status);
+        ImGui::EndChild();
+    }
 
-    // After the loop, so it never reads a vector whose size changed under it.
+    // After the loops, so nothing reads a vector whose size changed under it.
     if (edit_row >= 0) open_core_editor(edit_row);
     if (remove_row >= 0) {
         g_app.core_configs.erase(g_app.core_configs.begin() + remove_row);
@@ -4470,34 +5218,72 @@ static void render_core_configs() {
         core_configs_forget(remove_row);
         g_app.refresh_core_listeners();
     }
-    // The editor and importer are modals of their own, opened from the buttons
-    // above and drawn inside this one so they stay scoped to the core settings.
+    if (manage_group >= 0) open_core_subscription_import(manage_group);
+    if (refresh_group >= 0) {
+        const AppState::CoreGroupEntry& group = g_app.core_groups[(size_t)refresh_group];
+        begin_core_subscription_fetch(refresh_group, group.url, {}, group.backend, kCoreFetchList);
+    }
+}
+
+static void render_core_configs() {
+    static const char* const kTitle = "Xray / sing-box / Mihomo settings";
+    bool opened = false;
+    if (s_core_configs_popup_open) {
+        ImGui::OpenPopup(kTitle);
+        s_core_configs_popup_open = false;
+        opened = true;
+    }
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(modal_size(760.0f, 720.0f), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
+
+    // Two pages, because one could not hold both: the listeners and the log
+    // level under the list left it a few rows and still pushed Close off the
+    // bottom of a window that does not resize. The library comes first: one
+    // list of configs, because that is what all three cores run.
+    const float close_height = ImGui::GetFrameHeightWithSpacing();
+    if (ImGui::BeginTabBar("##core_pages")) {
+        if (ImGui::BeginTabItem("Saved configs", nullptr, opened ? ImGuiTabItemFlags_SetSelected : 0)) {
+            render_core_library();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Listeners")) {
+            ImGui::BeginChild("##core_listeners", ImVec2(0, -close_height), ImGuiChildFlags_None,
+                              ImGuiWindowFlags_HorizontalScrollbar);
+            core_listener_block(0);
+            core_listener_block(1);
+            core_listener_block(2);
+            ImGui::Spacing();
+            ImGui::Separator();
+            // The dropdown has to be wide enough for its own longest option, or the
+            // arrow crowds the text at a larger font. 200 was sized for 13 px type;
+            // this measures the options instead, with 200 kept as the floor.
+            {
+                static const char* const kCoreLogs[] = { "Silent", "Error", "Warn", "Info", "Debug", "Trace" };
+                float log_combo_w = 200.0f;
+                for (const char* level : kCoreLogs) {
+                    const float w = ImGui::CalcTextSize(level).x;
+                    if (w > log_combo_w) log_combo_w = w;
+                }
+                log_combo_w += ImGui::GetStyle().FramePadding.x * 2.0f
+                             + ImGui::GetFrameHeight() * 0.9f;   // room for the arrow
+                ImGui::TextWrapped("Xray / sing-box / Mihomo log level");
+                ImGui::SetNextItemWidth(std::min(log_combo_w, std::max(1.0f, ImGui::GetContentRegionAvail().x)));
+                ImGui::Combo("##core_log_level", &g_app.core_log, kCoreLogs, 6);
+                if (ImGui::IsItemHovered())
+                    UiText::Tooltip("Applies on the next connection. Mihomo maps Trace to Debug.");
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    // The editor, the subscription dialog and its confirmation are modals of
+    // their own, opened from the buttons above and drawn inside this one so
+    // they stay scoped to the core settings.
     render_core_editor();
     render_core_subscription_import();
-    core_listener_block(0);
-    core_listener_block(1);
-    core_listener_block(2);
-    ImGui::Spacing();
-    ImGui::Separator();
-    // The dropdown has to be wide enough for its own longest option, or the
-    // arrow crowds the text at a larger font. 200 was sized for 13 px type;
-    // this measures the options instead, with 200 kept as the floor.
-    {
-        static const char* const kCoreLogs[] = { "Silent", "Error", "Warn", "Info", "Debug", "Trace" };
-        float log_combo_w = 200.0f;
-        for (const char* level : kCoreLogs) {
-            const float w = ImGui::CalcTextSize(level).x;
-            if (w > log_combo_w) log_combo_w = w;
-        }
-        log_combo_w += ImGui::GetStyle().FramePadding.x * 2.0f
-                     + ImGui::GetFrameHeight() * 0.9f;   // room for the arrow
-        ImGui::TextWrapped("Xray / sing-box / Mihomo log level");
-        ImGui::SetNextItemWidth(std::min(log_combo_w, std::max(1.0f, ImGui::GetContentRegionAvail().x)));
-        ImGui::Combo("##core_log_level", &g_app.core_log, kCoreLogs, 6);
-        if (ImGui::IsItemHovered())
-            UiText::Tooltip("Applies on the next connection. Mihomo maps Trace to Debug.");
-    }
-    ImGui::Spacing();
+    render_core_group_remove();
     if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
@@ -4525,7 +5311,25 @@ static void render_protocol_editor() {
     // A dangling saved selection remains unresolved until the user chooses a
     // replacement; opening this popup must not reset it to MASQUE.
     const int protocol_before = s_protocol_draft;
-    for (int i = 0; i < transport_choices; ++i) {
+    // Saved configs read the way the settings list shows them: the ones added
+    // by hand, then each subscription group under its name. Only the order on
+    // screen is different; a row's value is still its position in the list.
+    std::vector<int> rows;
+    rows.reserve((size_t)transport_choices);
+    for (int i = 0; i < transport_choices && i < kCoreTransportBase; ++i) rows.push_back(i);
+    for (int group = -1; group < (int)g_app.core_groups.size(); ++group)
+        for (int i = kCoreTransportBase; i < transport_choices; ++i)
+            if (core_config_group(g_app.core_configs[(size_t)(i - kCoreTransportBase)]) == group) rows.push_back(i);
+    int heading = -2;
+    for (int i : rows) {
+        if (i >= kCoreTransportBase) {
+            const int group = core_config_group(g_app.core_configs[(size_t)(i - kCoreTransportBase)]);
+            if (group != heading) {
+                heading = group;
+                ImGui::SeparatorText(group < 0 ? "Saved configs"
+                    : g_app.core_groups[(size_t)group].name.c_str());
+            }
+        }
         // The position is the row's identity here: two saved configs may well
         // share a name, and a radio button's own id is its label.
         ImGui::PushID(i);
@@ -4641,9 +5445,13 @@ static void render_firefox_add_account() {
     }
     s_firefox_captcha_embedded = true;
     render_firefox_captcha_content();
-    account_identity_fields(g_app.firefox_email, sizeof(g_app.firefox_email), g_app.firefox_password, sizeof(g_app.firefox_password));
-    ImGui::BeginDisabled(g_app.firefox_job != 0 || !g_app.firefox_email[0] || !g_app.firefox_password[0]);
-    if (ImGui::Button("Sign in")) {
+    const bool enter = account_identity_fields(g_app.firefox_email, sizeof(g_app.firefox_email),
+        g_app.firefox_password, sizeof(g_app.firefox_password));
+    const bool ready = g_app.firefox_job == 0 && g_app.firefox_email[0] && g_app.firefox_password[0];
+    ImGui::BeginDisabled(!ready);
+    const bool pressed = ImGui::Button("Sign in");
+    ImGui::EndDisabled();
+    if ((pressed || enter) && ready) {
         const std::string root = firefox_json_escape(data_dir().c_str());
         const std::string request = "{\"op\":\"login\",\"data_dir\":\"" + root
             + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email)
@@ -4653,15 +5461,15 @@ static void render_firefox_add_account() {
         s_firefox_unblock_required = false;
         firefox_submit(request, "Signing in to Firefox Accounts…");
     }
-    ImGui::EndDisabled();
-    firefox_request_status();
-    if (ImGui::Button("Close")) {
+    button_row_next("Close");
+    if (secondary_button("Close")) {
         if (!g_app.firefox_job && !s_firefox_unblock_required) {
             g_app.firefox_password[0] = 0;
             g_app.firefox_code[0] = 0;
         }
         ImGui::CloseCurrentPopup();
     }
+    firefox_request_status();
     ImGui::EndPopup();
 }
 
@@ -4691,12 +5499,18 @@ static void render_firefox_code_prompt() {
     } else {
         ImGui::TextWrapped("Mozilla blocked this direct sign-in as unusual and sent an unblock code to %s.", g_app.firefox_email);
     }
+    bool enter = false;
     if (!email_link) {
-        UiText::InputText(verification ? "Verification code" : "Unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        enter = UiText::InputTextWithHint("##firefox_code", verification ? "Verification code" : "Unblock code",
+            g_app.firefox_code, sizeof(g_app.firefox_code), ImGuiInputTextFlags_EnterReturnsTrue);
     }
     firefox_request_status();
-    ImGui::BeginDisabled(g_app.firefox_job != 0 || (!email_link && !g_app.firefox_code[0]));
-    if (verification && ImGui::Button(email_link ? "Continue after opening link" : "Verify")) {
+    // Enter in the field is the dialog's primary button.
+    const bool can_submit = g_app.firefox_job == 0 && (email_link || g_app.firefox_code[0]);
+    enter = enter && can_submit;
+    ImGui::BeginDisabled(!can_submit);
+    if (verification && (ImGui::Button(email_link ? "Continue after opening link" : "Verify") || enter)) {
         const char* operation = g_app.firefox_totp ? "verify_totp" : email_link ? "confirm_email_link" : "verify_email";
         std::string request = std::string("{\"op\":\"") + operation + "\",\"data_dir\":\"" + root
             + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"";
@@ -4704,7 +5518,7 @@ static void render_firefox_code_prompt() {
         request += "}";
         firefox_submit(request, "Checking Firefox account verification…");
     }
-    if (!verification && ImGui::Button("Sign in with code")) {
+    if (!verification && (ImGui::Button("Sign in with code") || enter)) {
         if (!g_app.firefox_password[0]) {
             set_firefox_status("Restart direct sign-in to enter the password again");
             s_firefox_unblock_required = false;
@@ -4720,16 +5534,16 @@ static void render_firefox_code_prompt() {
     ImGui::EndDisabled();
     ImGui::BeginDisabled(g_app.firefox_job != 0);
     if (verification && !g_app.firefox_totp && !email_link) {
-        ImGui::SameLine();
-        if (ImGui::Button("Resend email")) {
+        button_row_next("Resend email");
+        if (secondary_button("Resend email")) {
             firefox_submit("{\"op\":\"resend\",\"data_dir\":\"" + root
                 + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}",
                 "Resending verification code…");
         }
     }
     if (!verification) {
-        ImGui::SameLine();
-        if (ImGui::Button("Resend unblock code")) {
+        button_row_next("Resend unblock code");
+        if (secondary_button("Resend unblock code")) {
             firefox_submit("{\"op\":\"unblock\",\"data_dir\":\"" + root
                 + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email) + "\"}",
                 "Requesting another unblock code…");
@@ -4738,7 +5552,7 @@ static void render_firefox_code_prompt() {
     ImGui::EndDisabled();
     if (verification) {
         ImGui::BeginDisabled(g_app.firefox_job != 0);
-        if (ImGui::Button("Cancel verification")) {
+        if (secondary_button("Cancel verification")) {
             firefox_submit("{\"op\":\"cancel\",\"data_dir\":\"" + root
                 + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}",
                 "Cancelling sign-in verification…");
@@ -4746,7 +5560,7 @@ static void render_firefox_code_prompt() {
         ImGui::EndDisabled();
     } else {
         ImGui::BeginDisabled(g_app.firefox_job != 0);
-        if (ImGui::Button("Cancel sign-in")) {
+        if (secondary_button("Cancel sign-in")) {
             g_app.firefox_password[0] = 0;
             g_app.firefox_code[0] = 0;
             s_firefox_unblock_required = false;
@@ -4756,8 +5570,8 @@ static void render_firefox_code_prompt() {
         }
         ImGui::EndDisabled();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Later")) ImGui::CloseCurrentPopup();
+    button_row_next("Later");
+    if (secondary_button("Later")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
 
@@ -5184,7 +5998,7 @@ void render_ui() {
 #if defined(FCAE_IOS)
         const bool show_tun_control = false;
 #else
-        const bool show_tun_control = g_app.mode == 1 && (connected || tun_paused);
+        const bool show_tun_control = session_is_tun() && (connected || tun_paused);
 #endif
         const float pair_reserve = show_tun_control ? stop_btn_w + 6.0f : 0.0f;
         float btn_w = narrow ? (std::max)(action_btn_min, ImGui::GetContentRegionAvail().x - pair_reserve)
@@ -6128,16 +6942,11 @@ void render_ui() {
             ImGui::BeginChild("##home_scroll", ImVec2(0, 0), ImGuiChildFlags_None);
             ImGui::Spacing();
             {
-                char dl_rate[32], dl_total[32], ul_rate[32], ul_total[32], rtt_buf[24];
+                char dl_rate[32], dl_total[32], ul_rate[32], ul_total[32];
                 fmt_rate(dl_rate, sizeof(dl_rate), telem.rx_bytes_sec);
                 fmt_bytes(dl_total, sizeof(dl_total), telem.total_rx);
                 fmt_rate(ul_rate, sizeof(ul_rate), telem.tx_bytes_sec);
                 fmt_bytes(ul_total, sizeof(ul_total), telem.total_tx);
-                const bool rtt_live = (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0);
-                if (rtt_live)
-                    snprintf(rtt_buf, sizeof(rtt_buf), "%ums", telem.rtt_ms);
-                else
-                    snprintf(rtt_buf, sizeof(rtt_buf), "--");
 
                 char dl_total_line[48], ul_total_line[48];
                 snprintf(dl_total_line, sizeof(dl_total_line), "Total %s", dl_total);
@@ -6147,12 +6956,24 @@ void render_ui() {
                 const float avail_w = std::max(1.0f, ImGui::GetContentRegionAvail().x);
                 const float col_w = avail_w / 3.0f;
                 const float base_x = ImGui::GetCursorPosX();
-                const float base_y = ImGui::GetCursorPosY();
+                const float card_y = ImGui::GetCursorPosY();
                 const float line_h = ImGui::GetTextLineHeight();
                 const float row_gap = style.ItemSpacing.y;
                 const float info_btn_w = ImGui::CalcTextSize("INFO").x
                     + style.FramePadding.x * 2.0f + 8.0f;
                 const float info_btn_h = ImGui::GetFrameHeight();
+
+                // The numbers sit on a card of their own. Drawn straight onto
+                // the background picture they were only as readable as the part
+                // of it behind them, and the sky is the brightest part.
+                const float card_pad = std::floor(line_h * 0.5f);
+                const float text_h = line_h * 3.0f + row_gap * 2.0f;
+                const float card_h = std::max(text_h, info_btn_h) + card_pad * 2.0f;
+                const ImVec2 card_min = ImGui::GetCursorScreenPos();
+                ImGui::GetWindowDrawList()->AddRectFilled(card_min,
+                    ImVec2(card_min.x + avail_w, card_min.y + card_h),
+                    ImGui::GetColorU32(ImVec4(0.17f, 0.18f, 0.21f, 0.82f)), 10.0f);
+                const float base_y = card_y + std::floor((card_h - text_h) * 0.5f);
 
                 auto col_text_x = [&](int col, const char* text) -> float {
                     const float w = ImGui::CalcTextSize(text).x;
@@ -6165,9 +6986,6 @@ void render_ui() {
                 ImGui::SetCursorPos(ImVec2(col_text_x(0, "DOWNLOAD"), base_y));
                 ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "DOWNLOAD");
 
-                ImGui::SetCursorPos(ImVec2(col_text_x(1, "RTT"), base_y));
-                ImGui::TextDisabled("RTT");
-
                 ImGui::SetCursorPos(ImVec2(col_text_x(2, "UPLOAD"), base_y));
                 ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "UPLOAD");
 
@@ -6175,32 +6993,27 @@ void render_ui() {
                 ImGui::SetCursorPos(ImVec2(col_text_x(0, dl_rate), y2));
                 ImGui::TextUnformatted(dl_rate);
 
-                ImGui::SetCursorPos(ImVec2(col_text_x(1, rtt_buf), y2));
-                ImGui::TextColored(rtt_live ? ImVec4(0.45f, 0.92f, 0.55f, 1.0f)
-                                            : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
-                                   "%s", rtt_buf);
-
                 ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_rate), y2));
                 ImGui::TextUnformatted(ul_rate);
 
                 const float y3 = y2 + line_h + row_gap;
-                const float total_text_y = y3 + std::floor((info_btn_h - line_h) * 0.5f);
-
-                ImGui::SetCursorPos(ImVec2(col_text_x(0, dl_total_line), total_text_y));
+                ImGui::SetCursorPos(ImVec2(col_text_x(0, dl_total_line), y3));
                 ImGui::TextDisabled("%s", dl_total_line);
 
+                ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_total_line), y3));
+                ImGui::TextDisabled("%s", ul_total_line);
+
+                // Between the two columns, in the middle of the card.
                 const float info_x = std::floor(base_x + (avail_w - info_btn_w) * 0.5f);
-                ImGui::SetCursorPos(ImVec2(std::max(base_x, info_x), y3));
+                ImGui::SetCursorPos(ImVec2(std::max(base_x, info_x),
+                                           card_y + std::floor((card_h - info_btn_h) * 0.5f)));
                 if (ImGui::Button("INFO", ImVec2(info_btn_w, info_btn_h))) {
                     s_connection_info_popup_open = true;
                     ui_request_redraw();
                 }
                 if (ImGui::IsItemHovered()) UiText::Tooltip("Show connection details");
 
-                ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_total_line), total_text_y));
-                ImGui::TextDisabled("%s", ul_total_line);
-
-                ImGui::SetCursorPos(ImVec2(base_x, y3 + info_btn_h + row_gap));
+                ImGui::SetCursorPos(ImVec2(base_x, card_y + card_h + row_gap));
                 ImGui::Dummy(ImVec2(0.0f, 0.0f));
             }
 
@@ -6212,28 +7025,27 @@ void render_ui() {
                 open_protocol_editor();
 
             ImGui::Spacing();
+            // The mode is the next connection's. A session keeps the mode it
+            // started in, so there is nothing to protect by locking this while
+            // one runs: the choice is simply taken up the next time.
             const char* mode_items[] = {"Proxy", "TUN"};
             int mode_selection = g_app.mode == 1 ? 1 : 0;
-            const bool mode_locked = connected || busy || s_tun_paused;
             const float mode_avail = ImGui::GetContentRegionAvail().x;
             const float mode_label_width = ImGui::CalcTextSize("MODE").x;
             const float mode_gap = ImGui::GetStyle().ItemSpacing.x;
             const float combo_width = mode_avail - mode_label_width - mode_gap;
             ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("MODE");
-            if (combo_width >= 84.0f) {
-                ImGui::SameLine(0, mode_gap);
-                if (mode_locked) ImGui::BeginDisabled();
-                ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::Combo("##connection_mode", &mode_selection, mode_items, 2))
-                    g_app.mode = mode_selection;
-                if (mode_locked) ImGui::EndDisabled();
-            } else {
-                if (mode_locked) ImGui::BeginDisabled();
-                ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::Combo("##connection_mode", &mode_selection, mode_items, 2))
-                    g_app.mode = mode_selection;
-                if (mode_locked) ImGui::EndDisabled();
+            if (combo_width >= 84.0f) ImGui::SameLine(0, mode_gap);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Combo("##connection_mode", &mode_selection, mode_items, 2))
+                g_app.mode = mode_selection;
+            if (session_live() && (g_app.mode == 1) != session_is_tun()) {
+                // Not the disabled grey of a caption: it is drawn on the
+                // background picture, and it is news.
+                UiText::TextColoredWrapped(ImVec4(0.96f, 0.80f, 0.40f, 1.0f),
+                    "This connection stays in %s mode. %s applies the next time you connect.",
+                    mode_items[session_is_tun() ? 1 : 0], mode_items[g_app.mode == 1 ? 1 : 0]);
             }
 
             render_home_summary();

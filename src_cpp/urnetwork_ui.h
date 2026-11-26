@@ -6,7 +6,12 @@ static bool s_ur_add_close = false, s_ur_code_close = false, s_ur_signed_in = fa
 static bool s_ur_dirty = false, s_ur_save_failed = false;
 // Keep credentials only in the existing dialog buffers while a background read finishes.
 static bool s_ur_editing_account = false;
-static int s_ur_pending_signin = 0; // 1: password, 2: authorization code
+static int s_ur_pending_signin = 0; // 1: password, 2: authorization code, 3: code by email
+// The add dialog asks for an email first; the authorization-code form is shown
+// on demand, when the user picks that way in.
+static bool s_ur_use_code = false;
+// The verification prompt is on screen, so a resend answers there.
+static bool s_ur_code_visible = false;
 static uint64_t s_ur_job = 0;
 static std::string s_ur_op, s_ur_status, s_ur_region, s_ur_selected;
 struct UrUsage { std::string text, updated; bool refresh_failed = false; };
@@ -42,6 +47,27 @@ static std::vector<std::pair<std::string, std::string>> s_ur_regions, s_ur_accou
 static void ur_clear_secrets() {
     std::fill(std::begin(s_ur_password), std::end(s_ur_password), '\0');
     std::fill(std::begin(s_ur_code), std::end(s_ur_code), '\0');
+}
+static std::string ur_trimmed(const char* text) {
+    std::string value = text;
+    size_t begin = 0;
+    while (begin < value.size() && std::isspace((unsigned char)value[begin])) ++begin;
+    size_t end = value.size();
+    while (end > begin && std::isspace((unsigned char)value[end - 1])) --end;
+    return value.substr(begin, end - begin);
+}
+/// The code itself, from whatever was pasted: surrounding space is dropped, and
+/// a link that carries the code as `auth_code=` gives up just the code. A code
+/// works once and for minutes, so a paste that needs fixing is a wasted code.
+static std::string ur_auth_code(const char* pasted) {
+    std::string code = ur_trimmed(pasted);
+    const size_t key = code.find("auth_code=");
+    if (key != std::string::npos && code.find("://") != std::string::npos) {
+        code.erase(0, key + strlen("auth_code="));
+        const size_t end = code.find_first_of("&#");
+        if (end != std::string::npos) code.resize(end);
+    }
+    return code;
 }
 static void ur_submit(const char* op, const std::string& fields = {}) {
     if (s_ur_job) return;
@@ -106,6 +132,13 @@ static void ur_poll() {
         return;
     }
     if (s_ur_op == "save") { ur_set_status("Saved for the next connection."); return; }
+    if (s_ur_op == "verify-send") {
+        // The code is on its way; the verification prompt takes it from here.
+        s_ur_verify = true;
+        if (!s_ur_code_visible) { s_ur_add_close = true; s_ur_code_close = false; s_ur_code_prompt = true; }
+        ur_set_status("A code is on its way to your email.");
+        return;
+    }
     if (s_ur_op == "usage") {
         const std::string account = firefox_json_string(json, "usage_account");
         const std::string usage = firefox_json_string(json, "usage");
@@ -139,10 +172,14 @@ static void render_urnetwork_settings() {
         if (s_ur_pending_signin) {
             const int pending = s_ur_pending_signin;
             s_ur_pending_signin = 0;
+            const std::string email = ur_trimmed(s_ur_email);
+            snprintf(s_ur_email, sizeof(s_ur_email), "%s", email.c_str());
             if (pending == 1)
                 ur_submit("login", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\",\"password\":\"" + firefox_json_escape(s_ur_password) + "\"");
+            else if (pending == 3)
+                ur_submit("verify-send", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\"");
             else
-                ur_submit("code-login", ",\"code\":\"" + firefox_json_escape(s_ur_code) + "\"");
+                ur_submit("code-login", ",\"code\":\"" + firefox_json_escape(ur_auth_code(s_ur_code).c_str()) + "\"");
             ur_clear_secrets();
         } else if (s_ur_dirty && !s_ur_save_failed) {
             ur_submit("save", ",\"region\":\"" + firefox_json_escape(s_ur_region.c_str())
@@ -165,12 +202,13 @@ static void render_urnetwork_settings() {
     ImGui::SetNextWindowSize(modal_size(640, 560), ImGuiCond_Always);
     if (!ImGui::BeginPopupModal("URnetwork settings", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
         s_ur_visible = false;
+        s_ur_code_visible = false;
         return;
     }
     ur_request_status();
     ImGui::BeginChild("##ur_scroll", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8));
     if (account_region_combo("urnetwork", s_ur_region, s_ur_regions)) { s_ur_dirty = true; s_ur_save_failed = false; }
-    ImGui::TextUnformatted("Transport"); ImGui::SetNextItemWidth(-1);
+    ImGui::TextUnformatted("Transport"); ImGui::SetNextItemWidth(-FLT_MIN);
     const char* labels[] = {"Auto", "HTTP/1.1 (H1)", "HTTP/3 (H3)", "DNS", "DNS pump"};
     if (ImGui::Combo("##ur_transport", &s_ur_transport, labels, 5)) { s_ur_dirty = true; s_ur_save_failed = false; }
     ImGui::SeparatorText("Accounts");
@@ -207,6 +245,7 @@ static void render_urnetwork_settings() {
     if (ImGui::Button("Add new account")) {
         ur_clear_secrets(); s_ur_email[0] = 0;
         s_ur_verify = false; s_ur_add_close = s_ur_code_close = false; s_ur_add = true; s_ur_editing_account = true;
+        s_ur_use_code = false;
         ur_set_status("");
     }
     if (s_ur_verify) { ImGui::SameLine(); if (ImGui::Button("Continue verification")) s_ur_code_prompt = true; }
@@ -223,42 +262,73 @@ static void render_urnetwork_settings() {
     if (begin_account_dialog("Add URnetwork account", 520)) {
         if (s_ur_add_close) { s_ur_add_close = false; s_ur_editing_account = false; ImGui::CloseCurrentPopup(); }
         else {
+            const bool busy = s_ur_job && s_ur_op != "usage" && s_ur_op != "regions" && s_ur_op != "load";
             ImGui::BeginDisabled(s_ur_pending_signin != 0);
-            account_identity_fields(s_ur_email, sizeof(s_ur_email), s_ur_password, sizeof(s_ur_password));
-            ImGui::BeginDisabled((s_ur_job && s_ur_op != "usage" && s_ur_op != "regions" && s_ur_op != "load") || !s_ur_email[0] || !s_ur_password[0]);
-            if (ImGui::Button("Sign in")) {
-                s_ur_pending_signin = 1; ui_request_redraw();
+            if (!s_ur_use_code) {
+                // URnetwork accounts sign in with a one-time code sent by email;
+                // a password is only for the accounts that still have one.
+                const bool enter = account_identity_fields(s_ur_email, sizeof(s_ur_email),
+                    s_ur_password, sizeof(s_ur_password), "Password (optional)");
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextDisabled("Leave the password empty to get a one-time code by email.");
+                ImGui::PopTextWrapPos();
+                const bool ready = !busy && s_ur_email[0];
+                ImGui::BeginDisabled(!ready);
+                const bool pressed = ImGui::Button(s_ur_password[0] ? "Sign in###ur_submit" : "Email me a code###ur_submit");
+                ImGui::EndDisabled();
+                if ((pressed || enter) && ready) { s_ur_pending_signin = s_ur_password[0] ? 1 : 3; ui_request_redraw(); }
+            } else {
+                ImGui::TextWrapped("Create a code in your URnetwork account settings and paste it here. A code works once and expires within minutes.");
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                const bool enter = UiText::InputTextWithHint("##auth_code", "Authorization code", s_ur_code, sizeof(s_ur_code),
+                    ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+                const bool ready = !busy && !ur_auth_code(s_ur_code).empty();
+                ImGui::BeginDisabled(!ready);
+                const bool pressed = ImGui::Button("Sign in with code");
+                ImGui::EndDisabled();
+                if ((pressed || enter) && ready) { s_ur_pending_signin = 2; ui_request_redraw(); }
+                button_row_next("Get a code");
+                if (secondary_button("Get a code")) open_link(kLinkUrAuthCode);
             }
             ImGui::EndDisabled();
-            ImGui::Separator();
-            ImGui::SetNextItemWidth(-1);
-            UiText::InputTextWithHint("##auth_code", "Authorization code (optional alternative)", s_ur_code, sizeof(s_ur_code), ImGuiInputTextFlags_Password);
-            ImGui::BeginDisabled((s_ur_job && s_ur_op != "usage" && s_ur_op != "regions" && s_ur_op != "load") || !s_ur_code[0]);
-            if (ImGui::Button("Sign in with authorization code")) {
-                s_ur_pending_signin = 2; ui_request_redraw();
-            }
-            ImGui::EndDisabled();
-            ImGui::EndDisabled();
+            button_row_next("Cancel");
+            if (secondary_button("Cancel")) { s_ur_pending_signin = 0; s_ur_editing_account = false; ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
             ur_request_status();
-            if (ImGui::Button("Later")) { s_ur_pending_signin = 0; s_ur_editing_account = false; ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
+            ImGui::Separator();
+            if (ImGui::TextLink(s_ur_use_code ? "Use email instead" : "Use an authorization code instead")) {
+                s_ur_use_code = !s_ur_use_code;
+                ur_clear_secrets();
+            }
         }
         ImGui::EndPopup();
     }
     if (s_ur_code_prompt) { ImGui::OpenPopup("URnetwork account security code"); s_ur_code_prompt = false; }
+    s_ur_code_visible = false;
     if (begin_account_dialog("URnetwork account security code", 500)) {
         if (s_ur_code_close) { s_ur_code_close = false; ImGui::CloseCurrentPopup(); }
         else {
-            ImGui::TextWrapped("Enter the email verification code for %s.", s_ur_email);
-            ImGui::SetNextItemWidth(-1);
-            UiText::InputTextWithHint("##verification", "Verification code", s_ur_code, sizeof(s_ur_code));
-            ImGui::BeginDisabled(s_ur_job != 0 || !s_ur_code[0]);
-            if (ImGui::Button("Verify")) {
-                ur_submit("verify", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\",\"code\":\"" + firefox_json_escape(s_ur_code) + "\"");
+            s_ur_code_visible = true;
+            ImGui::TextWrapped("Enter the code URnetwork emailed to %s.", s_ur_email);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            const bool enter = UiText::InputTextWithHint("##verification", "Verification code", s_ur_code, sizeof(s_ur_code),
+                ImGuiInputTextFlags_EnterReturnsTrue);
+            const bool ready = s_ur_job == 0 && !ur_trimmed(s_ur_code).empty();
+            ImGui::BeginDisabled(!ready);
+            const bool pressed = ImGui::Button("Verify");
+            ImGui::EndDisabled();
+            if ((pressed || enter) && ready) {
+                ur_submit("verify", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\",\"code\":\"" + firefox_json_escape(ur_trimmed(s_ur_code).c_str()) + "\"");
                 ur_clear_secrets();
             }
+            // A code that never arrived should not send the user back to the start.
+            button_row_next("Resend code");
+            ImGui::BeginDisabled(s_ur_job != 0 || !s_ur_email[0]);
+            if (secondary_button("Resend code"))
+                ur_submit("verify-send", ",\"email\":\"" + firefox_json_escape(s_ur_email) + "\"");
             ImGui::EndDisabled();
+            button_row_next("Later");
+            if (secondary_button("Later")) { ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
             ur_request_status();
-            if (ImGui::Button("Later")) { ur_clear_secrets(); ImGui::CloseCurrentPopup(); }
         }
         ImGui::EndPopup();
     }

@@ -633,6 +633,18 @@ bool fcae_core_check_profile(const char *config, int32_t backend, char *out, uin
  * true and writes the response body to `out`; on failure, writes an error. */
 bool fcae_fetch_subscription(const char *url, char *out, uint32_t cap);
 
+/* fcae_fetch_subscription(), which also writes the name the server gives the
+ * feed (its `profile-title` response header, decoded) into `title`: "" when it
+ * sent none or the fetch failed. `title` may be NULL. */
+bool fcae_fetch_subscription_titled(const char *url, char *out, uint32_t cap,
+                                    char *title, uint32_t title_cap);
+
+/* The name a saved core config gives itself: a share link's #fragment (VMess:
+ * the `ps` of its payload) or the label a native config carries. Returns true
+ * and writes it into `out`, or returns false and writes "" when the config
+ * names nothing. Does not validate the config. */
+bool fcae_core_profile_name(const char *config, int32_t backend, char *out, uint32_t cap);
+
 /* What a saved core config lets a session serve, bitwise (FCAE_CORE_LISTENER_*),
  * and the ports it pins for those listeners. `socks_port`/`http_port` receive 0
  * when the config names no port; either pointer may be NULL. Returns 0 for a

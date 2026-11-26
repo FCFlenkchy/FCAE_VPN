@@ -1540,6 +1540,35 @@ pub unsafe extern "C" fn fcae_fetch_subscription(
     out: *mut c_char,
     cap: u32,
 ) -> bool {
+    fetch_subscription(url, out, cap, std::ptr::null_mut(), 0)
+}
+
+/// [`fcae_fetch_subscription`], which also writes the name the server gives the
+/// feed (its `profile-title` response header, decoded) into `title`: "" when it
+/// sent none or the fetch failed. The UI names an imported group after it.
+///
+/// # Safety
+/// As [`fcae_fetch_subscription`]; `title` must be NULL or point to `title_cap`
+/// writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_fetch_subscription_titled(
+    url: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+    title: *mut c_char,
+    title_cap: u32,
+) -> bool {
+    fetch_subscription(url, out, cap, title, title_cap)
+}
+
+/// The one fetch both exports share, so they cannot disagree about limits.
+unsafe fn fetch_subscription(
+    url: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+    title: *mut c_char,
+    title_cap: u32,
+) -> bool {
     let result = guard_value(
         "fcae_fetch_subscription",
         Err("subscription fetch failed".to_string()),
@@ -1553,18 +1582,29 @@ pub unsafe extern "C" fn fcae_fetch_subscription(
             let url = CStr::from_ptr(url)
                 .to_str()
                 .map_err(|_| "subscription URL is not valid UTF-8".to_string())?;
-            fcae_runtime::subscription::fetch_blocking(url)
+            fcae_runtime::subscription::fetch_blocking_titled(url)
         },
     );
+    let fits = matches!(result, Ok(ref subscription) if subscription.body.len() < cap as usize);
     if !out.is_null() && cap > 0 {
         let text = match &result {
-            Ok(body) if body.len() >= cap as usize => "subscription output buffer is too small",
-            Ok(body) => body,
-            Err(error) => error,
+            Ok(subscription) if fits => subscription.body.as_str(),
+            Ok(_) => "subscription output buffer is too small",
+            Err(error) => error.as_str(),
         };
         fill(std::slice::from_raw_parts_mut(out, cap as usize), text);
     }
-    matches!(result, Ok(ref body) if body.len() < cap as usize)
+    if !title.is_null() && title_cap > 0 {
+        let text = match &result {
+            Ok(subscription) if fits => subscription.title.as_str(),
+            _ => "",
+        };
+        fill(
+            std::slice::from_raw_parts_mut(title, title_cap as usize),
+            text,
+        );
+    }
+    fits
 }
 
 /// Preflights one saved core config without starting a runtime, so the config
@@ -1612,6 +1652,39 @@ pub unsafe extern "C" fn fcae_core_check_profile(
         fill(std::slice::from_raw_parts_mut(out, cap as usize), text);
     }
     checked.is_ok()
+}
+
+/// The name a saved core config gives itself: a share link's `#fragment`
+/// (VMess: the `ps` of its payload), or the label a native config carries.
+/// Returns true and writes it into `out`; returns false and writes "" when the
+/// config names nothing, so the editor can make a name up for an entry the user
+/// left unnamed. The config is not validated here.
+///
+/// # Safety
+/// `config` must be NULL or NUL-terminated; `out` must be NULL or point to `cap`
+/// writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_core_profile_name(
+    config: *const c_char,
+    backend: i32,
+    out: *mut c_char,
+    cap: u32,
+) -> bool {
+    let name = guard_value("fcae_core_profile_name", None, || {
+        let backend = FcaeBackend::try_from(backend as u32).ok()?;
+        if !config::is_core_backend(backend) || config.is_null() {
+            return None;
+        }
+        let text = CStr::from_ptr(config).to_str().ok()?;
+        fcae_runtime::saved_configs::suggested_name(backend, text)
+    });
+    if !out.is_null() && cap > 0 {
+        fill(
+            std::slice::from_raw_parts_mut(out, cap as usize),
+            name.as_deref().unwrap_or(""),
+        );
+    }
+    name.is_some()
 }
 
 /// What a saved core config lets a session serve, bitwise (`1` = SOCKS5,

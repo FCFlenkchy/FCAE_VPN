@@ -486,6 +486,31 @@ func ur_call(raw *C.char) (out *C.char) {
 		s.Email = r.Email
 		err := urSave(dir, &s)
 		return urResult(urSnapshot(&s), err)
+	case "verify-send":
+		// A one-time code by email: how an account without a password signs
+		// in, and the resend for a verification that is already pending. The
+		// code is redeemed by "verify".
+		email := strings.TrimSpace(r.Email)
+		if email == "" {
+			return urResult(nil, errors.New("enter the account email first"))
+		}
+		cb, ch := uc.NewBlockingApiCallback[*ur.AuthVerifySendResult](ctx)
+		api.AuthVerifySend(&ur.AuthVerifySendArgs{UserAuth: email, UseNumeric: true, ResultErrors: true}, cb)
+		select {
+		case v := <-ch:
+			if v.Error != nil || v.Result == nil {
+				return urResult(nil, errors.New("URnetwork could not send a verification code"))
+			}
+			if failure := v.Result.Error; failure != nil {
+				if failure.RetryAfterSeconds > 0 {
+					return urResult(nil, fmt.Errorf("URnetwork sent a code recently; request another in %d seconds", failure.RetryAfterSeconds))
+				}
+				return urResult(nil, errors.New("URnetwork could not send a verification code"))
+			}
+			return urResult(map[string]any{"sent": true}, nil)
+		case <-ctx.Done():
+			return urResult(nil, errors.New("URnetwork verification code request timed out"))
+		}
 	case "usage":
 		id := r.AccountID
 		if id == "" {

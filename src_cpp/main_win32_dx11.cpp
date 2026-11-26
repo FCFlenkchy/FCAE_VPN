@@ -305,7 +305,12 @@ static void show_tray_menu(HWND window) {
     // AppState's non-atomic settings are published by the initializer before
     // ui_runtime_ready() becomes true. The tray callback can arrive while the
     // hidden UI is still starting, so do not read mode before that acquire.
-    if (ready && g_app.mode == 1) {
+    // Start/Stop belongs to the session that is running, and that keeps the
+    // mode it started in: the mode setting is only the next connection's.
+    const bool session_live = have_state && telemetry.state != FCAE_STATE_DISCONNECTED && !error;
+    const bool session_tun = tun_paused
+        || (session_live ? telemetry.active_mode == FCAE_MODE_TUN : (ready && g_app.mode == 1));
+    if (session_tun) {
         const bool tun_control_ready = have_state &&
             (telemetry.state == FCAE_STATE_CONNECTED || tun_paused);
         AppendMenuW(menu, MF_STRING | (tun_control_ready ? MF_ENABLED : MF_GRAYED),

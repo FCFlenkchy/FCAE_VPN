@@ -225,6 +225,123 @@ pub fn check_config(backend: FcaeBackend, text: &str) -> Result<CoreProfile, Str
     Ok(profile)
 }
 
+/// The name a config gives itself, for an entry the user left unnamed.
+///
+/// A share link names itself in its `#fragment` (VMess: the `ps` field of its
+/// payload). A native config has no single convention, so only the labels the
+/// common exporters write are read: a top-level `remarks`, or the name of the
+/// document's only proxy (Mihomo `name`, sing-box `tag`). Everything else
+/// answers `None`, and the caller makes a name up.
+///
+/// This never validates: a link the selected core cannot run still says what it
+/// is called, and the editor reports why it cannot be saved separately.
+pub fn suggested_name(backend: FcaeBackend, text: &str) -> Option<String> {
+    let text = text.trim().trim_start_matches('\u{feff}').trim_start();
+    if text.is_empty() || text.len() > MAX_CONFIG {
+        return None;
+    }
+    let link = text.split_once("://").is_some_and(|(scheme, _)| {
+        !scheme.is_empty()
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+    });
+    // A share link is one line. The parsers read on past the end of it, so a
+    // pasted list would name its first link after everything that follows.
+    let text = match text.lines().next() {
+        Some(first) if link => first.trim_end(),
+        _ => text,
+    };
+    let name = match CoreProfile::parse_for_backend(text, backend) {
+        Ok(CoreProfile::Link(outbound)) => outbound.remark.filter(|name| !name.trim().is_empty()),
+        // A link one core turns into its own native proxy keeps its name in the
+        // fragment; the proxy it becomes is named by the bridge, not the user.
+        Ok(CoreProfile::Native(_)) if link => None,
+        Ok(CoreProfile::Native(value)) => native_name(&value, backend),
+        Err(_) => None,
+    };
+    let name = match name {
+        Some(name) => Some(name),
+        None if link => text
+            .split_once('#')
+            .map(|(_, fragment)| crate::proxy_cores::profile::percent_decode(fragment))
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| vmess_payload_name(text)),
+        None => None,
+    };
+    name.as_deref().and_then(clean_name)
+}
+
+/// The `ps` of a `vmess://<base64 JSON>` link: the one share-link shape that
+/// carries its name inside the payload rather than after it.
+fn vmess_payload_name(text: &str) -> Option<String> {
+    let (scheme, rest) = text.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("vmess") {
+        return None;
+    }
+    let payload = rest.split_once('#').map_or(rest, |(payload, _)| payload);
+    let decoded = crate::proxy_cores::profile::b64_decode(payload.trim())?;
+    let json: Value = serde_json::from_str(&decoded).ok()?;
+    json.get("ps")?.as_str().map(str::to_owned)
+}
+
+/// The label a native config carries for itself, when it carries exactly one.
+fn native_name(value: &Value, backend: FcaeBackend) -> Option<String> {
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+    if let Some(remarks) = text(value.get("remarks")) {
+        return Some(remarks);
+    }
+    // Names this module's own conversions give a proxy are not the user's.
+    let own = |name: &String| !name.starts_with("FCAE-");
+    match backend {
+        FcaeBackend::Mihomo => {
+            let proxies = value.get("proxies")?.as_array()?;
+            match proxies.as_slice() {
+                [only] => text(only.get("name")).filter(own),
+                _ => None,
+            }
+        }
+        FcaeBackend::SingBox => {
+            // Utility outbounds route traffic; they are not the server.
+            let utility = |outbound: &&Value| {
+                matches!(
+                    outbound.get("type").and_then(Value::as_str),
+                    Some("direct" | "block" | "dns" | "selector" | "urltest")
+                )
+            };
+            let outbounds = value.get("outbounds").and_then(Value::as_array);
+            let endpoints = value.get("endpoints").and_then(Value::as_array);
+            let mut servers = outbounds
+                .into_iter()
+                .flatten()
+                .filter(|outbound| !utility(outbound))
+                .chain(endpoints.into_iter().flatten());
+            let only = servers.next()?;
+            if servers.next().is_some() {
+                return None;
+            }
+            text(only.get("tag")).filter(own)
+        }
+        _ => None,
+    }
+}
+
+/// A name the library accepts: no control characters, no surrounding space,
+/// at most [`MAX_NAME`] bytes, cut on a character boundary.
+fn clean_name(name: &str) -> Option<String> {
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut end = name.len().min(MAX_NAME);
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let name = name[..end].trim_end();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 /// What a saved config lets a session serve, and the ports it pins for those
 /// listeners.
 ///
@@ -507,5 +624,127 @@ mod tests {
             "outbounds": [{"type": "direct"}]}"#);
         assert_eq!(http_only.kinds, fcae_abi::FCAE_CORE_LISTENER_HTTP);
         assert_eq!(listeners(FcaeBackend::SingBox, "not a link").kinds, 0);
+    }
+
+    #[test]
+    fn a_share_link_is_named_by_its_fragment() {
+        let link = "vless://2f8a4c8e-4d0a-4f8e-9c1b-6f7d0a1b2c3d@example.com:443?security=tls&type=tcp#%F0%9F%87%A9%F0%9F%87%AA%20Berlin%2001";
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, link).as_deref(),
+            Some("\u{1f1e9}\u{1f1ea} Berlin 01")
+        );
+        // The same link names itself whichever core is asked.
+        assert_eq!(
+            suggested_name(FcaeBackend::SingBox, link),
+            suggested_name(FcaeBackend::Xray, link)
+        );
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::Xray,
+                "trojan://secret@example.com:443?security=tls"
+            ),
+            None
+        );
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, "trojan://secret@example.com:443#%20%20"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_vmess_payload_is_named_by_its_ps_field() {
+        use base64::Engine as _;
+        let payload = serde_json::json!({
+            "v": "2", "ps": "Home VMess", "add": "example.com", "port": "443",
+            "id": "2f8a4c8e-4d0a-4f8e-9c1b-6f7d0a1b2c3d", "aid": "0", "net": "tcp",
+            "type": "none", "tls": "tls"
+        });
+        let link = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string())
+        );
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, &link).as_deref(),
+            Some("Home VMess")
+        );
+        // A fragment, where a client appends one, is the more specific name.
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, &format!("{link}#Renamed")).as_deref(),
+            Some("Renamed")
+        );
+    }
+
+    #[test]
+    fn a_link_is_named_by_its_own_line_only() {
+        let list = "trojan://secret@a.example.com:443?security=tls#Alpha\r\ntrojan://secret@b.example.com:443?security=tls#Beta\n";
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, list).as_deref(),
+            Some("Alpha")
+        );
+        // The second link's name is not the first one's.
+        let unnamed_first = "trojan://secret@a.example.com:443?security=tls\ntrojan://secret@b.example.com:443?security=tls#Beta";
+        assert_eq!(suggested_name(FcaeBackend::Xray, unnamed_first), None);
+    }
+
+    #[test]
+    fn an_unsupported_link_still_names_itself() {
+        // Unknown to every parser here: the fragment is all that can be read.
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, "futureproto://host:1#Edge%20node").as_deref(),
+            Some("Edge node")
+        );
+    }
+
+    #[test]
+    fn native_configs_use_the_labels_exporters_write() {
+        let xray = r#"{"remarks":"Office","outbounds":[{"protocol":"freedom"}]}"#;
+        assert_eq!(
+            suggested_name(FcaeBackend::Xray, xray).as_deref(),
+            Some("Office")
+        );
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::Xray,
+                r#"{"outbounds":[{"protocol":"freedom"}]}"#
+            ),
+            None
+        );
+        let mihomo = "proxies:\n  - {name: Tokyo, type: socks5, server: example.com, port: 1080}\n";
+        assert_eq!(
+            suggested_name(FcaeBackend::Mihomo, mihomo).as_deref(),
+            Some("Tokyo")
+        );
+        let two = "proxies:\n  - {name: A, type: socks5, server: a.example, port: 1080}\n  - {name: B, type: socks5, server: b.example, port: 1080}\n";
+        assert_eq!(suggested_name(FcaeBackend::Mihomo, two), None);
+        // A bare proxy without a name gets one from the bridge; that is not the user's.
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::Mihomo,
+                "{type: socks5, server: example.com, port: 1080}"
+            ),
+            None
+        );
+        let sing_box = r#"{"outbounds":[{"type":"direct","tag":"direct"},{"type":"socks","tag":"Paris","server":"example.com","server_port":1080}]}"#;
+        assert_eq!(
+            suggested_name(FcaeBackend::SingBox, sing_box).as_deref(),
+            Some("Paris")
+        );
+    }
+
+    #[test]
+    fn suggested_names_fit_the_library() {
+        let long = format!("trojan://secret@example.com:443#{}", "\u{00e9}".repeat(60));
+        let name = suggested_name(FcaeBackend::Xray, &long).unwrap();
+        assert!(name.len() <= MAX_NAME);
+        assert!(name.chars().all(|c| c == '\u{00e9}'));
+        assert_eq!(
+            suggested_name(
+                FcaeBackend::Xray,
+                "trojan://secret@example.com:443#a%0Ab%09c"
+            )
+            .as_deref(),
+            Some("a b c")
+        );
+        assert_eq!(suggested_name(FcaeBackend::Xray, ""), None);
     }
 }
