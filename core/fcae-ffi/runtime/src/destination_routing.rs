@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 pub const ENVELOPE: &str = "FCAE-DESTINATIONS/1\n";
+/// How many rules a compiled policy opens with before any destination is
+/// looked at: the two that keep DNS inside the tunnel.
+const DNS_RULES: usize = 2;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
     pub kind: String,
@@ -214,6 +217,14 @@ impl Policy {
         // Only DNS captured by this router is handled here. Resolve over the
         // selected exit before any destination policy; never block host DNS.
         let mut rules = vec![json!({"port":53,"action":"hijack-dns"})];
+        // DNS over TLS has nowhere else to go. The DNS firewall of every
+        // desktop platform drops ports 53 and 853 on any interface but the
+        // tunnel, so a policy that sends this flow DIRECT -- a rule that
+        // matches the resolver, or the default of Include mode -- sends it
+        // into that drop. The app-routing rules keep the port on the exit for
+        // the same reason.
+        rules.push(json!({"port":853,"action":"route","outbound":"fcae-exit"}));
+        debug_assert_eq!(rules.len(), DNS_RULES);
         if domains {
             rules.push(json!({"action":"sniff","sniffer":["tls","http","quic"],"timeout":"500ms"}));
         }
@@ -252,7 +263,7 @@ pub fn session_config(
     #[cfg(windows)]
     {
         value["outbounds"][1]["bind_interface"] =
-            json!(crate::windows_tun::physical_egress_interface()?);
+            json!(crate::windows_tun::physical_egress_interface(&cfg.tun.name)?);
     }
     #[cfg(target_os = "macos")]
     {
@@ -364,10 +375,16 @@ pub fn apply_singbox(
     };
     let compiled = session_config(policy, cfg, socks, 1, udp)?;
     // Keep the TUN platform/process guards, then evaluate destination policy.
-    let guards: Vec<Value> = value["route"]["rules"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let installed = || value["route"]["rules"].as_array().into_iter().flatten();
+    // The device's own range is refused before anything else, as it is
+    // without a destination policy. The engine only guards that range itself
+    // when it programs the routes, and here it does not: a flow addressed
+    // there would otherwise be handed to whichever outbound the policy names.
+    let refused: Vec<Value> = installed()
+        .filter(|rule| rule["action"] == "reject")
+        .cloned()
+        .collect();
+    let guards: Vec<Value> = installed()
         .filter(|rule| {
             rule.get("process_path").is_some() || rule.get("process_path_regex").is_some()
         })
@@ -378,9 +395,11 @@ pub fn apply_singbox(
         .cloned()
         .unwrap_or_default();
     // Captured DNS must precede process guards and destination matches.
-    let mut rules = vec![compiled_rules.remove(0)];
-    rules.extend(guards);
+    let matches = compiled_rules.split_off(DNS_RULES.min(compiled_rules.len()));
+    let mut rules = refused;
     rules.extend(compiled_rules);
+    rules.extend(guards);
+    rules.extend(matches);
     value["outbounds"] = compiled["outbounds"].clone();
     value["dns"] = compiled["dns"].clone();
     value["route"]["default_domain_resolver"] =
@@ -414,7 +433,11 @@ pub fn apply_mihomo(
         })
         .map(str::to_owned)
         .collect();
-    let mut rules = vec!["DST-PORT,53,fcae-tun-exit".to_owned()];
+    let mut rules = vec![
+        "DST-PORT,53,fcae-tun-exit".to_owned(),
+        // The DNS firewall drops this port anywhere but in the tunnel.
+        "DST-PORT,853,fcae-tun-exit".to_owned(),
+    ];
     rules.extend(guards);
     let mut push = |condition: String, exit: bool| {
         if exit && !udp {
@@ -490,4 +513,131 @@ pub fn apply_mihomo(
     push("MATCH".into(), policy.mode != 1);
     value["rules"] = json!(rules);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{SessionConfig, TunEngine};
+    use crate::desktop_flow_routing::FlowPolicy;
+
+    fn rule(kind: &str, target: &str, ports: &str) -> Rule {
+        Rule {
+            kind: kind.into(),
+            target: target.into(),
+            ports: ports.into(),
+            protocol: "both".into(),
+        }
+    }
+
+    fn policy(mode: u8) -> Policy {
+        Policy {
+            schema: 1,
+            mode,
+            rules: vec![
+                rule("domain", "example.com", ""),
+                rule("ip", "1.1.1.1", ""),
+            ],
+        }
+    }
+
+    fn socks() -> SocketAddr {
+        "127.0.0.1:1080".parse().unwrap()
+    }
+
+    #[test]
+    fn dns_ports_stay_on_the_exit_before_any_destination_is_matched() {
+        for mode in [1, 2] {
+            let config = policy(mode).config(socks(), 1081, true).unwrap();
+            let rules = config["route"]["rules"].as_array().unwrap();
+            assert_eq!(rules[0]["port"], 53);
+            assert_eq!(rules[0]["action"], "hijack-dns");
+            // A resolver the policy would send DIRECT -- 1.1.1.1 is a rule
+            // here, and Include mode's default is DIRECT -- keeps DNS over TLS
+            // in the tunnel, the only place the DNS firewall lets it live.
+            assert_eq!(rules[1]["port"], 853);
+            assert_eq!(rules[1]["outbound"], "fcae-exit");
+            let first_match = rules
+                .iter()
+                .position(|rule| rule.get("ip_cidr").is_some() || rule.get("domain").is_some())
+                .unwrap();
+            assert!(first_match >= DNS_RULES);
+        }
+    }
+
+    #[test]
+    fn a_native_policy_keeps_every_guard_of_the_device() {
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = TunEngine::SingBox;
+        for mode in [1, 2] {
+            cfg.destinations = Some(policy(mode));
+            assert!(uses_native(&cfg));
+            let none = FlowPolicy {
+                revision: 0,
+                provider: "captured_flow".into(),
+                mode: 0,
+                paths: Default::default(),
+            };
+            let mut value = none.config(&cfg, socks(), "fcae0", true).unwrap();
+            let before = value["route"]["rules"].as_array().unwrap().clone();
+            apply_singbox(&cfg, &mut value, socks(), true).unwrap();
+            let rules = value["route"]["rules"].as_array().unwrap();
+
+            // The device's own range is still refused first.
+            assert_eq!(rules[0], before[0]);
+            assert_eq!(rules[0]["action"], "reject");
+            assert_eq!(rules[0]["ip_cidr"][0], cfg.tun.ipv4);
+            // Then DNS, then the app's own process, then the policy.
+            assert_eq!(rules[1]["action"], "hijack-dns");
+            assert_eq!(rules[2]["port"], 853);
+            assert_eq!(rules[2]["outbound"], "fcae-exit");
+            let own = rules
+                .iter()
+                .position(|rule| {
+                    rule.get("process_path").is_some() || rule.get("process_path_regex").is_some()
+                })
+                .unwrap();
+            let first_match = rules
+                .iter()
+                .position(|rule| rule.get("domain").is_some())
+                .unwrap();
+            assert_eq!(own, 3);
+            assert_eq!(rules[own]["outbound"], "fcae-direct");
+            assert!(own < first_match);
+            assert_eq!(
+                value["route"]["final"],
+                if mode == 1 { "fcae-direct" } else { "fcae-exit" }
+            );
+            assert_eq!(
+                rules[first_match]["outbound"],
+                if mode == 1 { "fcae-exit" } else { "fcae-direct" }
+            );
+        }
+    }
+
+    #[test]
+    fn a_native_mihomo_policy_keeps_both_dns_ports_on_the_exit() {
+        let mut cfg = SessionConfig::default();
+        cfg.tun.engine = TunEngine::Mihomo;
+        cfg.destinations = Some(Policy {
+            schema: 1,
+            mode: 1,
+            rules: vec![rule("ip", "1.1.1.1", ""), rule("port", "", "443")],
+        });
+        assert!(uses_native(&cfg));
+        let mut value = json!({"rules": ["PROCESS-PATH-REGEX,^/opt/fcae$,fcae-tun-direct", "MATCH,fcae-tun-exit"]});
+        apply_mihomo(&cfg, &mut value, true).unwrap();
+        let rules: Vec<&str> = value["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(rules[0], "DST-PORT,53,fcae-tun-exit");
+        assert_eq!(rules[1], "DST-PORT,853,fcae-tun-exit");
+        assert_eq!(rules[2], "PROCESS-PATH-REGEX,^/opt/fcae$,fcae-tun-direct");
+        assert_eq!(rules[3], "IP-CIDR,1.1.1.1/32,fcae-tun-exit");
+        assert_eq!(rules[4], "DST-PORT,443,fcae-tun-exit");
+        assert_eq!(*rules.last().unwrap(), "MATCH,fcae-tun-direct");
+    }
 }

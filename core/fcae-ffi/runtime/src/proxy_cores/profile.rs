@@ -577,6 +577,8 @@ impl CoreProfile {
     /// Resolve verified core-specific URI formats using the selected backend.
     pub fn parse_for_backend(text: &str, backend: FcaeBackend) -> Result<Self, String> {
         let text = text.trim().trim_start_matches('\u{feff}').trim_start();
+        let text = unescaped_link(text);
+        let text = text.as_ref();
         if let Some(result) = share_links::native_link(text, backend) {
             return result.map(CoreProfile::Native);
         }
@@ -614,6 +616,8 @@ impl CoreProfile {
     /// Parse and validate `core.profile`.
     pub fn parse(text: &str) -> Result<Self, String> {
         let text = text.trim().trim_start_matches('\u{feff}').trim_start();
+        let text = unescaped_link(text);
+        let text = text.as_ref();
         if text.is_empty() {
             return Err("no profile: set a share link or a native config JSON".into());
         }
@@ -918,6 +922,7 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         "fp",
         "insecure",
         "allowInsecure",
+        "skip-cert-verify",
         "pbk",
         "sid",
         "spx",
@@ -934,15 +939,33 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         "ed",
         "eh",
     ];
-    if let Some(key) = object.keys().find(|key| !FIELDS.contains(&key.as_str())) {
+    // What a generator adds about the entry itself: what its own test called
+    // it, the channel it was published in. No client reads a setting there.
+    let label = |key: &str| {
+        key == "test_name" || share_links::label_parameter(&key.to_ascii_lowercase())
+    };
+    if let Some(key) = object
+        .keys()
+        .find(|key| !FIELDS.contains(&key.as_str()) && !label(key))
+    {
         return Err(format!(
             "unsupported VMess JSON field {key:?}; use a native config"
         ));
     }
     for (key, value) in object {
+        // `null` is how a generator that always writes the same set of fields
+        // leaves one out: the field is absent.
+        if value.is_null() || label(key) {
+            continue;
+        }
         let flag = matches!(
             key.as_str(),
-            "insecure" | "allowInsecure" | "tfo" | "uot" | "support-x25519mlkem768"
+            "insecure"
+                | "allowInsecure"
+                | "skip-cert-verify"
+                | "tfo"
+                | "uot"
+                | "support-x25519mlkem768"
         );
         let structured = matches!(key.as_str(), "fm" | "extra") && value.is_object();
         let alpn = key == "alpn"
@@ -1045,14 +1068,18 @@ fn parse_vmess(rest: &str) -> Result<Outbound, String> {
         };
         params.set(&key.to_ascii_lowercase(), value);
     }
+    // `skip-cert-verify` is the same flag under the name Clash gives it;
+    // generators that write both formats carry it over.
     params.set(
         "allowinsecure",
-        json.get("allowInsecure").and_then(|v| match v {
-            Value::Bool(flag) => Some(if *flag { "1" } else { "0" }.to_owned()),
-            _ => json_text(&json, "allowInsecure"),
-        }),
+        ["allowInsecure", "skip-cert-verify"]
+            .into_iter()
+            .find_map(|key| match json.get(key)? {
+                Value::Bool(flag) => Some(if *flag { "1" } else { "0" }.to_owned()),
+                _ => json_text(&json, key),
+            }),
     );
-    if let Some(fm) = json.get("fm") {
+    if let Some(fm) = json.get("fm").filter(|fm| !fm.is_null()) {
         params.set(
             "fm",
             Some(if fm.is_object() {
@@ -2134,6 +2161,30 @@ fn parse_finalmask(query: &Query) -> Result<Option<String>, String> {
         return Err("finalmask fm must be a JSON object".into());
     }
     Ok(Some(value.to_string()))
+}
+
+/// A share link as it was before a web page escaped it.
+///
+/// A feed copied out of HTML -- a Telegram post, a paste site -- arrives with
+/// every `&` of its links written as `&amp;`, which makes `security` a
+/// parameter called `amp;security`. No link spells a parameter that way, so the
+/// entity is undone, as many times as it was applied. Only a link is touched: a
+/// native config says what it says.
+pub(crate) fn unescaped_link(text: &str) -> std::borrow::Cow<'_, str> {
+    let link = text.split_once("://").is_some_and(|(scheme, _)| {
+        !scheme.is_empty()
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+    });
+    if !link || !text.contains("&amp;") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut plain = text.to_owned();
+    while plain.contains("&amp;") {
+        plain = plain.replace("&amp;", "&");
+    }
+    std::borrow::Cow::Owned(plain)
 }
 
 pub(crate) fn split_fragment(rest: &str) -> (&str, Option<String>) {

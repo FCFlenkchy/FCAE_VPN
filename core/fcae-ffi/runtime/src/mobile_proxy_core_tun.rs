@@ -201,7 +201,13 @@ fn configuration(
                 rules.push("NETWORK,udp,REJECT");
             }
             rules.push("MATCH,fcae-tun-exit");
-            json!({"fcae-mobile-fd":fd,"fcae-tun-addresses":addresses,"mode":"rule","log-level":cfg.tun.mihomo_tun_log_level(),"ipv6":cfg.tun.ipv6.is_some(),"find-process-mode":"off","profile":{"store-selected":false,"store-fake-ip":false},"dns":{"enable":false},"tun":{"enable":true,"device":"fcae-mobile","stack":"gvisor","dns-mode":"disabled","mtu":cfg.tun.mtu,"auto-route":false,"auto-redirect":false,"auto-detect-interface":false,"file-descriptor":fd,"recvmsgx":false,"sendmsgx":false},"proxies":[{"name":"fcae-tun-direct","type":"direct"},{"name":"fcae-tun-exit","type":"socks5","server":socks.ip().to_string(),"port":socks.port(),"udp":udp}],"rules":rules})
+            // Mihomo's TUN hijacks every query on port 53 unless `dns-hijack` says
+            // otherwise (`dns-mode` only governs the system resolver settings), and
+            // answers it from its own DNS module. That module is off here, so a
+            // hijacked query is dropped: no name resolves through this engine, and
+            // the rule that sends port 53 to the exit never sees a packet. The
+            // empty list leaves DNS to the rules.
+            json!({"fcae-mobile-fd":fd,"fcae-tun-addresses":addresses,"mode":"rule","log-level":cfg.tun.mihomo_tun_log_level(),"ipv6":cfg.tun.ipv6.is_some(),"find-process-mode":"off","profile":{"store-selected":false,"store-fake-ip":false},"dns":{"enable":false},"tun":{"enable":true,"device":"fcae-mobile","stack":"gvisor","dns-mode":"disabled","dns-hijack":[],"mtu":cfg.tun.mtu,"auto-route":false,"auto-redirect":false,"auto-detect-interface":false,"file-descriptor":fd,"recvmsgx":false,"sendmsgx":false},"proxies":[{"name":"fcae-tun-direct","type":"direct"},{"name":"fcae-tun-exit","type":"socks5","server":socks.ip().to_string(),"port":socks.port(),"udp":udp}],"rules":rules})
         }
         _ => {
             return Err(CoreError::InvalidConfig(

@@ -167,6 +167,101 @@ fn gateway(v6: bool) -> Option<(String, Option<String>)> {
     Some((after("via")?, after("dev")))
 }
 
+/// The device of the host's IPv4 default route: the uplink that a connection
+/// leaving around the tunnel is bound to.
+#[cfg(target_os = "linux")]
+fn uplink_device() -> Option<String> {
+    let out = tun_dns::run("ip", &["-4", "route", "show", "default"]).ok()?;
+    let mut fields = out.lines().next()?.split_whitespace();
+    fields.find(|field| *field == "dev")?;
+    let device = fields.next()?;
+    // It becomes part of a path under /proc/sys.
+    let plain = !device.is_empty()
+        && device.len() <= 15
+        && device != "."
+        && device != ".."
+        && device.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-.@".contains(&c));
+    plain.then(|| device.to_owned())
+}
+
+/// Whether the filter that applies to a device drops what the split default
+/// makes of a reply: the kernel uses the stricter of `all` and the device's
+/// own value, and 1 is strict mode.
+#[cfg(target_os = "linux")]
+fn reverse_path_is_strict(all: &str, device: &str) -> bool {
+    let value = |text: &str| text.trim().parse::<u8>().unwrap_or(0);
+    value(all).max(value(device)) == 1
+}
+
+/// Reverse-path filtering on the uplink, loosened while the device is up.
+///
+/// A connection that leaves around the tunnel -- an app excluded from the VPN,
+/// a DIRECT destination, the engine's own traffic -- is a socket bound to the
+/// uplink, and its replies arrive there. In strict mode the kernel accepts a
+/// packet only on the interface its own routing table would use to reach the
+/// sender. With the split default that is the device, for every sender on the
+/// internet: each reply is dropped as spoofed and the connection never
+/// completes, while everything inside the tunnel, and the carrier with its
+/// host route, keeps working. Loose mode asks only that the sender be routable
+/// at all. ufw turns strict mode on, and so does the RHEL family.
+///
+/// Only the uplink's own value changes, and only while the device is up. A
+/// session that dies without cleanup leaves it loose until the next boot: the
+/// default of most distributions, and still a filter.
+#[cfg(target_os = "linux")]
+struct ReversePathFilter {
+    path: PathBuf,
+    before: String,
+}
+
+#[cfg(target_os = "linux")]
+impl ReversePathFilter {
+    const LOOSE: &'static str = "2";
+
+    fn loosen() -> Option<Self> {
+        let device = uplink_device()?;
+        let conf = Path::new("/proc/sys/net/ipv4/conf");
+        let path = conf.join(&device).join("rp_filter");
+        let all = std::fs::read_to_string(conf.join("all/rp_filter")).ok()?;
+        let before = std::fs::read_to_string(&path).ok()?.trim().to_owned();
+        if !reverse_path_is_strict(&all, &before) {
+            return None;
+        }
+        match std::fs::write(&path, Self::LOOSE) {
+            Ok(()) => {
+                log::info!(
+                    "[tun] reverse-path filtering on `{device}` is loose while the tunnel is up: \
+                     strict mode drops the replies to connections that leave around the VPN"
+                );
+                Some(Self { path, before })
+            }
+            Err(error) => {
+                log::warn!(
+                    "[tun] `{device}` keeps strict reverse-path filtering ({error}): connections that leave \
+                     around the VPN, such as apps excluded from it, cannot complete. \
+                     Set net.ipv4.conf.{device}.rp_filter=2"
+                );
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ReversePathFilter {
+    fn drop(&mut self) {
+        // Someone else's later choice stays.
+        match std::fs::read_to_string(&self.path) {
+            Ok(current) if current.trim() == Self::LOOSE => {
+                if let Err(error) = std::fs::write(&self.path, &self.before) {
+                    log::warn!("[tun] cannot restore {}: {error}", self.path.display());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn gateway(v6: bool) -> Option<String> {
     let args: &[&str] = if v6 { &["-n", "get", "-inet6", "default"] } else { &["-n", "get", "default"] };
@@ -468,6 +563,8 @@ pub struct TunGuard {
     dns_firewall: Option<DnsFirewall>,
     _lock: StateLock,
     default_snapshot:[String;2],
+    #[cfg(target_os = "linux")]
+    reverse_path: Option<ReversePathFilter>,
 }
 
 impl TunGuard {
@@ -482,6 +579,8 @@ impl TunGuard {
             dns_firewall: None,
             _lock: StateLock::acquire(),
             default_snapshot:[format!("{:?}",gateway(false)),format!("{:?}",gateway(true))],
+            #[cfg(target_os = "linux")]
+            reverse_path: None,
         };
         guard.apply(cfg, peer_ip, assign_addresses)?;
         log::info!("[tun] routes/DNS applied to `{device}`");
@@ -559,6 +658,19 @@ impl TunGuard {
             self.bypass(peer);
         }
         self.split_default(false, true)?;
+        // Only an engine that sends some flows around the tunnel binds sockets
+        // to the uplink: the core engines always can (their own traffic at the
+        // least), any engine can once destinations are split.
+        #[cfg(target_os = "linux")]
+        if cfg.app_routing.is_some()
+            || cfg.destinations.is_some()
+            || matches!(
+                cfg.tun.engine,
+                crate::config::TunEngine::SingBox | crate::config::TunEngine::Mihomo | crate::config::TunEngine::MetaSingTun
+            )
+        {
+            self.reverse_path = ReversePathFilter::loosen();
+        }
         self.split_default(true, v6).map_err(|error| CoreError::Internal(
             format!("[tun] cannot establish IPv6 tunnel or reject routes; refusing to leave IPv6 outside the VPN: {error}")
         ))?;
@@ -760,6 +872,26 @@ impl Drop for TunGuard {
             let _ = std::fs::remove_file(state_path(ROUTES_FILE));
         }
         drop(self.dns_firewall.take());
+        #[cfg(target_os = "linux")]
+        drop(self.reverse_path.take());
         log::info!("[tun] routes/DNS restored for `{}`", self.device);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_stricter_of_the_two_reverse_path_values_applies() {
+        assert!(!reverse_path_is_strict("0\n", "0\n"));
+        // ufw sets `all`; the device keeps the kernel default.
+        assert!(reverse_path_is_strict("1\n", "0\n"));
+        assert!(reverse_path_is_strict("0\n", "1\n"));
+        assert!(reverse_path_is_strict("1", "1"));
+        // Loose anywhere is what applies: 2 is the larger value.
+        assert!(!reverse_path_is_strict("2\n", "1\n"));
+        assert!(!reverse_path_is_strict("1\n", "2\n"));
+        assert!(!reverse_path_is_strict("", "unreadable"));
     }
 }

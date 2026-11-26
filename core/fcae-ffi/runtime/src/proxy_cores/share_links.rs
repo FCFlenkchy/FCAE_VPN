@@ -27,6 +27,15 @@ pub(super) fn check_encoding(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a parameter says where a link was published instead of setting
+/// anything: feeds collected from Telegram channels stamp every link with
+/// `Telegram=@channel`, often twice. No core has an option under these names,
+/// so they are read past. Everything else a link names is still either
+/// understood or refused. `key` is in lower case.
+pub(crate) fn label_parameter(key: &str) -> bool {
+    key.starts_with('@') || key.contains("telegram") || matches!(key, "tg" | "channel")
+}
+
 pub(crate) fn pairs(params: &str, repeated: &[&str]) -> Result<Vec<(String, String)>, String> {
     let mut result: Vec<(String, String)> = Vec::new();
     for pair in params.split('&').filter(|s| !s.is_empty()) {
@@ -45,6 +54,9 @@ pub(crate) fn pairs(params: &str, repeated: &[&str]) -> Result<Vec<(String, Stri
             }
         }
         let key = percent_decode(key).to_ascii_lowercase();
+        if label_parameter(&key) {
+            continue;
+        }
         if !repeated.contains(&key.as_str()) && result.iter().any(|(k, _)| k == &key) {
             return Err(format!(
                 "duplicate share-link parameter {key:?}; use one value"
@@ -761,6 +773,17 @@ pub(super) fn check_query(scheme: &str, rest: &str) -> Result<(), String> {
                 "seed",
             ]),
             "xhttp" | "splithttp" => allowed.extend(["path", "host", "mode", "extra"]),
+            "tcp" | "raw" | "none" => {
+                allowed.push("headertype");
+                // `path` and `host` describe the HTTP header a plain TCP link
+                // asks for with headerType=http, and exporters write them out
+                // either way. With no header there is nothing for them to set.
+                if q.get("headertype")
+                    .map_or(true, |kind| kind.eq_ignore_ascii_case("none"))
+                {
+                    allowed.extend(["path", "host"]);
+                }
+            }
             _ => allowed.push("headertype"),
         }
         if scheme == "vless" {
@@ -806,6 +829,10 @@ pub(super) fn check_query(scheme: &str, rest: &str) -> Result<(), String> {
     );
     if reads_security {
         allowed.push("security");
+        // Exporters write the certificate flag whatever the security is. Under
+        // REALITY the server is verified by its public key, and with no TLS
+        // there is no certificate: either way the flag has nothing to switch.
+        allowed.extend(["insecure", "allowinsecure"]);
     }
     if reads_security && (tls_contract || !security.eq_ignore_ascii_case("none")) {
         if security.eq_ignore_ascii_case("reality") {

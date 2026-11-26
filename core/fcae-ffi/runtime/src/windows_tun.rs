@@ -363,6 +363,24 @@ struct PeerBypass {
     next_hop: IpAddr,
 }
 
+/// What [`TunGuard::keep_binding_effective`] changed and said, so that it is
+/// undone once and said once.
+#[derive(Default)]
+struct BindingState {
+    /// Interface LUID, family and name of each interface whose weak host send
+    /// was turned off.
+    weak_host_send_disabled: Vec<(u64, u16, String)>,
+    /// Interface LUID and family of each forwarding warning already logged.
+    forwarding_warned: Vec<(u64, u16)>,
+    /// When forwarding was last looked at. An interface that forwards without
+    /// being an uplink (a virtual switch) costs a read of the route table to
+    /// tell apart, so that happens every few seconds, not every tick.
+    forwarding_checked: Option<Instant>,
+    /// Interface LUID and family of each failure to turn weak host send off
+    /// already logged: the tick tries again, quietly.
+    weak_host_send_failed: Vec<(u64, u16)>,
+}
+
 pub struct TunGuard {
     peers: Vec<PeerBypass>,
     routes: Vec<MIB_IPFORWARD_ROW2>,
@@ -371,6 +389,10 @@ pub struct TunGuard {
     dns: Option<DnsGuard>,
     dns_firewall: Option<crate::windows_dns_firewall::DnsFirewall>,
     ipv6_unavailable: bool,
+    /// The device, and the families whose traffic it captures.
+    tunnel: u64,
+    captured: Vec<u16>,
+    binding: std::sync::Mutex<BindingState>,
 }
 
 impl std::fmt::Debug for TunGuard {
@@ -404,7 +426,8 @@ impl TunGuard {
         log::info!("[tun] resolving Windows TUN adapter");
         let (luid, index, guid) = adapter_with_preference(&cfg.tun.name,prefer_shared_guid)?;
         log::info!("[tun] adapter found; configuring bypass routes");
-        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, dns_firewall: None, ipv6_unavailable: false };
+        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, dns_firewall: None, ipv6_unavailable: false,
+            tunnel: unsafe { luid.Value }, captured: Vec::with_capacity(2), binding: Default::default() };
         guard.dns_firewall = Some(crate::windows_dns_firewall::DnsFirewall::install(index, unsafe { luid.Value })?);
         for (position, peer) in peers.into_iter().enumerate() {
             // The endpoint the engine was told to use must be kept off the
@@ -608,8 +631,15 @@ impl TunGuard {
                 return Err(CoreError::Internal("outer endpoint bypass verification failed".into()));
             }
         }
+        guard.captured.push(AF_INET);
+        if ipv6_available { guard.captured.push(AF_INET6); }
+        guard.keep_binding_effective();
         log::info!("[tun] configuring adapter DNS");
         guard.dns = Some(DnsGuard::apply_to(guid, &servers, ipv6_available)?);
+        // Answers cached from the resolvers this session replaces would stay
+        // in use until they expire: an address the network handed out for a
+        // name it blocks, or one that is only right from outside the tunnel.
+        flush_resolver_cache();
         log::info!(
             "[tun] Windows routing ready: interface {index}, outer endpoint(s) {:?}",
             guard.peers.iter().map(|bypass| bypass.peer).collect::<Vec<_>>()
@@ -618,6 +648,9 @@ impl TunGuard {
     }
 
     pub fn check_health(&self) -> Result<()> {
+        // Weak host send comes on without a notification -- Teredo turns it on
+        // for every interface when it qualifies -- so the tick looks again.
+        self.keep_binding_effective();
         if self.ipv6_unavailable && non_loopback_ipv6_present()? {
             return Err(CoreError::Internal("IPv6 became available outside the tunnel; reconnect required".into()));
         }
@@ -632,6 +665,82 @@ impl TunGuard {
             checked(unsafe { GetIpForwardEntry2(&mut current) }, "verify owned TUN route")?;
         }
         Ok(())
+    }
+
+    /// Keep interface binding working for connections that leave around the
+    /// device.
+    ///
+    /// A DIRECT connection -- an app excluded from the VPN, a destination
+    /// routed outside it, the engine's own traffic -- is a socket the engine
+    /// binds to the physical interface with IP_UNICAST_IF / IPV6_UNICAST_IF.
+    /// tcpip.sys ignores that binding for unicast destinations when the bound
+    /// interface has weak host send or forwarding enabled for the family. The
+    /// connection then follows the routing table into the device, reaches the
+    /// engine as a flow of its own process, is sent DIRECT again, and never
+    /// leaves: the app it was opened for just cannot connect.
+    ///
+    /// The engines take care of this themselves when they program the routes
+    /// (sing-tun's `enforceInterfaceOptions`). Here the routes are this
+    /// guard's, so the engines run with auto-route off and skip it, and the
+    /// same care is taken here: weak host send is turned off for the captured
+    /// families while the device is up, and turned on again when it goes.
+    /// Only the running configuration changes; nothing is stored for the next
+    /// boot. Forwarding cannot be turned off without breaking what turned it
+    /// on (Mobile Hotspot, Internet Connection Sharing), so it is reported.
+    fn keep_binding_effective(&self) {
+        let mut state = self.binding.lock().unwrap_or_else(|e| e.into_inner());
+        let look_at_forwarding = state.forwarding_checked.is_none_or(|at| at.elapsed() >= Duration::from_secs(10));
+        if look_at_forwarding { state.forwarding_checked = Some(Instant::now()); }
+        for &family in &self.captured {
+            let family_name = if family == AF_INET { "IPv4" } else { "IPv6" };
+            let mut table: *mut MIB_IPINTERFACE_TABLE = ptr::null_mut();
+            let code = unsafe { GetIpInterfaceTable(family, &mut table) };
+            if code != 0 || table.is_null() {
+                if code != ERROR_NOT_FOUND { log::debug!("[tun] cannot list {family_name} interfaces (Win32 {code})"); }
+                continue;
+            }
+            let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) }.to_vec();
+            unsafe { FreeMibTable(table.cast()); }
+            // Read only when an interface forwards.
+            let mut egress: Option<Vec<u64>> = None;
+            for row in rows {
+                let luid = unsafe { row.InterfaceLuid.Value };
+                if luid == self.tunnel { continue; }
+                if look_at_forwarding && row.ForwardingEnabled && !state.forwarding_warned.contains(&(luid, family))
+                    && egress.get_or_insert_with(|| default_route_interfaces(family, self.tunnel)).contains(&luid)
+                {
+                    state.forwarding_warned.push((luid, family));
+                    log::warn!(
+                        "[tun] {family_name} forwarding is enabled on \"{}\", which makes Windows ignore interface binding: \
+                         connections that leave around the VPN (apps excluded from it, DIRECT destinations) are routed back \
+                         into the tunnel and cannot connect. If Mobile Hotspot or Internet Connection Sharing enabled it, \
+                         share the FCAE adapter instead of that interface, or turn the sharing off",
+                        interface_alias(row.InterfaceLuid, row.InterfaceIndex)
+                    );
+                }
+                if !row.WeakHostSend { continue; }
+                // Nothing is ever bound to the loopback interface; it keeps
+                // whatever it has.
+                let mut interface = MIB_IF_ROW2::default();
+                interface.InterfaceLuid = row.InterfaceLuid;
+                if unsafe { GetIfEntry2(&mut interface) } == 0 && interface.Type == IF_TYPE_SOFTWARE_LOOPBACK { continue; }
+                let name = interface_alias(row.InterfaceLuid, row.InterfaceIndex);
+                match set_weak_host_send(row.InterfaceLuid, family, false) {
+                    Ok(()) => {
+                        if !state.weak_host_send_disabled.iter().any(|(l, f, _)| *l == luid && *f == family) {
+                            log::info!("[tun] {family_name} weak host send turned off on \"{name}\" while the tunnel is up: it makes Windows ignore interface binding");
+                            state.weak_host_send_disabled.push((luid, family, name));
+                        }
+                    }
+                    Err(error) => {
+                        if !state.weak_host_send_failed.contains(&(luid, family)) {
+                            state.weak_host_send_failed.push((luid, family));
+                            log::warn!("[tun] {family_name} weak host send stays on for \"{name}\", so connections bound to it can be routed back into the tunnel: {error}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn add_route(&mut self, row: MIB_IPFORWARD_ROW2, borrow_existing: bool) -> Result<()> {
@@ -738,12 +847,114 @@ impl Drop for TunGuard {
             if current.Family == AF_INET { current.SitePrefixLength = 0; }
             cleanup(unsafe { SetIpInterfaceEntry(&mut current) }, "restore TUN interface settings");
         }
+        let state = std::mem::take(&mut *self.binding.lock().unwrap_or_else(|e| e.into_inner()));
+        for (luid, family, name) in state.weak_host_send_disabled {
+            let luid = NET_LUID_LH { Value: luid };
+            // An interface that is gone took its setting with it.
+            let mut current = MIB_IPINTERFACE_ROW::default();
+            unsafe { InitializeIpInterfaceEntry(&mut current); }
+            current.InterfaceLuid = luid;
+            current.Family = family;
+            if unsafe { GetIpInterfaceEntry(&mut current) } != 0 { continue; }
+            if let Err(error) = set_weak_host_send(luid, family, true) {
+                log::warn!("[tun] cannot turn weak host send on again for \"{name}\": {error}");
+            }
+        }
         drop(self.dns_firewall.take());
+        // What was resolved through the tunnel is not the answer outside it.
+        flush_resolver_cache();
+    }
+}
+
+/// The interfaces other than `tunnel` that carry a default route for `family`:
+/// the ones a connection that leaves around the device can be bound to.
+fn default_route_interfaces(family: u16, tunnel: u64) -> Vec<u64> {
+    let mut interfaces = Vec::new();
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = ptr::null_mut();
+    if unsafe { GetIpForwardTable2(family, &mut table) } != 0 || table.is_null() {
+        return interfaces;
+    }
+    unsafe {
+        let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        for row in rows {
+            let luid = row.InterfaceLuid.Value;
+            if row.DestinationPrefix.PrefixLength == 0 && luid != tunnel && !interfaces.contains(&luid) {
+                interfaces.push(luid);
+            }
+        }
+        FreeMibTable(table.cast());
+    }
+    interfaces
+}
+
+/// The name Windows shows for an interface, or its index when it has none.
+fn interface_alias(luid: NET_LUID_LH, index: u32) -> String {
+    let mut alias = [0u16; 257];
+    if unsafe { ConvertInterfaceLuidToAlias(&luid, alias.as_mut_ptr(), alias.len()) } != 0 {
+        return index.to_string();
+    }
+    let len = alias.iter().position(|c| *c == 0).unwrap_or(alias.len());
+    if len == 0 { index.to_string() } else { String::from_utf16_lossy(&alias[..len]) }
+}
+
+/// Change weak host send and nothing else: an initialised row carries, for
+/// every other setting, the value SetIpInterfaceEntry leaves alone.
+fn set_weak_host_send(luid: NET_LUID_LH, family: u16, enabled: bool) -> Result<()> {
+    let mut row = MIB_IPINTERFACE_ROW::default();
+    unsafe { InitializeIpInterfaceEntry(&mut row); }
+    row.InterfaceLuid = luid;
+    row.Family = family;
+    row.WeakHostSend = enabled;
+    checked(unsafe { SetIpInterfaceEntry(&mut row) }, "set weak host send")
+}
+
+/// `ipconfig /flushdns`. The export has no header, so it is looked up; a
+/// system without it keeps its cache, which only costs the wait for expiry.
+fn flush_resolver_cache() {
+    type Flush = unsafe extern "system" fn() -> i32;
+    static FLUSH: OnceLock<Option<(Flush, Library)>> = OnceLock::new();
+    let flush = FLUSH.get_or_init(|| {
+        let library = Library::system("dnsapi.dll").ok()?;
+        let flush: Flush = unsafe { library.symbol(c"DnsFlushResolverCache") }.ok()?;
+        Some((flush, library))
+    });
+    match flush {
+        Some((flush, _)) => {
+            if unsafe { flush() } == 0 { log::debug!("[tun] the DNS resolver cache was not flushed"); }
+        }
+        None => log::debug!("[tun] DnsFlushResolverCache is unavailable; the DNS resolver cache keeps its entries"),
     }
 }
 
 
-pub fn physical_egress_interface() -> Result<String> {
+/// The interface a connection that leaves around the tunnel is bound to: the
+/// one Windows uses to reach the internet right now.
+///
+/// It is read before this session's capture routes exist, but the previous
+/// device's may still be there: a device is torn down on a worker of its own,
+/// and a start that follows a stop directly (a carrier that came back on a new
+/// listener) can ask while that worker is still removing routes. The answer is
+/// then the tunnel adapter itself, and every DIRECT connection of the new
+/// session would be bound to the device it is meant to leave. An answer that
+/// names the tunnel is therefore never handed out: its routes get a moment to
+/// go, and a tunnel that still wins after that fails the start.
+pub fn physical_egress_interface(tunnel: &str) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let alias = best_egress_alias()?;
+        if !alias.eq_ignore_ascii_case(tunnel) {
+            return Ok(alias);
+        }
+        if Instant::now() >= deadline {
+            return Err(CoreError::Internal(format!(
+                "the route to the internet still leads into \"{tunnel}\"; disconnect the stale tunnel before reconnecting"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn best_egress_alias() -> Result<String> {
     let mut index: u32 = 0;
     let err = unsafe {
         windows_sys::Win32::NetworkManagement::IpHelper::GetBestInterface(0x0101_0101, &mut index)

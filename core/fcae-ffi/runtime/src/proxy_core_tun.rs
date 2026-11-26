@@ -446,7 +446,13 @@ fn configuration(
                 rules = guarded;
             }
 
-            let mut value = json!({"mode":"rule","log-level":cfg.tun.mihomo_tun_log_level(),"ipv6":cfg.tun.ipv6.is_some(),"find-process-mode":"always","profile":{"store-selected":false,"store-fake-ip":false},"dns":{"enable":false},"tun":{"enable":true,"device":device,"stack":"gvisor","dns-mode":"disabled","mtu":cfg.tun.mtu,"auto-route":false,"auto-redirect":false,"auto-detect-interface":false},"fcae-tun-addresses":addresses,"proxies":[{"name":"fcae-tun-direct","type":"direct"},{"name":"fcae-tun-exit","type":"socks5","server":socks.ip().to_string(),"port":socks.port(),"udp":udp}],"rules":rules});
+            // Mihomo's TUN hijacks every query on port 53 unless `dns-hijack` says
+            // otherwise (`dns-mode` only governs the system resolver settings), and
+            // answers it from its own DNS module. That module is off here, so a
+            // hijacked query is dropped: no name resolves through this engine, and
+            // the rule that sends port 53 to the exit never sees a packet. The
+            // empty list leaves DNS to the rules.
+            let mut value = json!({"mode":"rule","log-level":cfg.tun.mihomo_tun_log_level(),"ipv6":cfg.tun.ipv6.is_some(),"find-process-mode":"always","profile":{"store-selected":false,"store-fake-ip":false},"dns":{"enable":false},"tun":{"enable":true,"device":device,"stack":"gvisor","dns-mode":"disabled","dns-hijack":[],"mtu":cfg.tun.mtu,"auto-route":false,"auto-redirect":false,"auto-detect-interface":false},"fcae-tun-addresses":addresses,"proxies":[{"name":"fcae-tun-direct","type":"direct"},{"name":"fcae-tun-exit","type":"socks5","server":socks.ip().to_string(),"port":socks.port(),"udp":udp}],"rules":rules});
             #[cfg(target_os = "macos")]
             {
                 let output = crate::tun_dns::run("route", &["-n", "get", "default"])?;
@@ -532,6 +538,9 @@ mod tests {
 
         assert!(dns_rule < app_rule);
         assert!(encrypted_dns_rule < app_rule);
+        // The port-53 rule only sees queries Mihomo's TUN does not hijack.
+        assert_eq!(value["tun"]["dns-hijack"], serde_json::json!([]));
+        assert_eq!(value["dns"]["enable"], false);
     }
 
     #[test]

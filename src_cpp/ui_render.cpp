@@ -5685,10 +5685,12 @@ bool ui_tray_action_pending() {
 
 /// What the Home page's panels are drawn on. Straight on the background
 /// picture, text is only as readable as the part of the picture behind it, and
-/// the sky is the brightest part.
+/// the sky is the brightest part. The panel has no colour of its own: it is
+/// the window's colour without a picture (`ImGuiCol_WindowBg` in ui_style.h),
+/// 30% see-through. With "Background: None" it is that background.
 static void home_panel_background(const ImVec2& min, const ImVec2& max) {
     ImGui::GetWindowDrawList()->AddRectFilled(min, max,
-        ImGui::GetColorU32(ImVec4(0.17f, 0.18f, 0.21f, 0.82f)), 10.0f);
+        ImGui::GetColorU32(ImVec4(0.08f, 0.08f, 0.12f, 0.70f)), 10.0f);
 }
 /// The room a Home panel leaves around what it holds.
 static float home_panel_padding() {

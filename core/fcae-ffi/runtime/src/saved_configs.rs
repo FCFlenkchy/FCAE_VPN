@@ -243,6 +243,8 @@ pub fn suggested_name(backend: FcaeBackend, text: &str) -> Option<String> {
     if text.is_empty() || text.len() > MAX_CONFIG {
         return None;
     }
+    let text = crate::proxy_cores::profile::unescaped_link(text);
+    let text = text.as_ref();
     let link = text.split_once("://").is_some_and(|(scheme, _)| {
         !scheme.is_empty()
             && scheme
@@ -448,10 +450,48 @@ fn native_name(value: &Value, backend: FcaeBackend) -> Option<String> {
     }
 }
 
+/// `name` with every flag spelled as the country code it stands for.
+///
+/// A flag is a pair of regional indicator letters, and the app's font has a
+/// glyph for neither: a feed that names its servers by flag alone would list
+/// them all as the same two placeholders. The pair is the country's ISO code
+/// letter for letter, so the code is what the name keeps, as a word of its own.
+fn spell_flags(name: &str) -> String {
+    const A: u32 = 0x1F1E6; // REGIONAL INDICATOR SYMBOL LETTER A
+    let letter = |c: char| {
+        let code = c as u32;
+        (A..A + 26)
+            .contains(&code)
+            .then(|| char::from(b'A' + (code - A) as u8))
+    };
+    let mut spelled = String::with_capacity(name.len());
+    let mut chars = name.chars().peekable();
+    while let Some(c) = chars.next() {
+        let pair = letter(c).zip(chars.peek().copied().and_then(letter));
+        let Some((first, second)) = pair else {
+            spelled.push(c);
+            continue;
+        };
+        chars.next();
+        if spelled.chars().next_back().is_some_and(char::is_alphanumeric) {
+            spelled.push(' ');
+        }
+        spelled.push(first);
+        spelled.push(second);
+        if chars
+            .peek()
+            .is_some_and(|next| next.is_alphanumeric() || letter(*next).is_some())
+        {
+            spelled.push(' ');
+        }
+    }
+    spelled
+}
+
 /// A name the library accepts: no control characters, no surrounding space,
 /// at most [`MAX_NAME`] bytes, cut on a character boundary.
 fn clean_name(name: &str) -> Option<String> {
-    let name: String = name
+    let name: String = spell_flags(name)
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
@@ -751,9 +791,10 @@ mod tests {
     #[test]
     fn a_share_link_is_named_by_its_fragment() {
         let link = "vless://2f8a4c8e-4d0a-4f8e-9c1b-6f7d0a1b2c3d@example.com:443?security=tls&type=tcp#%F0%9F%87%A9%F0%9F%87%AA%20Berlin%2001";
+        // The flag is spelled as the country code it stands for.
         assert_eq!(
             suggested_name(FcaeBackend::Xray, link).as_deref(),
-            Some("\u{1f1e9}\u{1f1ea} Berlin 01")
+            Some("DE Berlin 01")
         );
         // The same link names itself whichever core is asked.
         assert_eq!(
@@ -874,7 +915,7 @@ mod tests {
         ));
         assert_eq!(
             suggested_name(FcaeBackend::Mihomo, &named).as_deref(),
-            Some("Tokyo \u{1f1ef}\u{1f1f5} 02")
+            Some("Tokyo JP 02")
         );
         // It says the same to a core that cannot run it.
         assert_eq!(
@@ -1029,6 +1070,133 @@ mod tests {
         // Two servers are not one name.
         let two = r#"{"outbounds":[{"protocol":"socks","tag":"Berlin"},{"protocol":"socks","tag":"Paris"}]}"#;
         assert_eq!(suggested_name(FcaeBackend::Xray, two), None);
+    }
+
+    /// A feed collected from Telegram channels, as it arrives: links escaped
+    /// by the page they were copied from and stamped with the channel's name,
+    /// servers named by flag alone, and VMess entries from a generator that
+    /// writes `null` for what it leaves out and adds fields of its own.
+    #[test]
+    fn a_channel_feed_is_read_whole() {
+        use crate::proxy_cores::profile::Security;
+        use base64::Engine as _;
+        let uuid = "2f6b1c3e-8a4d-4f0b-9c57-0d1e2a3b4c5d";
+        let key = "A".repeat(43);
+        let vmess = |json: String| {
+            format!(
+                "vmess://{}",
+                base64::engine::general_purpose::STANDARD.encode(json)
+            )
+        };
+        let feed = [
+            (
+                format!(
+                    "vless://{uuid}@203.0.113.7:23576?security=reality&amp;encryption=none\
+                     &amp;pbk={key}&amp;headerType=none&amp;fp=chrome&amp;type=tcp\
+                     &amp;flow=xtls-rprx-vision&amp;sni=example.com&amp;sid=01#🇺🇸"
+                ),
+                "US",
+            ),
+            // The channel's stamp, twice, and a path on a transport with none.
+            (
+                format!(
+                    "vless://{uuid}@203.0.113.8:23576?Telegram=@channel&amp;Telegram=@channel\
+                     &amp;security=reality&amp;pbk={key}&amp;fp=chrome&amp;type=tcp\
+                     &amp;flow=xtls-rprx-vision&amp;sni=example.com&amp;sid=01&amp;path=/#🇳🇱"
+                ),
+                "NL",
+            ),
+            // A certificate flag where no certificate is checked.
+            (
+                format!(
+                    "vless://{uuid}@203.0.113.9:23576?flow=xtls-rprx-vision&security=reality\
+                     &allowInsecure=0&encryption=none&type=tcp&sni=example.com&sid=01\
+                     &fp=chrome&pbk={key}&headerType=none#🇳🇱"
+                ),
+                "NL",
+            ),
+            (
+                "ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M@203.0.113.10:443#@channel".to_owned(),
+                "@channel",
+            ),
+            (
+                vmess(format!(
+                    r#"{{"add":"203.0.113.11","aid":"0","alpn":null,"fp":null,"host":"","id":"{uuid}","net":"tcp","path":"/","port":18000,"ps":"\ud83c\udde8\ud83c\udde6 Join+Telegram:@channel \ud83c\udde8\ud83c\udde6","scy":null,"skip-cert-verify":true,"sni":null,"tls":"","type":null,"v":null}}"#
+                )),
+                "CA Join+Telegram:@channel CA",
+            ),
+            (
+                vmess(format!(
+                    r#"{{"add":"203.0.113.12","aid":"0","host":"","id":"{uuid}","net":"tcp","path":"","port":"18000","ps":"\ud83c\uddfa\ud83c\uddf8 Join","scy":"auto","sni":"","test_name":"2","tls":"","type":"none","v":"2","skip-cert-verify":true}}"#
+                )),
+                "US Join",
+            ),
+        ];
+        for (link, name) in &feed {
+            for backend in [FcaeBackend::Xray, FcaeBackend::SingBox, FcaeBackend::Mihomo] {
+                if let Err(reason) = check_config(backend, link) {
+                    panic!("{backend:?} refused {link}: {reason}");
+                }
+                assert_eq!(
+                    suggested_name(backend, link).as_deref(),
+                    Some(*name),
+                    "{link}"
+                );
+            }
+        }
+        // The escaped link is the link it was before the page escaped it.
+        let Ok(CoreProfile::Link(outbound)) = check_config(FcaeBackend::Xray, &feed[0].0) else {
+            panic!("a share link is one outbound");
+        };
+        assert_eq!(
+            (outbound.server.as_str(), outbound.port),
+            ("203.0.113.7", 23576)
+        );
+        assert!(matches!(
+            &outbound.security,
+            Security::Reality { sni, short_id, public_key, .. }
+                if sni == "example.com" && short_id == "01" && *public_key == key
+        ));
+        // Where a certificate is checked, the Clash spelling of the flag still
+        // switches the check off.
+        let tls = vmess(format!(
+            r#"{{"add":"203.0.113.13","id":"{uuid}","net":"tcp","port":443,"ps":"x","tls":"tls","sni":"example.com","skip-cert-verify":true}}"#
+        ));
+        let Ok(CoreProfile::Link(outbound)) =
+            CoreProfile::parse_for_backend(&tls, FcaeBackend::SingBox)
+        else {
+            panic!("a share link is one outbound");
+        };
+        assert!(matches!(
+            outbound.security,
+            Security::Tls {
+                allow_insecure: true,
+                ..
+            }
+        ));
+        // Reading past a label is not reading past a setting.
+        let reality = format!("security=reality&pbk={key}&sni=example.com");
+        for refused in [
+            format!("vless://{uuid}@203.0.113.7:443?{reality}&type=tcp&headerType=http&path=/x#a"),
+            format!("vless://{uuid}@203.0.113.7:443?{reality}&type=tcp&obfs=1#a"),
+            format!("vless://{uuid}@203.0.113.7:443?{reality}&allowInsecure=maybe#a"),
+        ] {
+            assert!(
+                check_config(FcaeBackend::Xray, &refused).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn flags_are_spelled_as_country_codes() {
+        assert_eq!(clean_name("🇺🇸").as_deref(), Some("US"));
+        assert_eq!(clean_name("🇩🇪Berlin 2").as_deref(), Some("DE Berlin 2"));
+        assert_eq!(clean_name("Fast🇯🇵").as_deref(), Some("Fast JP"));
+        assert_eq!(clean_name("🇺🇸🇩🇪 relay").as_deref(), Some("US DE relay"));
+        assert_eq!(clean_name("[🇬🇧] London").as_deref(), Some("[GB] London"));
+        // One indicator on its own is not a flag.
+        assert_eq!(clean_name("🇺 x").as_deref(), Some("🇺 x"));
     }
 
     #[test]

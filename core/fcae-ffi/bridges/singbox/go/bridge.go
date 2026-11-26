@@ -517,7 +517,20 @@ func sb_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 			parent = id
 		}
 	}
-	if parent == 0 {
+	// A config that brings resolvers of its own -- destination rules hijack DNS
+	// and map its answers back to names through them -- needs a DNS router and
+	// transports built from that config. An attachment borrows the parent's,
+	// which have never heard of those servers, and the start fails on the first
+	// outbound with "default domain resolver not found". Such a config runs as
+	// a box of its own, the way every TUN does when the session core is not
+	// sing-box.
+	var own struct {
+		DNS struct {
+			Servers []stdjson.RawMessage `json:"servers"`
+		} `json:"dns"`
+	}
+	_ = stdjson.Unmarshal([]byte(C.GoString(text)), &own)
+	if parent == 0 || len(own.DNS.Servers) > 0 {
 		locked = false
 		sbMu.Unlock()
 		return sbStartRole(text, handle, false, true)
@@ -574,10 +587,15 @@ func sb_tun_start(text *C.char, handle *C.uint64_t) (result *C.char) {
 			return C.CString("sing-box TUN inbound: " + err.Error())
 		}
 	}
+	// The endpoint manager owns no endpoint here, but the outbound manager
+	// starts every outbound that has a lifecycle through it -- `direct` does --
+	// and it only learns the scope to start them in from its own initialize
+	// stage. Left out, that scope is nil and the attachment panics before the
+	// device exists.
 	components := []struct {
 		name      string
 		component adapter.Lifecycle
-	}{{"network", network}, {"connection", connection}, {"outbound", outbound}, {"router", router}, {"inbound", inbound}}
+	}{{"network", network}, {"connection", connection}, {"outbound", outbound}, {"router", router}, {"endpoint", endpoint}, {"inbound", inbound}}
 	for _, stage := range adapter.ListStartStages {
 		for _, component := range components {
 			if err = scope.Start(component.name, component.component, stage); err != nil {
