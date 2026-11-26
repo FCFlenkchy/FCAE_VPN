@@ -219,6 +219,10 @@ struct RateSample {
     rates: (u64, u64),
 }
 
+// The engine reports a proxy that was asked and did not answer with its own
+// marker, and the counters below pass it through as the runtime's.
+const _: () = assert!(fcae_firefox::transport::Traffic::RTT_FAILED == fcae_runtime::backend::RTT_FAILED);
+
 struct RunningFirefox {
     engine: Arc<FirefoxEngine>,
     endpoints: Endpoints,

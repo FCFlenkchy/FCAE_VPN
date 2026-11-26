@@ -670,6 +670,8 @@ pub struct FcaeTelemetry {
     pub active_mode: FcaeMode,
     pub lan_enabled: bool,
 
+    /// Round trip in milliseconds. Zero while nothing was measured, and
+    /// `u32::MAX` while the measurement was tried and nothing came back.
     pub rtt_ms: u32,
     pub rx_bytes_sec: u64,
     pub tx_bytes_sec: u64,

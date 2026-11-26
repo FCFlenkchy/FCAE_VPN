@@ -1,7 +1,7 @@
 //! Shared in-process core lifecycle, logging, counters and tunnel probes.
 use super::planning::resolve_address;
 use super::{plan_listeners, resolve_peer, CoreProfile, Level, Plan, Protocol, Transport};
-use crate::backend::{BackendContext, BackendHandle, Counters, Endpoints};
+use crate::backend::{rtt_measured, BackendContext, BackendHandle, Counters, Endpoints, RTT_FAILED};
 use crate::error::{CoreError, Result as CoreResult};
 use crate::upstream::{ProxyKind, UpstreamProxy};
 use async_trait::async_trait;
@@ -422,6 +422,7 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
         stopping: AtomicBool::new(false),
         traffic: Mutex::new(Traffic::default()),
         rtt_ms: Arc::new(AtomicU32::new(0)),
+        rtt_since: std::sync::OnceLock::new(),
         rtt_stop: Arc::new(AtomicBool::new(false)),
         rtt_probe,
     };
@@ -429,19 +430,15 @@ pub async fn start<D: Dialect>(cx: &BackendContext) -> CoreResult<Running> {
     // trip, and a session that never became ready has nothing to measure and no
     // thread to retire.
     running.await_ready().await?;
-    // Then the tunnel itself. The listener answering says the core is up, not
-    // that it carries anything, so the session keeps saying "connecting" until
-    // one real answer has come back through it — the state the UI paints green
-    // means what it says.
-    cx.report(
-        FcaeState::Connecting,
-        format!("Verifying the {} tunnel…", D::DISPLAY),
-    );
+    // The session is connected from here: the core is up and answering. The
+    // listener answering does not say the tunnel carries anything, and the
+    // connect does not wait to find out: that is measured behind it and
+    // published as the latency, or as a failed one ([`RTT_FAILED`]) for as long
+    // as nothing has come back through it.
     if let Err(error) = running.spawn_rtt() {
         running.halt().await;
         return Err(error);
     }
-    running.await_tunnel().await?;
     Ok(running)
 }
 
@@ -573,8 +570,11 @@ pub struct Running {
     stopping: AtomicBool,
     /// Sample bookkeeping behind [`BackendHandle::counters`].
     traffic: Mutex<Traffic>,
-    /// Tunnel round trip in milliseconds; 0 until a measurement lands.
+    /// Tunnel round trip in milliseconds; 0 until a measurement lands, and
+    /// [`RTT_FAILED`] once measurements have failed and until one lands.
     rtt_ms: Arc<AtomicU32>,
+    /// When the measurement began. Unset for a session with nothing to measure.
+    rtt_since: std::sync::OnceLock<Instant>,
     /// Set when the session goes down, so the measurement loop outlives neither
     /// the core nor the handle that owns it.
     rtt_stop: Arc<AtomicBool>,
@@ -641,9 +641,9 @@ impl Running {
     ///
     /// This is the Firefox bridge's keepalive shape on the connection this side
     /// can time: a five-second tick that measures until it has a sample,
-    /// records that sample, and retires. The first answer sticks — the same
-    /// `compare_exchange(0, …)` the Firefox transport uses — so a later, busier
-    /// measurement can never rewrite a latency the UI already shows.
+    /// records that sample, and retires. The first answer sticks, as it does in
+    /// the Firefox transport, so a later, busier measurement can never rewrite
+    /// a latency the UI already shows.
     ///
     /// The loop is the handle's own: it wakes every [`POLL`] to watch the stop
     /// flag, so a session that goes down retires it in a quarter second instead
@@ -654,6 +654,7 @@ impl Running {
         };
         let rtt_ms = Arc::clone(&self.rtt_ms);
         let stop = Arc::clone(&self.rtt_stop);
+        let _ = self.rtt_since.set(Instant::now());
         std::thread::Builder::new()
             .name("fcae-core-rtt".into())
             .spawn(move || measure_until_known(&probe, &rtt_ms, &stop))
@@ -666,65 +667,53 @@ impl Running {
             })
     }
 
-    /// Wait for the first round trip through the tunnel.
+    /// The round trip to publish.
     ///
-    /// The core answers on its listener well before its tunnel has carried
-    /// anything — a config with the wrong credentials starts exactly like a
-    /// working one — so this is where a session is told apart from a core that
-    /// is merely running. A session that gets no answer inside
-    /// [`TUNNEL_VERIFY_TIMEOUT`] is refused here instead of being published as
-    /// connected and left to fail on the user's first request.
-    async fn await_tunnel(&self) -> CoreResult<()> {
-        let Some(probe) = self.rtt_probe.as_ref() else {
-            // Nothing is measurable, so nothing can be verified: failing a
-            // session over a check this app never promised to make would refuse
-            // a config that may well work.
-            return Ok(());
-        };
-        let deadline = tokio::time::Instant::now() + TUNNEL_VERIFY_TIMEOUT;
-        loop {
-            if self.rtt_ms.load(Ordering::Acquire) != 0 {
-                return Ok(());
-            }
-            if !self.alive() {
-                self.halt().await;
-                return Err(CoreError::StartFailed(format!(
-                    "{} exited before its tunnel carried anything",
-                    self.display
-                )));
-            }
-            if tokio::time::Instant::now() >= deadline {
-                self.halt().await;
-                let through = probe
-                    .listener()
-                    .map(|listener| format!(" through {listener}"))
-                    .unwrap_or_default();
-                return Err(CoreError::StartFailed(format!(
-                    "the {} tunnel carried nothing: no answer came back{through} within {}s",
-                    self.display,
-                    TUNNEL_VERIFY_TIMEOUT.as_secs()
-                )));
-            }
-            tokio::time::sleep(POLL).await;
+    /// The measurement once it has landed. Until then a measurable session that
+    /// has gone [`RTT_OVERDUE`] without one publishes the failure marker: a
+    /// probe against a tunnel that swallows everything sits in its timeouts for
+    /// longer than that, and the UI is not left blank behind it.
+    fn latency(&self) -> u32 {
+        let held = self.rtt_ms.load(Ordering::Acquire);
+        if held != 0 {
+            return held;
+        }
+        match self.rtt_since.get() {
+            Some(since) if since.elapsed() >= RTT_OVERDUE => RTT_FAILED,
+            _ => 0,
         }
     }
 }
 
 /// Measure the session's latency until one lands, then stop.
+///
+/// Nothing waits on this: the session is connected as soon as its core answers.
+/// A tunnel that carries nothing is reported from here, as a failed measurement,
+/// and the loop keeps trying behind it, so a tunnel that comes up late still
+/// gets its number.
 fn measure_until_known(probe: &RttProbe, rtt_ms: &AtomicU32, stop: &AtomicBool) {
     let mut failed: u32 = 0;
     loop {
-        if stop.load(Ordering::Acquire) || rtt_ms.load(Ordering::Acquire) != 0 {
+        if stop.load(Ordering::Acquire) || rtt_measured(rtt_ms.load(Ordering::Acquire)) {
             return;
         }
         if let Some(measured) = probe.measure() {
             log::debug!("[core] latency {measured}ms ({})", probe.label());
-            // First sample wins, exactly as the Firefox transport records one:
-            // a slower measurement later must not rewrite what the UI shows.
-            let _ = rtt_ms.compare_exchange(0, measured, Ordering::AcqRel, Ordering::Acquire);
+            record_rtt(rtt_ms, measured);
             return;
         }
         failed = failed.saturating_add(1);
+        if failed == RTT_FAILED_AFTER {
+            let through = probe
+                .listener()
+                .map(|listener| format!(" through {listener}"))
+                .unwrap_or_default();
+            log::warn!(
+                "[core] the tunnel carried nothing: no answer came back{through} ({}); the latency reads as failed until one does",
+                probe.label()
+            );
+            record_rtt_failed(rtt_ms);
+        }
         if !sleep_until_next_tick(stop, rtt_ms, retry_delay(failed)) {
             return;
         }
@@ -738,7 +727,7 @@ fn sleep_until_next_tick(stop: &AtomicBool, rtt_ms: &AtomicU32, wait: Duration) 
     while !left.is_zero() {
         // Checked before the step as well as after it, so a session that is
         // already down costs no nap at all.
-        if stop.load(Ordering::Acquire) || rtt_ms.load(Ordering::Acquire) != 0 {
+        if stop.load(Ordering::Acquire) || rtt_measured(rtt_ms.load(Ordering::Acquire)) {
             return false;
         }
         let step = left.min(POLL);
@@ -752,10 +741,36 @@ fn sleep_until_next_tick(stop: &AtomicBool, rtt_ms: &AtomicU32, wait: Duration) 
 /// to once its first few measurements have already failed.
 const RTT_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How long a session gets to prove it carries traffic, counted from the moment
-/// its core answers on its listener. Only the far side is being waited for: one
-/// request has to come back through the tunnel in this window.
-const TUNNEL_VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
+/// How many measurements in a row may fail before the latency reads as failed.
+/// One alone is a session still settling when its start hands over.
+const RTT_FAILED_AFTER: u32 = 2;
+
+/// How long a measurable session may go without its first round trip before the
+/// latency reads as failed, counted from the moment its core answers on its
+/// listener. A tunnel that refuses is known sooner, by its failed measurements;
+/// this is for the one that swallows everything, whose measurement is still
+/// sitting in its timeouts. A measurement that lands later replaces the failure.
+const RTT_OVERDUE: Duration = Duration::from_secs(8);
+
+/// Publish a measured round trip. The first one sticks: a slower measurement
+/// later must not rewrite what the UI shows. It takes the place of "not
+/// measured" and of "failed" alike, and is never the failure marker itself.
+fn record_rtt(rtt_ms: &AtomicU32, measured: u32) {
+    let sample = measured.clamp(1, RTT_FAILED - 1);
+    let mut held = rtt_ms.load(Ordering::Acquire);
+    while !rtt_measured(held) {
+        match rtt_ms.compare_exchange_weak(held, sample, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(current) => held = current,
+        }
+    }
+}
+
+/// Publish that the round trip was tried and nothing answered, unless one was
+/// measured meanwhile.
+fn record_rtt_failed(rtt_ms: &AtomicU32) {
+    let _ = rtt_ms.compare_exchange(0, RTT_FAILED, Ordering::AcqRel, Ordering::Acquire);
+}
 
 /// What the through-the-tunnel probe fetches, in the order it tries them: an
 /// empty answer that a captive network cannot fake and that is cheap to serve,
@@ -931,7 +946,13 @@ impl RttProbe {
             tunnel_reaches(verify)?;
         }
         match &self.sample {
-            RttSample::Handshake(target) => handshake(target),
+            // A tunnel that was just proven to carry traffic is not a failed one
+            // because the server left a handshake of ours unanswered. The
+            // session stays up either way, so it is timed through its listener
+            // instead of being reported as dead.
+            RttSample::Handshake(target) => {
+                handshake(target).or_else(|| self.verify.as_ref().and_then(through_tunnel))
+            }
             RttSample::Through(through) => through_tunnel(through),
         }
     }
@@ -1337,7 +1358,7 @@ impl BackendHandle for Running {
     /// zeros instead of a guess.
     fn counters(&self) -> Counters {
         let sample = self.bytes();
-        let rtt_ms = self.rtt_ms.load(Ordering::Acquire);
+        let rtt_ms = self.latency();
         self.traffic.lock().counters(sample, Instant::now(), rtt_ms)
     }
 
@@ -1393,7 +1414,7 @@ impl Drop for Running {
     ///
     /// The handle is dropped without a stop whenever the start it belongs to is
     /// abandoned: the supervisor's cancellation can drop the future inside
-    /// `await_ready` or `await_tunnel`, after the core is already up. Leaving
+    /// `await_ready`, after the core is already up. Leaving
     /// the core behind there is the leak of a whole engine per cancelled
     /// connect, so it is stopped -- off this thread, and only when no stop was
     /// asked for.
@@ -2163,6 +2184,28 @@ mod tests {
         let running = AtomicBool::new(false);
         let known = AtomicU32::new(20);
         assert!(!sleep_until_next_tick(&running, &known, RTT_INTERVAL));
+    }
+
+    #[test]
+    fn a_failed_latency_gives_way_to_a_measured_one_and_not_the_reverse() {
+        let rtt = AtomicU32::new(0);
+        record_rtt_failed(&rtt);
+        assert_eq!(rtt.load(Ordering::Acquire), RTT_FAILED);
+        // The loop keeps trying behind a failure: it is not a known latency.
+        let running = AtomicBool::new(false);
+        assert!(sleep_until_next_tick(&running, &rtt, Duration::from_millis(1)));
+        record_rtt(&rtt, 37);
+        assert_eq!(rtt.load(Ordering::Acquire), 37);
+        record_rtt_failed(&rtt);
+        record_rtt(&rtt, 80);
+        assert_eq!(rtt.load(Ordering::Acquire), 37);
+        // A sample is never zero and never the failure marker.
+        let edge = AtomicU32::new(0);
+        record_rtt(&edge, 0);
+        assert_eq!(edge.load(Ordering::Acquire), 1);
+        let edge = AtomicU32::new(0);
+        record_rtt(&edge, u32::MAX);
+        assert_eq!(edge.load(Ordering::Acquire), RTT_FAILED - 1);
     }
 
     #[test]

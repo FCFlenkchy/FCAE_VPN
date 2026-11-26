@@ -16,7 +16,7 @@ use std::time::Instant;
 use fcae_abi::{FcaeBackend, FcaeLogLevel, FcaeMode, FcaeState};
 use parking_lot::Mutex;
 
-use crate::backend::Counters;
+use crate::backend::{rtt_measured, Counters};
 
 /// Immutable view of the session, handed to the FFI layer.
 #[derive(Debug, Clone)]
@@ -226,7 +226,9 @@ impl TelemetryCell {
         let published = Counters {
             total_rx: g.folded_rx.saturating_add(c.total_rx),
             total_tx: g.folded_tx.saturating_add(c.total_tx),
-            rtt_ms: if g.counters.rtt_ms > 0 { g.counters.rtt_ms } else { c.rtt_ms },
+            // The first measured round trip is held for the session. Until one
+            // lands the backend's own reading stands: nothing yet, or failed.
+            rtt_ms: if rtt_measured(g.counters.rtt_ms) { g.counters.rtt_ms } else { c.rtt_ms },
             ..c
         };
         g.counters = published;
@@ -329,6 +331,26 @@ mod tests {
         cell.begin_session(FcaeBackend::Firefox, FcaeMode::Proxy, false);
         cell.set_counters(sample(44));
         assert_eq!(cell.snapshot().counters.rtt_ms, 44);
+    }
+
+    #[test]
+    fn a_failed_rtt_is_shown_until_a_measurement_lands() {
+        use crate::backend::RTT_FAILED;
+        let cell = TelemetryCell::new();
+        let sample = |rtt_ms| Counters { rtt_ms, ..Counters::default() };
+        cell.begin_session(FcaeBackend::Xray, FcaeMode::Proxy, false);
+        cell.set_counters(sample(RTT_FAILED));
+        assert_eq!(cell.snapshot().counters.rtt_ms, RTT_FAILED);
+        // The backend is asking again: the failure is its to take back.
+        cell.set_counters(sample(0));
+        assert_eq!(cell.snapshot().counters.rtt_ms, 0);
+        cell.set_counters(sample(RTT_FAILED));
+        // The tunnel came up late: its number replaces the failure, and holds.
+        cell.set_counters(sample(61));
+        cell.set_counters(sample(RTT_FAILED));
+        cell.set_counters(sample(90));
+        cell.set_counters(sample(0));
+        assert_eq!(cell.snapshot().counters.rtt_ms, 61);
     }
 
     #[test]

@@ -108,6 +108,17 @@ inline bool wants_keyboard() {
     if (collapse_id && GImGui->FrameCount > collapse_frame + 6) collapse_id = 0;
     return menu_id || restore_id || collapse_id;
 }
+// A tap on a text field this frame, whether it starts the editing or the field
+// was being edited already. Read once the frame is submitted. A host with an
+// on-screen keyboard asks for it again on this: the user can put the keyboard
+// away (Back, its own hide key) while the field keeps the focus, and then a
+// tap on that field changes nothing else the host could go by. A tap anywhere
+// else is not one: the field that had the focus is no longer the active item.
+inline bool editor_tapped() {
+    const ImGuiContext* g = GImGui;
+    return g && g->IO.MouseClicked[ImGuiMouseButton_Left] && g->ActiveId != 0 &&
+        g->HoveredId == g->ActiveId && g->InputTextState.ID == g->ActiveId;
+}
 // Touch adapters call this on the physical Down, before deciding whether a
 // completed gesture becomes a click. Otherwise the popup blocks hover capture
 // and the adapter may suppress the very tap that should dismiss the menu.

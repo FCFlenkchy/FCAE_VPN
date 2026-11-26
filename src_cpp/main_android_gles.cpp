@@ -515,7 +515,8 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeFrame(JNIEnv*, jclass) {
     const bool keyboard = io.WantTextInput || UiText::wants_keyboard() || input->keep_keyboard_open();
     const unsigned delay = 0; // Java schedules the single 60 FPS cadence.
     return static_cast<jint>(delay) | (keyboard ? 0x10000 : 0)
-        | (GImGui->OpenPopupStack.Size ? 0x20000 : 0);
+        | (GImGui->OpenPopupStack.Size ? 0x20000 : 0)
+        | (UiText::editor_tapped() ? 0x40000 : 0);
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativePointer(JNIEnv*, jclass, jfloat x, jfloat y, jint action, jlong time_ms, jboolean touch) {

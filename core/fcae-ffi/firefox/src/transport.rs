@@ -40,6 +40,8 @@ pub struct Traffic {
     rx: AtomicU64,
     tx: AtomicU64,
     rtt_ms: AtomicU32,
+    /// Where the proxy check behind a connect stands: one of the `CHECK_*`.
+    check: AtomicU32,
 }
 
 impl Traffic {
@@ -47,13 +49,48 @@ impl Traffic {
         (self.rx.load(Ordering::Relaxed), self.tx.load(Ordering::Relaxed))
     }
 
+    /// What [`Traffic::rtt_ms`] reads while the proxy was asked for a real
+    /// destination and nothing came back: the app shows it as a failed latency,
+    /// not as a number.
+    pub const RTT_FAILED: u32 = u32::MAX;
+
+    /// No check is outstanding: the sample is what is read.
+    const CHECK_PASSED: u32 = 0;
+    /// The proxy is being asked. The carrier's own round trip says the proxy is
+    /// there, not that it carries anything, so no sample is read yet.
+    const CHECK_PENDING: u32 = 1;
+    /// The proxy was asked and did not answer.
+    const CHECK_FAILED: u32 = 2;
+
+    /// Milliseconds; zero while there is nothing to read, and
+    /// [`Traffic::RTT_FAILED`] while the proxy check has failed.
     pub fn rtt_ms(&self) -> u32 {
-        self.rtt_ms.load(Ordering::Relaxed)
+        match self.check.load(Ordering::Relaxed) {
+            Self::CHECK_PASSED => self.rtt_ms.load(Ordering::Relaxed),
+            Self::CHECK_PENDING => 0,
+            _ => Self::RTT_FAILED,
+        }
     }
 
     fn record_rtt(&self, elapsed: Duration) {
-        let sample = elapsed.as_millis().clamp(1, u32::MAX as u128) as u32;
+        // Never the failure marker itself.
+        let sample = elapsed.as_millis().clamp(1, (Self::RTT_FAILED - 1) as u128) as u32;
         let _ = self.rtt_ms.compare_exchange(0, sample, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// The session is up and its proxy is about to be asked.
+    pub(crate) fn check_pending(&self) {
+        self.check.store(Self::CHECK_PENDING, Ordering::Relaxed);
+    }
+
+    /// The proxy was asked and nothing came back; it is asked again.
+    pub(crate) fn check_failed(&self) {
+        self.check.store(Self::CHECK_FAILED, Ordering::Relaxed);
+    }
+
+    /// The proxy answered: the carrier's round trip is the session's.
+    pub(crate) fn check_passed(&self) {
+        self.check.store(Self::CHECK_PASSED, Ordering::Relaxed);
     }
 }
 
@@ -1435,6 +1472,13 @@ impl Upstream {
         self.rotate_proxy().await;
     }
 
+    /// Move to the next candidate now. The proxy check behind a connect found
+    /// this one not answering, which is what a connect used to skip it for.
+    pub(crate) async fn skip_candidate(&self) {
+        let _guard = self.failover.lock().await;
+        self.rotate_proxy().await;
+    }
+
     async fn rotate_proxy(&self) {
         *self.h3_retry_at.lock() = [None; 2];
         self.stream_health.lock().clear_ambiguous();
@@ -1954,7 +1998,20 @@ mod traffic_tests {
         assert_eq!(traffic.rtt_ms(), 1);
         let next = Traffic::default();
         next.record_rtt(Duration::from_secs(u64::MAX));
-        assert_eq!(next.rtt_ms(), u32::MAX);
+        assert_eq!(next.rtt_ms(), Traffic::RTT_FAILED - 1);
+    }
+
+    #[test]
+    fn no_latency_is_read_until_the_proxy_check_has_passed() {
+        let traffic = Traffic::default();
+        traffic.check_pending();
+        // The carrier answered its PING, which does not say the proxy carries anything.
+        traffic.record_rtt(Duration::from_millis(42));
+        assert_eq!(traffic.rtt_ms(), 0);
+        traffic.check_failed();
+        assert_eq!(traffic.rtt_ms(), Traffic::RTT_FAILED);
+        traffic.check_passed();
+        assert_eq!(traffic.rtt_ms(), 42);
     }
 
     #[tokio::test]

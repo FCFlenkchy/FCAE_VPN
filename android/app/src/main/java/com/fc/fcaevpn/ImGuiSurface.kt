@@ -156,6 +156,13 @@ class ImGuiSurface(context: Context) : GLSurfaceView(context), GLSurfaceView.Ren
                     input.restartInput(this)
                     input.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                 } else input.hideSoftInputFromWindow(windowToken, 0)
+            } else if (keyboard && result and 0x40000 != 0) {
+                // Back, or the keyboard's own hide key, puts the keyboard away
+                // and leaves the field focused: nothing above changes, so a
+                // tap on a text field asks for the keyboard again.
+                val input = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                requestFocus()
+                input.showSoftInput(this, 0)
             }
             frames.rendered(epoch)
         }

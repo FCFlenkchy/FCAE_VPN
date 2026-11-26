@@ -178,22 +178,15 @@ impl Backend for UrBackend {
         })
         .await
         .map_err(|_| CoreError::StartFailed("URnetwork startup worker failed".into()))??;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            if cx.cancel.is_cancelled() {
-                return Err(CoreError::StartFailed("URnetwork startup cancelled".into()));
-            }
-            if handle.carrier_up() {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(CoreError::StartFailed(
-                    "URnetwork could not establish an exit within 60 seconds".into(),
-                ));
-            }
-            tokio::select! { _=cx.cancel.cancelled()=>return Err(CoreError::StartFailed("URnetwork startup cancelled".into())), _=tokio::time::sleep(Duration::from_millis(250))=>{} }
+        // The session is connected from here. The device finds its providers
+        // behind it: until one is up nothing is carried, and the bridge's own
+        // measurement says so as a failed latency instead of this start holding
+        // the connect for it. A chain waits for the exit where it needs one,
+        // before the next hop is started through this one.
+        if cx.cancel.is_cancelled() {
+            return Err(CoreError::StartFailed("URnetwork startup cancelled".into()));
         }
-        log::info!(target: "fcae.urnetwork", "[urnetwork] device connection ready");
+        log::info!(target: "fcae.urnetwork", "[urnetwork] device started; providers connect behind it");
         Ok(Box::new(handle))
     }
 }

@@ -117,6 +117,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
         private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
         private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
+        private val COLOR_RTT = Color.parseColor("#9AA3B5")
+        /** A round trip that was tried and got no answer reads "-1ms". */
+        private val COLOR_RTT_FAILED = Color.parseColor("#F87171")
 
         private val mainHandler = Handler(Looper.getMainLooper())
         private val inReceive = ThreadLocal.withInitial { false }
@@ -261,7 +264,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val ratesUp = "↑ " + VpnNotification.fmtRate(shown.tx)
             val totalDown = "↓ " + VpnNotification.fmtBytes(shown.totalRx)
             val totalUp = "↑ " + VpnNotification.fmtBytes(shown.totalTx)
-            val rtt = "${shown.rtt}ms"
+            // -1 is a round trip that got no answer: a verdict on a tunnel that is up,
+            // not on one that is still connecting.
+            val rtt = "${if (session.up) shown.rtt else shown.rtt.coerceAtLeast(0)}ms"
 
             val revision = WidgetActions.current(context)
             val controlKey = "$status|$statusColor|$connect|$pausable|$paused|$revision"
@@ -346,6 +351,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
             totalUp: String
         ) {
             views.setTextViewText(R.id.widget_rtt, rtt)
+            views.setTextColor(R.id.widget_rtt, if (rtt.startsWith("-")) COLOR_RTT_FAILED else COLOR_RTT)
             views.setTextViewText(R.id.widget_rx_rate, ratesDown)
             views.setTextViewText(R.id.widget_tx_rate, ratesUp)
             views.setTextViewText(R.id.widget_rx_total, totalDown)

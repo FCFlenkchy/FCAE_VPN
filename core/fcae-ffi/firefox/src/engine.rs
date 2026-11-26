@@ -28,6 +28,8 @@ pub struct FirefoxEngine {
     notify: Notify,
     fatal: Mutex<Option<FirefoxError>>,
     renewal: Mutex<Option<JoinHandle<()>>>,
+    /// The proxy checks a connect used to wait for, now run behind it.
+    checks: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl FirefoxEngine {
@@ -62,43 +64,20 @@ impl FirefoxEngine {
             log::debug!("[firefox] candidate pre-resolution reached the connect deadline");
         }
 
+        // A connect waits for the proxy pass and nothing else. Whether the
+        // proxy carries anything is asked behind it (`spawn_checks`): the
+        // session is up as soon as its listeners are, and the answer shows as
+        // the latency, or as a failed one while nothing has come back.
         let mut selected = None;
         let mut last_error = None;
         for candidate in candidates.iter().take(3) {
-            log::info!("[firefox] checking Mozilla proxy {}", candidate.address);
-            let attempt = async {
-                let upstream = Upstream::new(candidate.clone(), config.transport, dialer.clone(), tokens.clone(), config.connect_timeout).await?;
-                let timeout = config.connect_timeout.min(Duration::from_secs(10));
-                let tcp_targets = ["1.1.1.1:443".to_string(), "8.8.8.8:443".to_string()];
-                let proxy = &upstream;
-                probe_destinations("TCP", &tcp_targets, timeout, |target| async move {
-                    proxy.probe_tcp(&target).await
-                }).await?;
-                if config.require_udp {
-                    let udp_targets = ["1.1.1.1:443".to_string(), "8.8.8.8:443".to_string()];
-                    probe_optional_destinations("UDP", &udp_targets, timeout, |target| async move {
-                        proxy.probe_udp(&target).await
-                    }).await;
-                    if !config.dns_servers.is_empty() {
-                        probe_optional_destinations("DNS", &config.dns_servers, timeout, |server| async move {
-                            if crate::doh::provider(&server).is_some() {
-                                crate::doh::check(proxy, &server).await
-                            } else {
-                                log::info!("[firefox] DNS resolver {server} has no encrypted mapping; checking UDP port 53 without changing the configured resolver");
-                                proxy.probe_udp(&crate::types::authority(&server, 53)).await
-                            }
-                        }).await;
-                    }
-                }
-                Ok::<_, FirefoxError>(upstream)
-            }.await;
-            match attempt {
+            match Upstream::new(candidate.clone(), config.transport, dialer.clone(), tokens.clone(), config.connect_timeout).await {
                 Ok(upstream) => {
                     selected = Some(upstream);
                     break;
                 }
                 Err(error) if error.is_transient() || matches!(error, FirefoxError::TlsCertificate { .. }) => {
-                    log::warn!("[firefox] proxy check failed: {error}");
+                    log::warn!("[firefox] proxy pass for {} failed: {error}", candidate.address);
                     last_error = Some(error);
                 }
                 Err(error) => return Err(error),
@@ -107,11 +86,17 @@ impl FirefoxEngine {
         let upstream = selected.ok_or_else(|| last_error.unwrap_or_else(|| FirefoxError::NoLocation(" all candidates failed".into())))?;
         let upstream = Arc::new(upstream);
         upstream.set_candidates(candidates);
+        upstream.traffic().check_pending();
         let proxies = LocalProxies::start(upstream.clone(), config.socks_addr, config.http_addr).await?;
-        log::info!("[firefox] proxy check passed; local SOCKS {:?}, HTTP {:?}", proxies.socks_addr, proxies.http_addr);
+        log::info!("[firefox] local SOCKS {:?}, HTTP {:?}; the proxy is checked behind the connect", proxies.socks_addr, proxies.http_addr);
         if let Err(error) = accounts.ensure_device(&account.id).await {
             log::warn!("[firefox] device registration was not refreshed: {error}");
         }
+        let checks = ProxyChecks {
+            timeout: config.connect_timeout.min(Duration::from_secs(10)),
+            require_udp: config.require_udp,
+            dns_servers: config.dns_servers.clone(),
+        };
         let engine = Arc::new(Self {
             upstream,
             proxies,
@@ -121,9 +106,12 @@ impl FirefoxEngine {
             notify: Notify::new(),
             fatal: Mutex::new(None),
             renewal: Mutex::new(None),
+            checks: Mutex::new(None),
         });
         let task = spawn_renewal(Arc::downgrade(&engine));
         *engine.renewal.lock().await = Some(task);
+        let task = spawn_checks(Arc::downgrade(&engine), engine.upstream.clone(), checks);
+        *engine.checks.lock().await = Some(task);
         Ok(engine)
     }
 
@@ -147,6 +135,8 @@ impl FirefoxEngine {
         self.upstream.traffic().totals()
     }
 
+    /// Milliseconds; zero while there is nothing to read, and `u32::MAX` while
+    /// the proxy was asked for a real destination and nothing came back.
     pub fn rtt_ms(&self) -> u32 {
         self.upstream.traffic().rtt_ms()
     }
@@ -184,6 +174,10 @@ impl FirefoxEngine {
             task.abort();
             let _ = task.await;
         }
+        if let Some(task) = self.checks.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
         self.proxies.stop().await;
         self.upstream.close().await;
         self.carrier_up.store(false, Ordering::Release);
@@ -195,6 +189,7 @@ impl Drop for FirefoxEngine {
         self.stopped.store(true, Ordering::Release);
         self.carrier_up.store(false, Ordering::Release);
         if let Some(task) = self.renewal.get_mut().take() { task.abort(); }
+        if let Some(task) = self.checks.get_mut().take() { task.abort(); }
         // Listener and carrier guards also abort on drop, without owning us.
         self.notify.notify_waiters();
     }
@@ -258,6 +253,96 @@ async fn resolve_candidates(dialer: &Dialer, candidates: &[Candidate]) {
         });
     }
     futures::stream::iter(lookups).buffer_unordered(16).collect::<Vec<()>>().await;
+}
+
+/// What the proxy is asked once the session is up.
+struct ProxyChecks {
+    timeout: Duration,
+    require_udp: bool,
+    dns_servers: Vec<String>,
+}
+
+/// How long the proxy may take to answer its check before the latency reads as
+/// failed. The check itself is still waited for: an answer takes that back.
+const CHECK_OVERDUE: Duration = Duration::from_secs(8);
+
+/// How long to wait before asking again after a refusal no other candidate
+/// changes. A connect used to end on one; a session is not ended for it.
+const CHECK_REFUSED_RETRY: Duration = Duration::from_secs(30);
+
+/// Delay before the proxy is asked again, by how many checks have failed.
+fn check_retry_delay(failed: u32) -> Duration {
+    match failed {
+        0 | 1 => Duration::from_secs(1),
+        2 => Duration::from_secs(2),
+        _ => Duration::from_secs(5),
+    }
+}
+
+/// Ask the proxy for a real destination, behind the connect instead of in it.
+///
+/// Until it answers, the latency reads as failed and the check is repeated for
+/// as long as the session is up. A failure a connect used to skip a candidate
+/// for moves on to the next candidate, as it did there. Nothing ends the
+/// session here: it is connected, and what is wrong with it is in the log.
+///
+/// The task holds the upstream and not the engine, so the engine can be dropped
+/// under it; stopping or dropping the engine aborts it, and an engine that is
+/// gone before the handle reached it ends it at the next round.
+fn spawn_checks(engine: Weak<FirefoxEngine>, upstream: Arc<Upstream>, checks: ProxyChecks) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let proxy = upstream.as_ref();
+        let running = || engine.upgrade().is_some_and(|engine| !engine.stopped.load(Ordering::Acquire));
+        let tcp_targets = ["1.1.1.1:443".to_string(), "8.8.8.8:443".to_string()];
+        let mut failed: u32 = 0;
+        loop {
+            if !running() {
+                return;
+            }
+            log::info!("[firefox] checking Mozilla proxy {}", proxy.candidate().address);
+            let check = probe_destinations("TCP", &tcp_targets, checks.timeout, |target| async move {
+                proxy.probe_tcp(&target).await
+            });
+            tokio::pin!(check);
+            let result = match tokio::time::timeout(CHECK_OVERDUE, &mut check).await {
+                Ok(result) => result,
+                Err(_) => {
+                    proxy.traffic().check_failed();
+                    check.await
+                }
+            };
+            let Err(error) = result else { break };
+            log::warn!("[firefox] proxy check failed: {error}");
+            failed = failed.saturating_add(1);
+            proxy.traffic().check_failed();
+            let wait = if error.is_transient() || matches!(error, FirefoxError::TlsCertificate { .. }) {
+                proxy.skip_candidate().await;
+                check_retry_delay(failed)
+            } else {
+                CHECK_REFUSED_RETRY
+            };
+            tokio::time::sleep(wait).await;
+        }
+        proxy.traffic().check_passed();
+        log::info!("[firefox] proxy check passed");
+        if !checks.require_udp {
+            return;
+        }
+        let udp_targets = ["1.1.1.1:443".to_string(), "8.8.8.8:443".to_string()];
+        probe_optional_destinations("UDP", &udp_targets, checks.timeout, |target| async move {
+            proxy.probe_udp(&target).await
+        }).await;
+        if !checks.dns_servers.is_empty() {
+            probe_optional_destinations("DNS", &checks.dns_servers, checks.timeout, |server| async move {
+                if crate::doh::provider(&server).is_some() {
+                    crate::doh::check(proxy, &server).await
+                } else {
+                    log::info!("[firefox] DNS resolver {server} has no encrypted mapping; checking UDP port 53 without changing the configured resolver");
+                    proxy.probe_udp(&crate::types::authority(&server, 53)).await
+                }
+            }).await;
+        }
+    })
 }
 
 fn spawn_renewal(engine: Weak<FirefoxEngine>) -> JoinHandle<()> {

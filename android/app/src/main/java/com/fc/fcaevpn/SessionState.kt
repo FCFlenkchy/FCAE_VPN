@@ -79,13 +79,22 @@ object SessionState {
     private var regressions = 0
     private var controlEpoch = Long.MIN_VALUE
 
-        /** Holds the first successful RTT for a session so every surface shows the same latency. */
+        /**
+         * Holds the first successful RTT for a session so every surface shows the same latency.
+         * Until one arrives the latest reading stands: 0 while nothing was measured, and -1
+         * while a measurement was tried and got no answer.
+         */
     @JvmStatic
     @Synchronized
     fun holdRtt(sampleMs: Int): Int {
-        if (sampleMs > 0 && rttHeld == 0) rttHeld = sampleMs
+        if (rttHeld <= 0) rttHeld = if (sampleMs < 0) -1 else sampleMs
         return rttHeld
     }
+
+    /** The held RTT, without a new reading. */
+    @JvmStatic
+    @Synchronized
+    fun heldRtt(): Int = rttHeld
 
     /** Forget the held RTT: the next session measures its own. */
     @JvmStatic
@@ -140,7 +149,7 @@ object SessionState {
         if (mine) heldStats = longArrayOf(rx, tx, totalRx, totalTx)
         val snapshot = Snapshot(
             phase, mode, heldStats[0], heldStats[1], heldStats[2], heldStats[3],
-            holdRtt(if (mine) rttSample else 0)
+            if (mine) holdRtt(rttSample) else heldRtt()
         )
         val accepted = write(context, snapshot, measured = true) ?: return
         val intent = Intent(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
@@ -169,7 +178,7 @@ object SessionState {
      */
     @JvmStatic
     fun markConnecting(context: Context, mode: Int) {
-        write(context, Snapshot(Phase.CONNECTING, mode, 0L, 0L, 0L, 0L, holdRtt(0)))
+        write(context, Snapshot(Phase.CONNECTING, mode, 0L, 0L, 0L, 0L, heldRtt()))
     }
 
         /**

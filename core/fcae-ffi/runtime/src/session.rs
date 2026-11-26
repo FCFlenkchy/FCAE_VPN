@@ -902,12 +902,10 @@ async fn run_session(
             debug_assert!(!tun_bridge.is_running(), "proxy mode must never leave a TUN device up");
         }
 
-        // Publish the already-measured latency before Connected so the first UI
-        // snapshot carries it instead of a blank that fills a tick later. A
-        // saved Xray or sing-box config reaches this point with its round trip
-        // already measured — its start does not return until one has come back
-        // through the tunnel — and the Firefox bridge measures its CONNECT while
-        // it dials.
+        // Publish what is already measured before Connected, so the first UI
+        // snapshot carries it. No backend's start waits for a round trip any
+        // more: a session is connected as soon as its backend is up, and the
+        // latency fills in behind that, as a number or as a failed measurement.
         let chained = !config.chain.is_empty();
         let live = Arc::new(Mutex::new(LiveHops::new(&handles, &config)));
         {
@@ -945,6 +943,12 @@ async fn run_session(
         };
         tokio::pin!(carrier_ended, pump);
         let mut hop_up = vec![true; handles.len()];
+        // The last hop may still be bringing its exit up: URnetwork's start does
+        // not wait for a provider. Nothing is downstream of it to stop, so it
+        // starts as what it is instead of being reported as dropped.
+        if let (Some(up), Some(handle)) = (hop_up.last_mut(), handles.last()) {
+            *up = handle.carrier_up();
+        }
         let outcome = loop {
             tokio::select! {
                 biased;
@@ -1051,6 +1055,47 @@ async fn chain_carrier_changed(handles: Vec<Arc<dyn BackendHandle>>, previous: V
     }
 }
 
+/// How long a hop may take to bring its own exit up before the hop after it is
+/// started through it.
+const CHAIN_CARRIER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait until the last started hop carries traffic, for the hop that is about
+/// to be started through it.
+///
+/// A backend that is up when its start returns passes straight through. Only a
+/// single session, or the last hop of a chain, is connected before its exit is.
+async fn await_carrier(handles: &[Arc<dyn BackendHandle>], name: &str, cancel: &CancelToken) -> Result<()> {
+    let Some(carrier) = handles.last() else {
+        return Ok(());
+    };
+    if carrier.carrier_up() {
+        return Ok(());
+    }
+    let ended = exits_ended(handles.to_vec());
+    let deadline = tokio::time::sleep(CHAIN_CARRIER_TIMEOUT);
+    tokio::pin!(ended, deadline);
+    loop {
+        if carrier.carrier_up() {
+            return Ok(());
+        }
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(CoreError::StartFailed("chain cancelled".into())),
+            (index, result) = &mut ended => {
+                let detail = result.err().map(|error| format!(": {error}")).unwrap_or_default();
+                return Err(CoreError::StartFailed(format!("chain hop {index} dropped before {name} had an exit{detail}")));
+            }
+            _ = &mut deadline => {
+                return Err(CoreError::StartFailed(format!(
+                    "{name} could not establish an exit within {} seconds",
+                    CHAIN_CARRIER_TIMEOUT.as_secs()
+                )));
+            }
+            _ = tokio::time::sleep(CARRIER_POLL) => {}
+        }
+    }
+}
+
 async fn exits_ended(handles: Vec<Arc<dyn BackendHandle>>) -> (usize, Result<()>) {
     if handles.is_empty() {
         return std::future::pending().await;
@@ -1121,6 +1166,10 @@ async fn start_downstream(
         // The hop's own label, kept for messages: `exit` is moved into the start
         // future below, and its Debug form carries a whole profile.
         let exit_name = exit.label().to_string();
+        // The hop this one dials through has to carry traffic first. A start
+        // that does not wait for that itself (URnetwork returns as soon as its
+        // device is up, before a provider is) would otherwise fail this hop.
+        await_carrier(handles.as_slice(), &previous_name, cancel).await?;
         let monitored = handles.to_vec();
         let started = tokio::select! {
             biased;
@@ -1503,8 +1552,10 @@ impl LiveHops {
 
     /// Put the published round trip on a sample taken from `source`.
     ///
-    /// Zero is "not measured yet", never a latency, so a hop whose probe has not
-    /// answered must not blank the number a hop that did answer published.
+    /// The hop that measures the session's round trip answers for it alone,
+    /// also while it has no answer yet or a failed one. No start waits for a
+    /// measurement any more, so a hop above it has usually measured its own leg
+    /// first, and the first number published is the one the session keeps.
     fn latency(&self, source: &Arc<dyn BackendHandle>, mut counters: Counters) -> Counters {
         let Some(measured) = self.rtt.as_ref() else {
             return counters;
@@ -1514,10 +1565,7 @@ impl LiveHops {
         if Arc::ptr_eq(measured, source) {
             return counters;
         }
-        let rtt_ms = measured.counters().rtt_ms;
-        if rtt_ms != 0 {
-            counters.rtt_ms = rtt_ms;
-        }
+        counters.rtt_ms = measured.counters().rtt_ms;
         counters
     }
 }
@@ -2209,12 +2257,64 @@ mod tests {
         let counters = LiveHops::new(&hops, &cfg).counters();
         assert_eq!((counters.total_tx, counters.total_rx), (1_500, 9_000));
 
-        // Zero means "not measured yet", never a latency: a hop whose probe has
-        // not answered must not blank the number another hop did publish.
+        // The exit answers for the round trip alone, also while it has none:
+        // nothing waits for a measurement before the session is published, so
+        // the carrier's own leg is usually measured first, and publishing it
+        // would make it the number the session keeps.
         let hops = [hop(700, 4_000, 40), hop(0, 0, 0)];
         let counters = LiveHops::new(&hops, &cfg).counters();
         assert_eq!((counters.total_tx, counters.total_rx), (700, 4_000));
-        assert_eq!(counters.rtt_ms, 40);
+        assert_eq!(counters.rtt_ms, 0);
+        // A round trip that was tried and got nothing back is published as that.
+        let hops = [hop(700, 4_000, 40), hop(0, 0, crate::backend::RTT_FAILED)];
+        let counters = LiveHops::new(&hops, &cfg).counters();
+        assert_eq!(counters.rtt_ms, crate::backend::RTT_FAILED);
+    }
+
+    /// A hop whose exit comes up some time after its start returned.
+    struct LateExit {
+        up: AtomicBool,
+        ended: AtomicBool,
+    }
+
+    #[async_trait]
+    impl BackendHandle for LateExit {
+        fn endpoints(&self) -> Endpoints { Endpoints::EMPTY }
+        async fn wait(&self) -> Result<()> {
+            while !self.ended.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(CoreError::StartFailed("device stopped".into()))
+        }
+        async fn stop(&self, _: Duration) -> Result<()> { Ok(()) }
+        fn carrier_up(&self) -> bool { self.up.load(Ordering::SeqCst) }
+    }
+
+    #[test]
+    fn the_next_hop_waits_for_the_exit_of_the_one_it_dials_through() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        runtime.block_on(async {
+            let late = Arc::new(LateExit { up: AtomicBool::new(false), ended: AtomicBool::new(false) });
+            let handles: Vec<Arc<dyn BackendHandle>> = vec![late.clone()];
+            let cancel = CancelToken::new();
+
+            // Not up yet: the wait is still pending after a moment.
+            let waiting = await_carrier(&handles, "URnetwork", &cancel);
+            tokio::pin!(waiting);
+            assert!(tokio::time::timeout(Duration::from_millis(50), &mut waiting).await.is_err());
+            // Its exit comes up: the next hop may start.
+            late.up.store(true, Ordering::SeqCst);
+            assert!(tokio::time::timeout(Duration::from_secs(5), &mut waiting).await.unwrap().is_ok());
+
+            // A hop that is up when asked costs no wait at all.
+            assert!(await_carrier(&handles, "URnetwork", &cancel).await.is_ok());
+
+            // One that ends before it ever had an exit fails the chain with its reason.
+            late.up.store(false, Ordering::SeqCst);
+            late.ended.store(true, Ordering::SeqCst);
+            let error = await_carrier(&handles, "URnetwork", &cancel).await.unwrap_err().to_string();
+            assert!(error.contains("before URnetwork had an exit") && error.contains("device stopped"), "{error}");
+        });
     }
 
     #[test]

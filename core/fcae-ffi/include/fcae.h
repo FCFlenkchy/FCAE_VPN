@@ -465,7 +465,7 @@ typedef struct {
     FcaeMode    active_mode;
     bool        lan_enabled;
 
-    uint32_t    rtt_ms;
+    uint32_t    rtt_ms; /* ms; 0 = not measured yet; UINT32_MAX = tried, nothing came back */
     uint64_t    rx_bytes_sec;
     uint64_t    tx_bytes_sec;
     uint64_t    total_rx;

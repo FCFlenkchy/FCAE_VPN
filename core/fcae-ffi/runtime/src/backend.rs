@@ -247,6 +247,20 @@ pub trait BackendHandle: Send + Sync {
     }
 }
 
+/// What [`Counters::rtt_ms`] holds when the round trip was tried and nothing
+/// came back.
+///
+/// A session is connected as soon as its backend is up; whether its tunnel
+/// carries anything is measured behind that, so "tried, no answer" has to be
+/// told apart from "not measured yet" (zero). The UI shows this value as a
+/// failed latency, and a measurement that lands later replaces it.
+pub const RTT_FAILED: u32 = u32::MAX;
+
+/// Whether `rtt_ms` is a round trip that was really measured.
+pub fn rtt_measured(rtt_ms: u32) -> bool {
+    rtt_ms != 0 && rtt_ms != RTT_FAILED
+}
+
 /// Traffic counters sampled from a backend.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counters {
@@ -254,6 +268,8 @@ pub struct Counters {
     pub total_tx: u64,
     pub rx_bytes_sec: u64,
     pub tx_bytes_sec: u64,
+    /// Milliseconds; zero while nothing was measured, [`RTT_FAILED`] while the
+    /// measurement was tried and nothing answered.
     pub rtt_ms: u32,
 }
 

@@ -5616,10 +5616,7 @@ static void render_core_library() {
     }
     s_core_group_reveal = -1;
     if (g_app.core_configs.empty() && g_app.core_groups.empty()) {
-        ImGui::TextDisabled("No saved configs.");
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextDisabled("Add one from a share link or a native config, or import a subscription URL to get a group of them.");
-        ImGui::PopTextWrapPos();
+        ImGui::TextDisabled("No configs found.");
     }
     ImGui::EndChild();
     if (status_shown) {
@@ -7411,9 +7408,15 @@ void render_ui() {
                 fmt_rate(ul_rate, sizeof(ul_rate), telem.tx_bytes_sec);
                 fmt_bytes(ul_total, sizeof(ul_total), telem.total_tx);
                 // The round trip keeps its place between the two rates. It has
-                // no caption: "ms" already says what the number is.
-                const bool rtt_live = (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0);
-                if (rtt_live)
+                // no caption: "ms" already says what the number is. A session
+                // is connected before its tunnel has answered, so a round trip
+                // that was tried and got nothing back (the core reports
+                // UINT32_MAX for it) reads "-1ms", in red, until one lands.
+                const bool rtt_failed = (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms == UINT32_MAX);
+                const bool rtt_live = (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0 && !rtt_failed);
+                if (rtt_failed)
+                    snprintf(rtt_buf, sizeof(rtt_buf), "-1ms");
+                else if (rtt_live)
                     snprintf(rtt_buf, sizeof(rtt_buf), "%ums", telem.rtt_ms);
                 else
                     snprintf(rtt_buf, sizeof(rtt_buf), "--");
@@ -7462,8 +7465,9 @@ void render_ui() {
                 ImGui::TextUnformatted(dl_rate);
 
                 ImGui::SetCursorPos(ImVec2(col_text_x(1, rtt_buf), y2));
-                ImGui::TextColored(rtt_live ? ImVec4(0.45f, 0.92f, 0.55f, 1.0f)
-                                            : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
+                ImGui::TextColored(rtt_failed ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
+                                   : rtt_live ? ImVec4(0.45f, 0.92f, 0.55f, 1.0f)
+                                              : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
                                    "%s", rtt_buf);
 
                 ImGui::SetCursorPos(ImVec2(col_text_x(2, ul_rate), y2));

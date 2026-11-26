@@ -517,10 +517,21 @@ func (s *urSession) status() map[string]any {
 		"rx_rate": rxRate, "tx_rate": txRate, "rtt_ms": s.rtt.Load()}
 }
 
+// What rtt holds when the round trip was tried and nothing answered. The app
+// shows it as a failed latency; a measurement that lands replaces it.
+const urRTTFailed = ^uint32(0)
+
+// How long the device may look for its first provider before the latency reads
+// as failed. The session is connected before a provider is, so this is what
+// tells a device that never got an exit from one that is still looking.
+const urExitOverdue = 15 * time.Second
+
 // Time a real response over the device, including every configured carrier.
 // Never time the loopback listener or fall back to the host's network.
 func (s *urSession) measureRTT() {
 	defer close(s.probeDone)
+	began := time.Now()
+	failed := 0
 	transport := &http.Transport{DialContext: s.device.DialContext, DisableKeepAlives: true,
 		ResponseHeaderTimeout: 5 * time.Second, MaxResponseHeaderBytes: 16 << 10}
 	defer transport.CloseIdleConnections()
@@ -534,7 +545,8 @@ func (s *urSession) measureRTT() {
 			return
 		case <-timer.C:
 		}
-		if s.up() {
+		up := s.up()
+		if up {
 			for _, target := range []string{"http://www.gstatic.com/generate_204", "http://www.msftconnecttest.com/connecttest.txt"} {
 				req, err := http.NewRequestWithContext(s.ctx, http.MethodHead, target, nil)
 				if err != nil {
@@ -553,6 +565,23 @@ func (s *urSession) measureRTT() {
 				}
 			}
 		}
+		if !up {
+			// Still looking for a provider. It is asked again soon, so the
+			// round trip is timed as soon as there is an exit to time.
+			if time.Since(began) >= urExitOverdue {
+				s.rtt.CompareAndSwap(0, urRTTFailed)
+			}
+			timer.Reset(time.Second)
+			continue
+		}
+		// An exit is up and nothing came back through it. One round alone is a
+		// provider that has only just connected, so it is tried again soon.
+		failed++
+		if failed < 2 {
+			timer.Reset(2 * time.Second)
+			continue
+		}
+		s.rtt.Store(urRTTFailed)
 		timer.Reset(10 * time.Second)
 	}
 }
