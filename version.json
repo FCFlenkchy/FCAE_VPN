@@ -1,9 +1,9 @@
 [
   {
-    "version": "1.4.7",
-    "date": "2026-11-19",
-    "notes": "changed macos backend to metal and cleaner destkops ui",
-    "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.4.7"
+    "version": "1.4.9",
+    "date": "2026-11-26",
+    "notes": "2 new cores mihomo and URnetwork and better ui and background image choosing and beta split tunneling for destkops and beta ios unsigned build and windows tray and lot more changes/fixes",
+    "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.4.9"
   },
   {
     "version": "1.4.8_pre-release",
