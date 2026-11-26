@@ -19,6 +19,22 @@ FCAE VPN یک ابزار دور زدن سانسور برای ویندوز، لی
 - **Aether (WARP)** — پشتیبانی از Cloudflare WARP، شامل مسیریابی Tor.
 - **Firefox IP Protection** — پشتیبانی از سرویس Firefox IP Protection موزیلا با پیاده‌سازی Rust.
 - **Psiphon** — هسته تونل سایفون.
+- **URnetwork** — شبکه VPN غیرمتمرکز. داخل فرایند اجرا می‌شود.
+- **Xray-core** — خروجی‌های VLESS، VMess، Trojan، Shadowsocks، SOCKS5، HTTP، Hysteria2 و WireGuard. داخل فرایند اجرا می‌شود.
+- **sing-box** — همان موارد، به‌علاوه TUIC، AnyTLS، Hysteria و NaiveProxy. داخل فرایند اجرا می‌شود، با تمام قابلیت‌ها.
+- **Mihomo** — همان موارد Xray-core، به‌علاوه TUIC، AnyTLS و Hysteria. داخل فرایند اجرا می‌شود.
+
+### موتورهای TUN
+
+حالت TUN روی یکی از این موتورها اجرا می‌شود:
+
+- **tun2socks** — نوشته‌شده با Go، روی پشته شبکه gVisor. پیش‌فرض.
+- **zeptun** — نوشته‌شده با Zig، با پیوند ایستا.
+- **hev-socks5-tunnel** — نوشته‌شده با C.
+- **sing-box** — TUN خودِ sing-box.
+- **Xray** — TUN خودِ Xray-core.
+- **Mihomo** — TUN خودِ Mihomo.
+- **sing-tun** — sing-tun از MetaCubeX، به‌عنوان موتوری مستقل.
 
 ## قوانین مسیریابی درون‌خطی (فقط Aether)
 

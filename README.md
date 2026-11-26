@@ -17,8 +17,22 @@ A censorship circumvention client for Windows, Linux, macOS, Android, and iOS, w
 - **Aether (WARP)** — Cloudflare WARP support, including Tor routing.
 - **Firefox IP Protection** — Rust-based support for Mozilla's Firefox IP Protection service.
 - **Psiphon** — Psiphon tunnel core.
-- **Xray-core** — VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP outbounds. In-process.
-- **sing-box** — the same, plus Hysteria2, TUIC, AnyTLS. In-process, full feature set.
+- **URnetwork** — Decentralized VPN network. In-process.
+- **Xray-core** — VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP, Hysteria2, WireGuard outbounds. In-process.
+- **sing-box** — the same, plus TUIC, AnyTLS, Hysteria, NaiveProxy. In-process, full feature set.
+- **Mihomo** — the same as Xray-core, plus TUIC, AnyTLS, Hysteria. In-process.
+
+### TUN engines
+
+TUN mode runs on one of these:
+
+- **tun2socks** — Go, on gVisor's network stack. The default.
+- **zeptun** — Zig, statically linked.
+- **hev-socks5-tunnel** — C.
+- **sing-box** — sing-box's own TUN.
+- **Xray** — Xray-core's own TUN.
+- **Mihomo** — Mihomo's own TUN.
+- **sing-tun** — MetaCubeX's sing-tun, as an engine of its own.
 
 ## Inline Routing Rules (Aether only)
 

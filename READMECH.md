@@ -19,6 +19,22 @@ FCAE VPN 是一款适用于 Windows、Linux、macOS 和 Android 的审查绕过�
 - **Aether (WARP)** — 支持 Cloudflare WARP，包括 Tor 路由。
 - **Firefox IP Protection** — 使用 Rust 实现对 Mozilla Firefox IP Protection 服务的支持。
 - **Psiphon** — Psiphon 隧道核心。
+- **URnetwork** — 去中心化 VPN 网络。进程内运行。
+- **Xray-core** — VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP、Hysteria2、WireGuard 出站。进程内运行。
+- **sing-box** — 同上，另外支持 TUIC、AnyTLS、Hysteria、NaiveProxy。进程内运行，功能完整。
+- **Mihomo** — 与 Xray-core 相同，另外支持 TUIC、AnyTLS、Hysteria。进程内运行。
+
+### TUN 引擎
+
+TUN 模式运行在以下引擎之一上：
+
+- **tun2socks** — Go 编写，基于 gVisor 网络栈。默认引擎。
+- **zeptun** — Zig 编写，静态链接。
+- **hev-socks5-tunnel** — C 编写。
+- **sing-box** — sing-box 自带的 TUN。
+- **Xray** — Xray-core 自带的 TUN。
+- **Mihomo** — Mihomo 自带的 TUN。
+- **sing-tun** — MetaCubeX 的 sing-tun，作为独立引擎。
 
 ## 内联路由规则（仅适用于 Aether）
 
