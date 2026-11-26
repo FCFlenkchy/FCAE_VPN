@@ -72,7 +72,7 @@ static bool account_identity_fields(char* email, size_t email_size, char* passwo
 }
 static bool account_region_combo(const char* id, std::string& selected,
         const std::vector<std::pair<std::string, std::string>>& options) {
-    std::string preview = selected.empty() ? "Best available" : selected;
+    std::string preview = selected.empty() ? "Auto" : selected;
     for (const auto& row : options) if (row.first == selected) preview = row.second;
     ImGui::PushID(id);
     ImGui::TextUnformatted("Region");
@@ -93,7 +93,7 @@ static bool account_region_combo(const char* id, std::string& selected,
                 ImGui::GetColorU32(ImGuiCol_Text), label.c_str(), nullptr, width - 8);
             ImGui::PopID();
         };
-        choice("", "Best available");
+        choice("", "Auto");
         for (const auto& row : options) if (!row.first.empty()) choice(row.first, row.second);
         ImGui::EndCombo();
     }

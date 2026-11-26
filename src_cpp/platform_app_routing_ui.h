@@ -36,17 +36,6 @@ inline const char* platform_name() {
 }
 inline bool uses_macos_ne() {return false;}
 inline Capabilities local_support() {return capabilities();}
-inline const char* dns_routing_notice() {
-#if defined(_WIN32)
-    return "App-owned DNS-over-HTTPS follows the direct bypass. Standard DNS uses Windows' shared DNS Client (svchost.exe), which hides the requesting app; those queries stay on the VPN to protect unselected apps.";
-#elif defined(__APPLE__) && !defined(FCAE_IOS)
-    return "App-owned DNS-over-HTTPS follows the direct bypass. macOS shared-resolver queries can lose the requesting app identity and stay on the VPN to protect unselected apps.";
-#elif defined(__linux__) && !defined(ANDROID)
-    return "App-owned DNS-over-HTTPS follows the direct bypass. Queries through shared resolvers such as systemd-resolved can lose the requesting app identity and stay on the VPN to protect unselected apps.";
-#else
-    return "App-owned DNS-over-HTTPS follows the direct bypass; shared system-resolver queries stay on the VPN to protect unselected apps.";
-#endif
-}
 class Panel {
 public:
     Panel() : ui_(
@@ -128,14 +117,7 @@ public:
     void routing() {
         poll();
         const auto support = local_support();
-        const char* explanation = support.explanation;
-#if !defined(FCAE_IOS) && !defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
-        if (support.enforcement && g_app.desktop_app_mode == 2
-            && g_app.desktop_app_provider == "captured_flow") {
-            explanation = dns_routing_notice();
-        }
-#endif
-        ui_.capabilities(support.enforcement, support.inventory, explanation);
+        ui_.capabilities(support.enforcement, support.inventory, support.explanation);
         ui_.routing();
     }
     void picker() { poll(); ui_.picker(); }

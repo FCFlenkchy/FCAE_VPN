@@ -225,7 +225,7 @@ static void render_urnetwork_settings() {
         const auto usage = s_ur_usage.find(account.first);
         if (usage != s_ur_usage.end() && !usage->second.text.empty()) {
             ImGui::TextDisabled("Usage: %s", usage->second.text.c_str());
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Total is the start-of-day balance; available data excludes open transfers.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Total is the start-of-day balance, or what the account holds now when that is more. Used data excludes open transfers.");
         } else if (selected) {
             ImGui::TextDisabled("%s", usage != s_ur_usage.end() && usage->second.refresh_failed
                 ? "Usage: Unavailable" : "Usage: Loading…");
@@ -278,7 +278,6 @@ static void render_urnetwork_settings() {
                 ImGui::EndDisabled();
                 if ((pressed || enter) && ready) { s_ur_pending_signin = s_ur_password[0] ? 1 : 3; ui_request_redraw(); }
             } else {
-                ImGui::TextWrapped("Create a code in your URnetwork account settings and paste it here. A code works once and expires within minutes.");
                 ImGui::SetNextItemWidth(-FLT_MIN);
                 const bool enter = UiText::InputTextWithHint("##auth_code", "Authorization code", s_ur_code, sizeof(s_ur_code),
                     ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
@@ -287,8 +286,6 @@ static void render_urnetwork_settings() {
                 const bool pressed = ImGui::Button("Sign in with code");
                 ImGui::EndDisabled();
                 if ((pressed || enter) && ready) { s_ur_pending_signin = 2; ui_request_redraw(); }
-                button_row_next("Get a code");
-                if (secondary_button("Get a code")) open_link(kLinkUrAuthCode);
             }
             ImGui::EndDisabled();
             button_row_next("Cancel");

@@ -3060,8 +3060,6 @@ static std::string psiphon_region_label(const std::string& code) {
 }
 
 static const char* const kLinkUrSignup = "https://ur.io/c?bonus=HZ0G13";
-// Where a signed-in URnetwork account creates a one-time authorization code.
-static const char* const kLinkUrAuthCode = "https://ur.io/app/account/settings";
 
 // https only, host-allowlisted, exec'd as one argv entry (never shell text).
 static bool open_external_url(const char* url) {
@@ -3079,7 +3077,6 @@ static bool open_external_url(const char* url) {
     }
     if (!host_ok && strcmp(url, "https://accounts.firefox.com/signup") == 0) host_ok = true;
     if (!host_ok && strcmp(url, kLinkUrSignup) == 0) host_ok = true;
-    if (!host_ok && strcmp(url, kLinkUrAuthCode) == 0) host_ok = true;
     if (!host_ok) return false;
 
     for (const char* c = url; *c; ++c) {

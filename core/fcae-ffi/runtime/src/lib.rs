@@ -37,6 +37,7 @@ pub mod proxy_core_tun;
 pub mod proxy_core_tun;
 pub mod desktop_flow_routing;
 pub mod desktop_app_routing;
+pub mod direct_egress;
 pub mod backend;
 pub mod native_chain;
 pub mod config;

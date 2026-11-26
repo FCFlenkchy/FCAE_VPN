@@ -919,6 +919,10 @@ pub unsafe extern "C" fn fcae_start_with_app_routing(cfg:*const FcaeConfig,routi
         }
         fcae_runtime::desktop_flow_routing::submitted(policy.as_ref());
         parsed.app_routing=policy;
+        // DIRECT flows leave by the physical network. Where that has no IPv6
+        // the device must not offer it, or they are tried over it and fail.
+        #[cfg(any(windows,target_os="linux",target_os="macos"))]
+        fcae_runtime::direct_egress::settle_ipv6(&mut parsed);
         log::info!("[session] configuration accepted: backend={:?}, mode={:?}, TUN engine={:?}",
             parsed.backend, parsed.mode, parsed.tun.engine);
 

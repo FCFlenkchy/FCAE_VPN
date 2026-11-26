@@ -69,6 +69,19 @@ func (b *urBalance) display() string {
 	if total < 0 {
 		total = 0
 	}
+	// Data credited during the day -- a bonus, a referral, a new plan -- is in
+	// the balance at once and in the start-of-day figure only tomorrow. The
+	// total is never less than what the account holds now.
+	held := int64(0)
+	if b.Available > 0 {
+		held = b.Available
+	}
+	if b.Pending > 0 && held+b.Pending > held {
+		held += b.Pending
+	}
+	if held > total {
+		total = held
+	}
 	used := total
 	if b.Available > 0 {
 		if b.Available >= used {
