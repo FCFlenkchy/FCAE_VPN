@@ -72,7 +72,13 @@ inline void TextColoredWrapped(const ImVec4& color, const char* format, ...) {
 // Host touch/clipboard hooks. Editing and menus remain entirely in ImGui.
 inline bool (*touch_hold)(ImGuiID, const ImRect&) = nullptr;
 inline bool (*touch_menu)(ImGuiID) = nullptr;
+// Set by a host that cannot read its clipboard inside GetClipboardText() and
+// keeps a copy instead (Android): asks it to read the clipboard again. The
+// answer arrives on a later frame, and the host counts it in
+// clipboard_revision. A host that leaves this unset reads the clipboard
+// whenever it is asked for.
 inline void (*refresh_clipboard)() = nullptr;
+inline unsigned clipboard_revision = 0;
 namespace Detail {
 inline ImGuiContext* context = nullptr;
 inline ImGuiID select_id = 0, menu_id = 0, popup_id = 0, restore_id = 0, collapse_id = 0;

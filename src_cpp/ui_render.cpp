@@ -4081,6 +4081,16 @@ static std::vector<char> s_core_group_open;
 /// A group the list scrolls to the next time it is drawn, or -1: the one an
 /// import just made, which may be below everything that was already there.
 static int s_core_group_reveal = -1;
+/// The same for a config added by hand: the first one a paste just added,
+/// which goes under every row of its kind that was already there.
+static int s_core_row_reveal = -1;
+/// Set by "+ Paste" where the host reads its clipboard on a thread of its own:
+/// the paste is carried out on the frame that text arrives.
+static bool s_core_paste_pending = false;
+/// UiText::clipboard_revision when that read was asked for.
+static unsigned s_core_paste_revision = 0;
+/// When to stop waiting for it.
+static double s_core_paste_deadline = 0.0;
 /// Whether the subscription dialog is on screen. It says how a download is
 /// going itself, so the list behind it does not say it a second time.
 static bool s_core_import_visible = false;
@@ -4133,6 +4143,8 @@ static void open_core_configs() {
     // How a subscription download ended last time is not news any more.
     if (!s_core_import_in_progress) s_core_import_status[0] = 0;
     s_core_import_visible = false;
+    // Neither is a clipboard nobody was there to see arrive.
+    s_core_paste_pending = false;
 }
 
 /// Open the editor on `row`, or on a config that does not exist yet (`-1`).
@@ -5093,6 +5105,178 @@ static void poll_core_subscription_fetch() {
     }
 }
 
+// ---- Paste ------------------------------------------------------------------------
+//
+// "+ Paste" adds what the clipboard holds and asks nothing: share links, one
+// to a line, or one native config, either of them possibly base64-encoded.
+// That is what a subscription's body may be, and it is read by the same
+// parser, so each config goes under the first of Xray, sing-box and Mihomo
+// that accepts it. A lone web address that none of them runs as a proxy is
+// where a subscription is fetched from, and is imported as one.
+
+/// Whether `text` is one http(s) address and nothing else.
+static bool is_web_address(const std::string& text) {
+    if (text.size() >= sizeof(s_core_import_url)) return false;
+    if (!subscription_line_opens_with(text, "https://") && !subscription_line_opens_with(text, "http://"))
+        return false;
+    return std::none_of(text.begin(), text.end(), [](unsigned char c) {
+        return std::isspace(c) != 0 || std::iscntrl(c) != 0;
+    });
+}
+
+/// Whether a web address names a user or a port, the way one that is a proxy
+/// does: `https://user:secret@host`, `http://10.0.0.1:8080`. The link grammar
+/// also reads a bare `https://host` as an open proxy on port 443, but nobody
+/// shares a proxy like that and every site's address looks like it, so one
+/// that names neither is never offered to the cores.
+static bool web_address_names_proxy(const std::string& url) {
+    const size_t begin = url.find("://") + 3;
+    const size_t end = url.find_first_of("/?#", begin);
+    const std::string authority = url.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+    if (authority.find('@') != std::string::npos) return true;
+    // A colon inside brackets belongs to an IPv6 address.
+    const size_t colon = authority.rfind(':');
+    return colon != std::string::npos && colon + 1 < authority.size()
+        && authority.find(']', colon) == std::string::npos;
+}
+
+/// Add what `clipboard` holds to the configs added by hand, and say on the
+/// list's status line what became of it.
+static void paste_core_configs(const char* clipboard) {
+    const std::string text = trim_subscription_text(clipboard ? clipboard : "");
+    if (text.empty()) {
+        set_core_import_status(true, false, "The clipboard holds no text.");
+        return;
+    }
+    if (text.size() > FCAE_SUBSCRIPTION_MAX_BODY) {
+        set_core_import_status(true, false, "The clipboard holds more than %u MiB of text.",
+                               (unsigned)(FCAE_SUBSCRIPTION_MAX_BODY / (1024u * 1024u)));
+        return;
+    }
+    const bool web_address = is_web_address(text);
+    SubscriptionParse parsed;
+    if (!web_address || web_address_names_proxy(text)) parsed = parse_core_subscription(text);
+    if (parsed.profiles.empty() && web_address) {
+        // The same URL is the group that already exists: it is refreshed, the
+        // way the import dialog does it.
+        int existing = -1;
+        for (int g = 0; g < (int)g_app.core_groups.size() && existing < 0; ++g)
+            if (g_app.core_groups[(size_t)g].url == text) existing = g;
+        begin_core_subscription_fetch(existing, text, {}, kCoreFetchImport);
+        return;
+    }
+    if (parsed.profiles.empty()) {
+        set_core_import_status(true, false, "Nothing was added: %s", sentence_end(
+            parsed.first_problem.empty() ? "the clipboard holds no config" : parsed.first_problem).c_str());
+        return;
+    }
+    const auto taken = [](const std::string& name) { return !core_config_name_free(name.c_str(), -1); };
+    int added = 0;
+    int known = 0;
+    int per_core[3] = {};
+    int first_row = -1;
+    for (SubscriptionProfile& profile : parsed.profiles) {
+        // Pasting the same text twice is one config, not two: without this a
+        // second press doubles a list that has no way to remove rows in bulk.
+        const bool saved = std::any_of(g_app.core_configs.begin(), g_app.core_configs.end(),
+            [&](const AppState::CoreConfigEntry& entry) {
+                return core_config_group(entry) < 0 && entry.backend == profile.backend
+                    && entry.text == profile.text;
+            });
+        if (saved) {
+            ++known;
+            continue;
+        }
+        if (g_app.core_configs.size() >= (size_t)kMaxCoreConfigs) {
+            ++parsed.skipped;
+            if (parsed.first_problem.empty()) parsed.first_problem = core_list_limit_text();
+            continue;
+        }
+        AppState::CoreConfigEntry entry;
+        entry.backend = profile.backend;
+        entry.name = profile.name.empty() ? numbered_config_name(profile.text, profile.backend, taken)
+                                          : unique_core_name(profile.name, taken);
+        entry.text = std::move(profile.text);
+        AppState::refresh_core_listeners(entry);
+        if (first_row < 0) first_row = (int)g_app.core_configs.size();
+        ++per_core[std::clamp(entry.backend, 0, 2)];
+        g_app.core_configs.push_back(std::move(entry));
+        ++added;
+    }
+    if (added == 0 && known == 0) {
+        // Every one of them ran into the list's limit.
+        set_core_import_status(true, false, "Nothing was added: %s", sentence_end(parsed.first_problem).c_str());
+        return;
+    }
+    std::string message;
+    char part[192];
+    if (added == 1) {
+        const AppState::CoreConfigEntry& entry = g_app.core_configs[(size_t)first_row];
+        snprintf(part, sizeof(part), "Added \"%s\" (%s).", entry.name.c_str(),
+                 AppState::core_backend_name(entry.backend));
+        message = part;
+    } else if (added > 1) {
+        // Which cores took them, where it was not one core for all of them.
+        std::string cores;
+        int cores_used = 0;
+        for (int backend = 0; backend < 3; ++backend) {
+            if (!per_core[backend]) continue;
+            snprintf(part, sizeof(part), "%s%d %s", cores.empty() ? "" : ", ", per_core[backend],
+                     AppState::core_backend_name(backend));
+            cores += part;
+            ++cores_used;
+        }
+        if (cores_used == 1) snprintf(part, sizeof(part), "Added %s configs.", cores.c_str());
+        else snprintf(part, sizeof(part), "Added %d configs: %s.", added, cores.c_str());
+        message = part;
+    }
+    if (known > 0) {
+        if (added > 0) snprintf(part, sizeof(part), " %d more %s already saved.", known, known == 1 ? "was" : "were");
+        else if (known == 1) snprintf(part, sizeof(part), "This config is already saved.");
+        else snprintf(part, sizeof(part), "These %d configs are already saved.", known);
+        message += part;
+    }
+    if (parsed.skipped > 0) {
+        snprintf(part, sizeof(part), "%sSkipped %d line%s", message.empty() ? "" : " ", parsed.skipped,
+                 parsed.skipped == 1 ? "" : "s");
+        message += part;
+        message += parsed.first_problem.empty() ? "." : ": " + sentence_end(parsed.first_problem);
+    }
+    if (added > 0) s_core_row_reveal = first_row;
+    set_core_import_status(false, added == 0 || parsed.skipped > 0, "%s", message.c_str());
+}
+
+/// "+ Paste" was pressed.
+static void request_core_paste() {
+    if (!UiText::refresh_clipboard) {
+        paste_core_configs(ImGui::GetClipboardText());
+        return;
+    }
+    // This host hands ImGui a copy of the clipboard and reads the real one on
+    // its own thread, so what is there now arrives a frame or two from here.
+    s_core_paste_pending = true;
+    s_core_paste_revision = UiText::clipboard_revision;
+    s_core_paste_deadline = ui_now_seconds() + 3.0;
+    UiText::refresh_clipboard();
+    ui_request_redraw();
+}
+
+/// Carry out a paste whose clipboard has arrived, or give up on one that never
+/// will. Called on every frame the saved-configs dialog draws.
+static void poll_core_paste() {
+    if (!s_core_paste_pending) return;
+    if (UiText::clipboard_revision != s_core_paste_revision) {
+        s_core_paste_pending = false;
+        paste_core_configs(ImGui::GetClipboardText());
+    } else if (ui_now_seconds() >= s_core_paste_deadline) {
+        s_core_paste_pending = false;
+        set_core_import_status(true, false, "Could not read the clipboard.");
+    } else {
+        // Frames are what brings the answer, and the deadline, round.
+        ui_request_redraw();
+    }
+}
+
 /// Validate the editor's buffers against the rules the engine parses the
 /// library with, so a config that saves is a config that runs: the name is a
 /// reference in that document and must be unique, the profile has to parse for
@@ -5577,9 +5761,35 @@ static void render_core_library() {
     const ImGuiStyle& style = ImGui::GetStyle();
     if (s_core_group_open.size() != g_app.core_groups.size())
         s_core_group_open.resize(g_app.core_groups.size(), 0);
-    // The list takes what the buttons under it and Close leave.
+    // The buttons under the list and the count beside them, on as many rows
+    // as the dialog's width makes of them: one on a desktop, two on a phone.
+    // Worked out before the list is drawn, because the list takes what they
+    // and Close leave.
+    static const char* const kButtons[] = { "+ Add config", "+ Paste", "+ Import URL" };
+    char count_text[32];
+    snprintf(count_text, sizeof(count_text), "%d/%d", (int)g_app.core_configs.size(), kMaxCoreConfigs);
+    float item_width[4];
+    for (int i = 0; i < 3; ++i)
+        item_width[i] = ImGui::CalcTextSize(kButtons[i]).x + style.FramePadding.x * 2.0f;
+    item_width[3] = ImGui::CalcTextSize(count_text).x;
+    // Whether an item goes beside the one before it.
+    bool beside[4] = {};
+    int button_rows = 1;
+    {
+        const float row_width = ImGui::GetContentRegionAvail().x;
+        float used = item_width[0];
+        for (int i = 1; i < 4; ++i) {
+            beside[i] = used + style.ItemSpacing.x + item_width[i] <= row_width;
+            if (beside[i]) {
+                used += style.ItemSpacing.x + item_width[i];
+            } else {
+                used = item_width[i];
+                ++button_rows;
+            }
+        }
+    }
     const float list_height = (std::max)(146.0f,
-        ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f);
+        ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * (float)(button_rows + 1));
     // What a subscription download is doing, or how the last one ended, is said
     // on a strip along the bottom of the list's own frame, up to three lines of
     // it. The message takes itself down again (expire_core_import_status), and
@@ -5613,8 +5823,12 @@ static void render_core_library() {
     int remove_row = -1;
     int refresh_group = -1;
     int manage_group = -1;
-    for (int i = 0; i < (int)g_app.core_configs.size(); ++i)
-        if (core_config_group(g_app.core_configs[(size_t)i]) < 0) core_config_row(i, edit_row, remove_row);
+    for (int i = 0; i < (int)g_app.core_configs.size(); ++i) {
+        if (core_config_group(g_app.core_configs[(size_t)i]) >= 0) continue;
+        core_config_row(i, edit_row, remove_row);
+        if (i == s_core_row_reveal) ImGui::SetScrollHereY(0.0f);
+    }
+    s_core_row_reveal = -1;
     for (int g = 0; g < (int)g_app.core_groups.size(); ++g) {
         const bool open = core_group_header(g, refresh_group, manage_group);
         if (g == s_core_group_reveal) ImGui::SetScrollHereY(0.0f);
@@ -5655,16 +5869,24 @@ static void render_core_library() {
     // library that does not start, and a draft is not a config yet. The count
     // beside it is the list's place in the library the engine accepts, and
     // nothing gates on it: the limit is there to be read, not to be hit.
-    if (ImGui::Button("+ Add config")) open_core_editor(-1);
-    const float import_button_width = ImGui::CalcTextSize("+ Import URL").x
-        + ImGui::GetStyle().FramePadding.x * 2.0f;
-    if (ImGui::GetContentRegionAvail().x >= import_button_width + ImGui::GetStyle().ItemSpacing.x + 44.0f)
-        ImGui::SameLine();
-    if (ImGui::Button("+ Import URL")) open_core_subscription_import(-1);
-    if (ImGui::GetContentRegionAvail().x >= 44.0f) ImGui::SameLine();
-    ImGui::TextDisabled("%d/%d", (int)g_app.core_configs.size(), kMaxCoreConfigs);
+    if (ImGui::Button(kButtons[0])) open_core_editor(-1);
+    if (beside[1]) ImGui::SameLine();
+    // One thing at a time on the status line: a paste waits for the download
+    // that is writing there, and for the clipboard it has already asked for.
+    ImGui::BeginDisabled(s_core_import_in_progress || s_core_paste_pending);
+    const bool paste = ImGui::Button(kButtons[1]);
+    ImGui::EndDisabled();
+    core_button_tooltip(paste,
+        "Add what is on the clipboard: share links, a native config or a subscription URL. "
+        "Each config goes under the first of Xray, sing-box and Mihomo that accepts it.");
+    if (beside[2]) ImGui::SameLine();
+    if (ImGui::Button(kButtons[2])) open_core_subscription_import(-1);
+    if (beside[3]) ImGui::SameLine();
+    else ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", count_text);
 
     // After the loops, so nothing reads a vector whose size changed under it.
+    if (paste) request_core_paste();
     if (edit_row >= 0) open_core_editor(edit_row);
     if (remove_row >= 0) {
         g_app.core_configs.erase(g_app.core_configs.begin() + remove_row);
@@ -5691,6 +5913,10 @@ static void render_core_configs() {
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(modal_size(760.0f, 720.0f), ImGuiCond_Always);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
+
+    // Before the list is drawn, so the frame the clipboard arrives on already
+    // shows what was pasted.
+    poll_core_paste();
 
     // Two pages, because one could not hold both: the listeners and the log
     // level under the list left it a few rows and still pushed Close off the

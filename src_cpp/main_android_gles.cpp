@@ -552,6 +552,8 @@ Java_com_fc_fcaevpn_ImGuiBridge_nativeText(JNIEnv* env, jclass, jstring value) {
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeClipboard(JNIEnv* env, jclass, jstring value) {
     clipboard = native_string(env, value);
+    // Whoever asked for this read ("+ Paste") is waiting for it.
+    ++UiText::clipboard_revision;
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_ImGuiBridge_nativeVisibility(JNIEnv*, jclass, jboolean visible) {
